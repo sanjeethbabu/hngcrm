@@ -1,0 +1,7332 @@
+import React, { useState, useRef, useEffect, useMemo } from 'react';
+import { useCloudinaryUpload, getFileUrl } from '../../hooks/useCloudinaryUpload';
+import useTabAccess from '../../hooks/useTabAccess';
+import usePageAccess from '../../hooks/usePageAccess';
+import {
+  Row, Col, Card, Table, Tag, Button, Modal, Form, Input, Select, Typography, Space,
+  DatePicker, Upload, InputNumber, Divider, List, Descriptions, Tabs, Avatar, Switch,
+  Tooltip, Badge, Popover, Dropdown, Checkbox, Radio, AutoComplete,
+  Alert,
+} from 'antd';
+import {
+  PlusOutlined, DownloadOutlined, ShoppingOutlined, SearchOutlined,
+  UploadOutlined, EyeOutlined, EditOutlined, FileTextOutlined, WarningOutlined, InfoCircleOutlined, WhatsAppOutlined,
+  TeamOutlined, ContactsOutlined, LeftOutlined, CheckOutlined, UserOutlined, CameraOutlined,
+  ThunderboltOutlined, RobotOutlined, MessageOutlined, BellOutlined, CloseOutlined, ClockCircleOutlined, ReloadOutlined, SaveOutlined, TruckOutlined, CheckCircleOutlined,
+  MoreOutlined, MinusOutlined, QrcodeOutlined, ExclamationCircleOutlined, PhoneOutlined, CarOutlined, SyncOutlined, SendOutlined,
+  DollarCircleOutlined
+} from '@ant-design/icons';
+import { useSelector, useDispatch } from 'react-redux';
+import { addRaisedRequest, addBulkRequests, dismissNewProductRequest, updateRequestQty, addRequestNote, updateQuotationDetails, setRaisedRequests, setPurchaseOrders } from '../../store/slices/purchaseSlice';
+import {
+  useGetVendorsQuery,
+  useCreateVendorMutation,
+  useGetItemsQuery,
+  useGetRequestsQuery,
+  useGetPurchaseOrdersQuery,
+  useGetLocalPurchasesQuery,
+  useRaiseRequestMutation,
+  useRecordQuotationAskMutation,
+  useCreateBulkRequestMutation,
+  useUploadQuotationFileMutation,
+  useScanQuotationFileMutation,
+  useScanVendorDocumentMutation,
+  useUpdatePurchaseRequestDetailsMutation,
+  useReceiveOrderMutation,
+  useScanReceivedInvoiceMutation,
+  useResolveMissingOrderMutation,
+  useUpdatePurchaseOrderActionTakenMutation,
+  useUploadPurchaseLRMutation,
+  useScanPurchaseLRMutation,
+  useScanLocalPurchaseInvoiceMutation,
+  useCreateLocalPurchaseMutation,
+  useGetPurchasePersonsQuery,
+  useCreatePurchasePersonMutation,
+  useGetWhatsAppEventMappingsQuery,
+  useUploadFilesMutation,
+  useSendWhatsAppMessageMutation,
+  useAddPurchaseNoteMutation,
+  useCompareQuotationsMutation,
+  useSelectBestQuotationMutation,
+  useGetPickupOrdersQuery,
+  useGetMaterialStocksQuery,
+} from '../../store/api/apiSlice';
+import { motion } from 'framer-motion';
+import html2pdf from 'html2pdf.js';
+import { enqueueSnackbar } from 'notistack';
+import PageBreadcrumb from '../../components/common/PageBreadcrumb';
+import PhoneInput from '../../components/common/PhoneInput';
+import VendorBankFields from '../../components/common/VendorBankFields';
+import { emailRules, phoneValidator } from '../../utils/validation';
+import { formatQty, formatRate } from '../../utils/numberFormat';
+import { viewFile, downloadFile } from '../../utils/fileDownload';
+import dayjs from 'dayjs';
+
+const { Title, Text } = Typography;
+const { Option } = Select;
+
+// Local Purchase item rows offer these as pick-first suggestions for the Unit field —
+// covers liquids/weighed goods (Litres/Kg) as well as piece-counted goods (Pcs), so
+// oil/paste-type purchases aren't stuck defaulting to Pcs. Still free-text editable
+// (AutoComplete, not a closed Select) for anything not in this list.
+const COMMON_UNIT_OPTIONS = [
+  'Litres', 'Kg', 'ml', 'Gram', 'Pcs', 'Box', 'Bottle', 'Packet', 'Dozen', 'Set', 'Bag',
+].map((u) => ({ value: u }));
+
+// All data loaded from backend API via useEffect
+
+const exportToCSV = (headers, rows, filename) => {
+  const csv = [headers, ...rows]
+    .map(r => r.map(c => `"${String(c ?? '').replace(/"/g, '""')}"`).join(','))
+    .join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+};
+
+const formatBankDetails = (bank) => {
+  if (!bank) return '';
+  if (typeof bank === 'string') return bank;
+  if (bank.method === 'upi') return [bank.upiId, bank.upiNumber].filter(Boolean).join(' · ');
+  return [bank.bankName, bank.accountHolderName, bank.accountNo, bank.ifsc].filter(Boolean).join(' · ');
+};
+
+// All data loaded from backend API via useEffect below
+
+// Marks which inventory items already had "Ask Quotation" sent, so the row keeps
+// showing "Raise Request" (instead of reverting to "Ask Quotation") across a page
+// refresh — there's no backend record for this in-between state yet, so it's kept
+// in localStorage rather than lost as plain component state.
+const WHATSAPP_SENT_ITEMS_STORAGE_KEY = 'purchase_whatsappSentItems';
+const loadWhatsappSentItems = () => {
+  try {
+    const raw = localStorage.getItem(WHATSAPP_SENT_ITEMS_STORAGE_KEY);
+    return raw ? new Set(JSON.parse(raw)) : new Set();
+  } catch {
+    return new Set();
+  }
+};
+const saveWhatsappSentItems = (set) => {
+  try { localStorage.setItem(WHATSAPP_SENT_ITEMS_STORAGE_KEY, JSON.stringify([...set])); } catch { /* best-effort */ }
+};
+
+// Captures the supplier + quantity chosen during "Ask Quotation" per item, so the
+// Raise Request modal can carry them over instead of asking again.
+const ASK_QUOTATION_DETAILS_STORAGE_KEY = 'purchase_askQuotationDetails';
+const loadAskQuotationDetails = () => {
+  try {
+    const raw = localStorage.getItem(ASK_QUOTATION_DETAILS_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+};
+const saveAskQuotationDetails = (map) => {
+  try { localStorage.setItem(ASK_QUOTATION_DETAILS_STORAGE_KEY, JSON.stringify(map)); } catch { /* best-effort */ }
+};
+
+export default function Purchase() {
+  const makeUpload = useCloudinaryUpload();
+  const isDark = useSelector((s) => s.theme.isDark);
+  const dispatch = useDispatch();
+  const raisedRequests = useSelector((s) => s.purchase.raisedRequests);
+  const purchaseOrders = useSelector((s) => s.purchase.purchaseOrders);
+  const newProductRequests = useSelector((s) => s.purchase.newProductRequests);
+  // A batch's PurchaseOrder is consolidated into ONE document (batchId), so siblings 2..N
+  // in a batch don't have their own requestKey match — resolve via batchId first.
+  const findLinkedOrder = (req) => purchaseOrders.find(o =>
+    (req?.batchId && o.batchId === req.batchId) || o.requestKey === req?.key
+  );
+  // A purchase cycle is "closed" once its order has been fully received & stock credited
+  // (dispatchStatus === 'Received'). Without this, the Inventory Stock Availability table
+  // keeps matching that old, completed request/order forever — so the next time the same
+  // item drops low again, it shows stale Supplier/Payment/LR data from the PREVIOUS cycle
+  // instead of a fresh request state. Walk requests newest-first (backend already sorts
+  // -createdAt) and skip over any whose linked order is fully received.
+  //
+  // Matched by itemId (not just the display name) whenever both sides have one — two
+  // different InventoryItem records can share the same name (e.g. two "Loofahs" or
+  // "W/C Band" entries), and matching by name alone let a low-stock row pick up a
+  // stale/unrelated request for the OTHER same-named item, showing "Pending"/"Modify"
+  // instead of the correct "Ask Quotation" action for an item with no active request yet.
+  // Falls back to name-only matching for legacy/free-text requests with no itemId.
+  const findActiveRequestForItem = (item) => {
+    const itemObj = typeof item === 'string' ? { name: item, key: null } : (item || {});
+    return raisedRequests.find(req => {
+      const matches = itemObj.key && req.itemId
+        ? req.itemId === itemObj.key
+        : req.item === itemObj.name;
+      if (!matches) return false;
+      // "Bulk Purchase Request" creates a PurchaseRequest per selected item the instant
+      // it's added to the batch (createBulkRequestMutation) — status 'Pending' with NO
+      // quotationFiles/amount yet. Those only get attached afterwards, as a separate
+      // follow-up step, from that batch's own Pending row (handlePendingRowSave /
+      // handleBatchRowSave). If that follow-up is never done, the stub is really just an
+      // abandoned draft — nobody ever actually asked a supplier for a quotation — not a
+      // genuine outstanding request. Without this check it sits here as "active" forever,
+      // permanently blocking this item's own Ask Quotation action even after a completely
+      // separate, later, fully-received purchase cycle for the same item.
+      const isAbandonedBulkStub = req.requestType === 'bulk' && !(req.quotationFiles || []).length && req.amount == null;
+      if (isAbandonedBulkStub) return false;
+      const linkedOrder = findLinkedOrder(req);
+      return !linkedOrder || linkedOrder.dispatchStatus !== 'Received';
+    });
+  };
+  const cardBg = isDark ? '#1E1E2E' : '#ffffff';
+  const textColor = isDark ? '#e0e0e0' : '#1a1a2e';
+  const borderColor = isDark ? '#2a2a3a' : '#f0f0f0';
+
+  // ── Data from RTK Query ─────────────────────────────────────────────────
+  const { data: vendorData } = useGetVendorsQuery({ type: 'raw_material', limit: 500 });
+  const { data: itemsData } = useGetItemsQuery({ limit: 1000 });
+  const { data: requestsData } = useGetRequestsQuery({ limit: 500 });
+  const { data: purchaseOrdersData } = useGetPurchaseOrdersQuery({ limit: 500 });
+  const { data: localPurchasesData } = useGetLocalPurchasesQuery();
+  const { data: materialStocksData } = useGetMaterialStocksQuery();
+
+  const [raiseRequestMutation] = useRaiseRequestMutation();
+  const [recordQuotationAskMutation] = useRecordQuotationAskMutation();
+  const [createBulkRequestMutation] = useCreateBulkRequestMutation();
+  const [uploadQuotationFile] = useUploadQuotationFileMutation();
+  const [scanQuotationFile] = useScanQuotationFileMutation();
+  const [scanVendorDocument] = useScanVendorDocumentMutation();
+  const [updatePurchaseRequestDetails] = useUpdatePurchaseRequestDetailsMutation();
+  const [addPurchaseNoteMutation] = useAddPurchaseNoteMutation();
+  const { data: whatsAppMappingsData } = useGetWhatsAppEventMappingsQuery();
+  const [uploadFilesMutation] = useUploadFilesMutation();
+  const [sendWhatsAppMessageMutation] = useSendWhatsAppMessageMutation();
+  const [receiveOrderMutation] = useReceiveOrderMutation();
+  const [scanReceivedInvoiceMutation] = useScanReceivedInvoiceMutation();
+  const [resolveMissingOrderMutation] = useResolveMissingOrderMutation();
+  const [updateActionTakenMutation] = useUpdatePurchaseOrderActionTakenMutation();
+  const [uploadPurchaseLR] = useUploadPurchaseLRMutation();
+  const [scanPurchaseLR] = useScanPurchaseLRMutation();
+  const [createLocalPurchaseMutation] = useCreateLocalPurchaseMutation();
+  const [scanLocalPurchaseInvoice] = useScanLocalPurchaseInvoiceMutation();
+  const [createVendorMutation] = useCreateVendorMutation();
+  const { data: allVendorData } = useGetVendorsQuery({ limit: 500 });
+  const { data: purchasePersonsData } = useGetPurchasePersonsQuery();
+  const [createPurchasePersonMutation] = useCreatePurchasePersonMutation();
+
+  const suppliers = useMemo(() => (vendorData?.data || []).map((v) => ({
+    id: v._id, key: v._id, name: v.name, phone: v.phone,
+    email: v.email, address: v.address, bank: v.bankDetails,
+    taxId: v.taxId, status: v.status,
+  })), [vendorData]);
+
+  const vendors = useMemo(() => (allVendorData?.data || []).map((v) => ({
+    id: v._id, key: v._id, name: v.name, phone: v.phone,
+    email: v.email, address: v.address, bank: v.bankDetails,
+    totalPaid: 0, pending: 0, status: v.status,
+  })), [allVendorData]);
+
+  const purchasePersons = useMemo(() => (purchasePersonsData?.data || []).map((p) => ({
+    id: p._id, key: p._id, name: p.name, phone: p.phone, gPayNumber: p.gPayNumber,
+  })), [purchasePersonsData]);
+
+  const materialStocksList = useMemo(() => (materialStocksData?.data || []).map((s) => ({
+    key: s._id, code: s.materialCode, name: s.packingMaterial, size: s.size || '',
+    stockCount: s.stockCount || 0, hotelName: s.hotelName || '',
+  })), [materialStocksData]);
+
+  const inventoryItems = useMemo(() => (itemsData?.data || []).map((i) => ({
+    key: i._id, code: i.itemCode, name: i.itemName,
+    category: i.category, unit: i.unit, unitValue: i.unitValue || 0, current: i.currentStock,
+    min: i.minStock, max: i.minStock * 10,
+    price: `₹${formatRate(i.purchasePrice)}/${i.unit}`,
+    status: i.currentStock === 0 ? 'Out' : i.currentStock < i.minStock ? 'Low' : 'OK',
+    sellerName: i.vendorId?.name || null,
+    itemType: i.itemType || 'standard',
+    bulkSourceItemId: i.bulkSourceItemId?._id || i.bulkSourceItemId || null,
+  })), [itemsData]);
+
+  // Filled products are refilled from their Bulk Item via Inventory's Fill Stock action, not
+  // purchased directly — so a low-stock filled product must not surface here as a separate
+  // purchasable line alongside its own Bulk Item. Direct/standard products and Bulk Items
+  // themselves are unaffected and keep showing exactly as before.
+  const lowStockInventoryItems = useMemo(
+    () => inventoryItems.filter((i) => (i.status === 'Low' || i.status === 'Out') && i.itemType !== 'filled'),
+    [inventoryItems]
+  );
+
+  // Sync RTK Query data into Redux slices
+  useEffect(() => {
+    const mapped = (requestsData?.data || []).map((r) => ({
+      key: r._id, item: r.itemId?.itemName || r.itemName,
+      itemId: r.itemId?._id || r.itemId || null, vendorId: r.vendorId?._id || r.vendorId || null,
+      supplier: r.vendorId?.name || '-', qty: r.qty, unit: r.unit,
+      payment_terms: r.paymentTerms, date: r.createdAt?.slice(0, 10),
+      status: r.status, notes: r.notes || [], financeNote: r.financeNote || '',
+      requestType: r.requestType || 'individual', category: r.category || r.itemId?.category || 'Other',
+      batchId: r.batchId || null, quotationFiles: r.quotationFiles || [],
+      amount: r.amount ?? null, gstAmount: r.gstAmount ?? null,
+      cgstAmount: r.cgstAmount ?? null, sgstAmount: r.sgstAmount ?? null, igstAmount: r.igstAmount ?? null,
+    }));
+    if (mapped.length > 0) dispatch(setRaisedRequests(mapped));
+  }, [requestsData]);
+
+  useEffect(() => {
+    const mapped = (purchaseOrdersData?.data || []).map((o) => ({
+      key: o._id, requestKey: o.requestId?._id?.toString() || o.requestId?.toString() || null,
+      batchId: o.batchId || null,
+      item: o.itemId?.itemName || o.itemName,
+      supplier: o.vendorId?.name || '-',
+      qty: o.qty, unit: o.unit, amount: o.amount,
+      payment_terms: o.paymentTerms, date: o.createdAt?.slice(0, 10),
+      bill_no: o.billNo || '', inv_no: o.invNo || '',
+      status: o.paymentStatus, paid_amount: o.paidAmount || 0,
+      payment_proof: o.paymentProofUrl || null, paymentHistory: o.paymentHistory || [],
+      lrNumber: o.lrNumber || null, lrFileUrl: o.lrFileUrl || null,
+      lrReminderDate: o.lrReminderDate ? o.lrReminderDate.slice(0, 10) : null,
+      expectedDeliveryDate: o.expectedDeliveryDate ? o.expectedDeliveryDate.slice(0, 10) : null,
+      lrPaymentStatus: o.lrPaymentStatus || null,
+      billTotalAmount: o.billTotalAmount || 0,
+      lrGstAmount: o.lrGstAmount || 0, lrCgstAmount: o.lrCgstAmount || 0,
+      lrSgstAmount: o.lrSgstAmount || 0, lrIgstAmount: o.lrIgstAmount || 0,
+      dispatchStatus: o.dispatchStatus || 'Pending',
+    }));
+    if (mapped.length > 0) dispatch(setPurchaseOrders(mapped));
+  }, [purchaseOrdersData]);
+
+  useEffect(() => {
+    const mapped = (localPurchasesData?.data || []).map((lp) => ({
+      key: lp._id, date: lp.createdAt?.slice(0, 10),
+      lpCode: lp.lpCode,
+      invoiceNo: lp.invoiceNo, invoiceFile: lp.invoiceFileUrl,
+      vendorName: lp.vendorName, vendorPhone: lp.vendorPhone,
+      items: lp.items || [], totalAmount: lp.totalAmount, gstAmount: lp.gstAmount || 0,
+      cgstAmount: lp.cgstAmount || 0, sgstAmount: lp.sgstAmount || 0, igstAmount: lp.igstAmount || 0,
+      paymentType: lp.paymentType, paymentStatus: lp.paymentStatus,
+      paymentProof: lp.paymentProofUrl, gPayNumber: lp.gPayNumber,
+      paidBy: lp.paidBy, paidDate: lp.paidDate?.slice(0, 10),
+      purchasePersonName: lp.purchasePersonName || '', purchasePersonPhone: lp.purchasePersonPhone || '',
+      paidAmount: lp.paidAmount || 0,
+      balance: Math.max(0, (lp.totalAmount || 0) - (lp.paidAmount || 0)),
+      dueDate: lp.dueDate?.slice(0, 10),
+      paymentHistory: lp.paymentHistory || [],
+    }));
+    if (mapped.length > 0) setLocalPurchases(mapped);
+  }, [localPurchasesData]);
+
+  const [viewSupplier, setViewSupplier] = useState(null);
+  const [showAddSupplierModal, setShowAddSupplierModal] = useState(false);
+
+  const [supplierSearch, setSupplierSearch] = useState('');
+  const [supplierFilter, setSupplierFilter] = useState('all');
+  const [supplierDateRange, setSupplierDateRange] = useState(null);
+
+  const [supplierForm] = Form.useForm();
+  const { filterTabs } = useTabAccess('Purchase');
+  const { requireAccess } = usePageAccess('Purchase');
+
+  const [showAddPurchaseModal, setShowAddPurchaseModal] = useState(false);
+  const [selectedProduct, setSelectedProduct] = useState(null);
+  const [purchaseForm] = Form.useForm();
+
+  const [viewApprovalDoc, setViewApprovalDoc] = useState(null);
+  const [selectedSupplier, setSelectedSupplier] = useState(null);
+
+  /* ── History material search ── */
+  const [supplierHistorySearch, setSupplierHistorySearch] = useState('');
+
+  /* ── AI scan state ── */
+  const [supplierScanLoading, setSupplierScanLoading] = useState(false);
+  const [supplierScannedFile, setSupplierScannedFile] = useState(null);
+  const [quotationFile, setQuotationFile] = useState(null);
+  const [quotationScanLoading, setQuotationScanLoading] = useState(false);
+
+  /* ── Raise Request modal (separate from Ask Quotation) ── */
+  const [showRaiseRequestModal, setShowRaiseRequestModal] = useState(false);
+  const [raiseRequestProduct, setRaiseRequestProduct] = useState(null);
+  const [raiseRequestSupplier, setRaiseRequestSupplier] = useState(null);
+  const [raiseRequestFile, setRaiseRequestFile] = useState(null);
+  const [raiseRequestScanLoading, setRaiseRequestScanLoading] = useState(false);
+  const [raiseRequestPaymentTerms, setRaiseRequestPaymentTerms] = useState('');
+  const [raiseRequestAmount, setRaiseRequestAmount] = useState(null);
+  const [raiseRequestGstAmount, setRaiseRequestGstAmount] = useState(null);
+  // CGST/SGST/IGST split off the scanned quotation — carried onto the PurchaseRequest (and
+  // then the PurchaseOrder) so an inter-state quotation's Input GST reports as IGST.
+  const [raiseRequestGstSplit, setRaiseRequestGstSplit] = useState(null);
+  const [raiseRequestForm] = Form.useForm();
+  const raiseReqQtyWatch = Form.useWatch('qty', raiseRequestForm);
+  const raiseReqUnitWatch = Form.useWatch('unit', raiseRequestForm);
+
+  /* ── Re-Request Quotation modal (Rejected requests — upload revised file + amount) ── */
+  const [showRerequestModal, setShowRerequestModal] = useState(false);
+  const [rerequestTarget, setRerequestTarget] = useState(null);
+  const [rerequestFile, setRerequestFile] = useState(null);
+  const [rerequestAmount, setRerequestAmount] = useState(null);
+  const [rerequestGstAmount, setRerequestGstAmount] = useState(null);
+  const [rerequestGstSplit, setRerequestGstSplit] = useState(null);
+  const [rerequestScanLoading, setRerequestScanLoading] = useState(false);
+  const [rerequestSubmitting, setRerequestSubmitting] = useState(false);
+
+  /* ── Update Order Details modal (Approved requests — edit & resend to Finance for re-approval) ── */
+  const [showUpdateDetailsModal, setShowUpdateDetailsModal] = useState(false);
+  const [updateDetailsTarget, setUpdateDetailsTarget] = useState(null);
+  const [updateDetailsForm] = Form.useForm();
+  const [updateDetailsSubmitting, setUpdateDetailsSubmitting] = useState(false);
+
+  /* ── Update Order Details — bulk batch variant: one modal listing every product
+     in the batch as a single row (qty/unit/amount only — payment terms aren't
+     editable per-product for a bulk request) instead of one modal per product. ── */
+  const [showBatchUpdateDetailsModal, setShowBatchUpdateDetailsModal] = useState(false);
+  const [batchUpdateDetailsTarget, setBatchUpdateDetailsTarget] = useState(null);
+  const [batchUpdateDetailsForm] = Form.useForm();
+  const [batchUpdateDetailsSubmitting, setBatchUpdateDetailsSubmitting] = useState(false);
+
+  /* ── WhatsApp sent tracking for stock status flow (persisted so it survives a refresh) ── */
+  const [whatsappSentItems, setWhatsappSentItemsState] = useState(loadWhatsappSentItems);
+  const setWhatsappSentItems = (updater) => {
+    setWhatsappSentItemsState((prev) => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      saveWhatsappSentItems(next);
+      return next;
+    });
+  };
+
+  /* ── Supplier + qty captured per item at Ask Quotation time (persisted so Raise Request can reuse them) ── */
+  const [askQuotationDetails, setAskQuotationDetailsState] = useState(loadAskQuotationDetails);
+  const setAskQuotationDetails = (updater) => {
+    setAskQuotationDetailsState((prev) => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      saveAskQuotationDetails(next);
+      return next;
+    });
+  };
+
+  /* ── Place Order modal ── */
+  const [showPlaceOrderModal, setShowPlaceOrderModal] = useState(false);
+  const [selectedPlaceOrderItem, setSelectedPlaceOrderItem] = useState(null);
+  const [selectedPlaceOrderReq, setSelectedPlaceOrderReq] = useState(null);
+
+  /* ── Bulk Purchase modal ── */
+  const [showBulkPurchaseModal, setShowBulkPurchaseModal] = useState(false);
+  const [bulkSupplierName, setBulkSupplierName] = useState('');
+  const [bulkItems, setBulkItems] = useState([]);
+  const [bulkPayTerms, setBulkPayTerms] = useState('');
+  const [bulkReminderDate, setBulkReminderDate] = useState(null);
+  const [bulkQuotationAsked, setBulkQuotationAsked] = useState(false);
+  const [bulkAskingQuotation, setBulkAskingQuotation] = useState(false);
+  const bulkSelectedItems = useMemo(() => bulkItems.filter(i => i.selected), [bulkItems]);
+  const bulkQtyValid = bulkSelectedItems.length > 0 && bulkSelectedItems.every(i => Number(i.qty) > 0);
+  const bulkReminderRequired = !!bulkPayTerms && bulkPayTerms !== '100% Payment';
+  const bulkReminderValid = !bulkReminderRequired || !!bulkReminderDate;
+
+  /* ── Inline Upload+Amount completion for Pending rows in the Bulk Purchase
+     Requests table — lets Purchase attach/update the quotation straight from
+     the row's Action column instead of reopening the raise modal. Keyed by
+     request id (r.key). ── */
+  const [pendingRowFile, setPendingRowFile] = useState({});
+  const [pendingRowAmount, setPendingRowAmount] = useState({});
+  const [pendingRowGstAmount, setPendingRowGstAmount] = useState({});
+  const [pendingRowSaving, setPendingRowSaving] = useState({});
+  const [pendingRowScanLoading, setPendingRowScanLoading] = useState({});
+  // Per-row CGST/SGST/IGST split from the scanned quotation, keyed the same as pendingRowGstAmount.
+  const [pendingRowGstSplit, setPendingRowGstSplit] = useState({});
+
+  // Reads the CGST/SGST/IGST amounts off a scanQuotationFile result (the extractor returns
+  // them separately — inter-state quotations carry IGST only, intra-state carry CGST+SGST).
+  const readGstSplit = (scanned) => ({
+    cgstAmount: Number(scanned?.cgstAmount) || 0,
+    sgstAmount: Number(scanned?.sgstAmount) || 0,
+    igstAmount: Number(scanned?.igstAmount) || 0,
+  });
+  // Appends whichever of CGST/SGST/IGST are non-zero to an uploadQuotationFile FormData,
+  // alongside the `gstAmount` the callers already append.
+  const appendGstSplit = (fd, split) => {
+    if (!split) return;
+    if (split.cgstAmount) fd.append('cgstAmount', split.cgstAmount);
+    if (split.sgstAmount) fd.append('sgstAmount', split.sgstAmount);
+    if (split.igstAmount) fd.append('igstAmount', split.igstAmount);
+  };
+  const interStateNote = (split) => (split && split.igstAmount > 0 ? ' · Inter-state (IGST)' : '');
+
+  // AI-scans the quotation picked for a Bulk Purchase Request's Pending row (single
+  // item or whole batch) and auto-fills Amount/GST — same scanQuotationFile flow +
+  // extraction as the individual product's Raise Request AI Scan (handleRaiseRequestAIScan),
+  // just without a single product to match a line-item qty against.
+  //
+  // A batch group's single uploaded quotation covers several products, so the AI's
+  // extracted line items are matched (via matchScannedItem) against each product in
+  // the batch and stored per-child — this is what lets the batch group's action cell
+  // show and save a DIFFERENT amount per product instead of stamping the whole
+  // document total on every product (see handleBatchRowSave). The document total is
+  // still kept on the group key as a fallback for any product AI couldn't match.
+  const handlePendingRowAIScan = async (r) => {
+    const file = pendingRowFile[r.key];
+    if (!file) { enqueueSnackbar('Please upload the quotation file first', { variant: 'warning' }); return; }
+    setPendingRowScanLoading(prev => ({ ...prev, [r.key]: true }));
+    try {
+      const fd = new FormData();
+      fd.append('quotation', file);
+      const extracted = await scanQuotationFile(fd).unwrap();
+      const scanned = extracted?.data || {};
+      const totalAmount = Number(scanned.totalAmount) || 0;
+      const gstAmount = Number(scanned.gstAmount) || 0;
+      const gstSplit = readGstSplit(scanned);
+      if (gstAmount) setPendingRowGstAmount(prev => ({ ...prev, [r.key]: gstAmount }));
+      if (gstSplit.cgstAmount || gstSplit.sgstAmount || gstSplit.igstAmount) {
+        setPendingRowGstSplit(prev => ({ ...prev, [r.key]: gstSplit }));
+      }
+
+      if (r.isBatchGroup && (r.children || []).length) {
+        if (totalAmount) setPendingRowAmount(prev => ({ ...prev, [r.key]: totalAmount }));
+        let matchedCount = 0;
+        const usedItems = new Set();
+        r.children.forEach((child) => {
+          const match = matchScannedItem(scanned.items, child.item, usedItems);
+          if (match && Number(match.amount) > 0) {
+            usedItems.add(match);
+            matchedCount += 1;
+            setPendingRowAmount(prev => ({ ...prev, [child.key]: Number(match.amount) }));
+          }
+        });
+        enqueueSnackbar(
+          matchedCount
+            ? `AI matched ${matchedCount} of ${r.children.length} product(s) to its own amount — review below.`
+            : `Couldn't match individual products on the quotation — using the document total (₹${totalAmount.toLocaleString()}) for all, please verify.`,
+          { variant: matchedCount === r.children.length ? 'success' : 'warning' }
+        );
+      } else {
+        // Single product's own pending row: verify the invoice actually names this
+        // product, and — if it's a multi-product invoice sharing one total — use that
+        // product's own line amount instead of the whole document total.
+        const { match, amount, isMultiProduct, itemCount } = resolveScannedAmount(scanned, r.item);
+        if (amount) setPendingRowAmount(prev => ({ ...prev, [r.key]: amount }));
+        if (isMultiProduct && !match) {
+          enqueueSnackbar(`This quotation lists ${itemCount} products but "${r.item}" couldn't be matched by name — using the document total (₹${totalAmount.toLocaleString()}), please verify.`, { variant: 'warning' });
+        } else if (isMultiProduct) {
+          enqueueSnackbar(`Matched "${r.item}" on a ${itemCount}-product quotation — Amount: ₹${amount.toLocaleString()} (this product's own line total), GST: ₹${gstAmount.toLocaleString()}${interStateNote(gstSplit)}`, { variant: 'success' });
+        } else {
+          enqueueSnackbar(`AI extracted — Amount: ₹${amount.toLocaleString()}, GST: ₹${gstAmount.toLocaleString()}${interStateNote(gstSplit)}`, { variant: 'success' });
+        }
+      }
+    } catch (err) {
+      enqueueSnackbar(err?.data?.message || 'AI extraction failed — please enter the details manually', { variant: 'error' });
+    } finally {
+      setPendingRowScanLoading(prev => ({ ...prev, [r.key]: false }));
+    }
+  };
+
+  const handlePendingRowSave = async (r) => {
+    const file = pendingRowFile[r.key];
+    const amount = pendingRowAmount[r.key];
+    const gstAmount = pendingRowGstAmount[r.key];
+    if (!file) { enqueueSnackbar('Select the quotation file to upload', { variant: 'warning' }); return; }
+    if (amount == null) { enqueueSnackbar('Enter the quoted amount', { variant: 'warning' }); return; }
+    setPendingRowSaving(prev => ({ ...prev, [r.key]: true }));
+    try {
+      const fd = new FormData();
+      fd.append('quotation', file);
+      fd.append('amount', amount);
+      if (gstAmount != null) fd.append('gstAmount', gstAmount);
+      appendGstSplit(fd, pendingRowGstSplit[r.key]);
+      await uploadQuotationFile({ id: r.key, formData: fd }).unwrap();
+      setPendingRowFile(prev => { const n = { ...prev }; delete n[r.key]; return n; });
+      setPendingRowAmount(prev => { const n = { ...prev }; delete n[r.key]; return n; });
+      setPendingRowGstAmount(prev => { const n = { ...prev }; delete n[r.key]; return n; });
+      setPendingRowGstSplit(prev => { const n = { ...prev }; delete n[r.key]; return n; });
+      enqueueSnackbar('Quotation & amount saved', { variant: 'success' });
+    } catch (err) {
+      enqueueSnackbar(err?.data?.message || 'Failed to save quotation', { variant: 'error' });
+    } finally {
+      setPendingRowSaving(prev => ({ ...prev, [r.key]: false }));
+    }
+  };
+
+  // Per-product amount for a batch group's child: the product's own AI-matched/
+  // manually-entered value, falling back to the batch's overall amount (typed
+  // manually, or the document total when AI couldn't match that particular
+  // product), falling back to whatever was already saved for it.
+  const batchChildAmount = (r, child) => pendingRowAmount[child.key] ?? pendingRowAmount[r.key] ?? child.amount ?? null;
+
+  /* ── Same upload+amount inline completion, but for a whole Bulk Purchase batch
+     group at once — one quotation upload covers every item in the batch instead
+     of asking Purchase to repeat the upload per line item, but each product still
+     gets its OWN amount (see batchChildAmount/handlePendingRowAIScan) so Finance
+     sees the correct per-product amount instead of the batch total repeated. ── */
+  const handleBatchRowSave = async (r) => {
+    const file = pendingRowFile[r.key];
+    const gstAmount = pendingRowGstAmount[r.key];
+    const children = r.children || [];
+    if (!file) { enqueueSnackbar('Select the quotation file to upload', { variant: 'warning' }); return; }
+    if (children.some((child) => batchChildAmount(r, child) == null)) {
+      enqueueSnackbar('Enter the quoted amount for every product', { variant: 'warning' });
+      return;
+    }
+    setPendingRowSaving(prev => ({ ...prev, [r.key]: true }));
+    try {
+      const gstSplit = pendingRowGstSplit[r.key];
+      await Promise.all(children.map((child) => {
+        const fd = new FormData();
+        fd.append('quotation', file);
+        fd.append('amount', batchChildAmount(r, child));
+        if (gstAmount != null) fd.append('gstAmount', gstAmount);
+        appendGstSplit(fd, gstSplit);
+        return uploadQuotationFile({ id: child.key, formData: fd }).unwrap();
+      }));
+      setPendingRowFile(prev => { const n = { ...prev }; delete n[r.key]; return n; });
+      setPendingRowAmount(prev => {
+        const n = { ...prev };
+        delete n[r.key];
+        children.forEach((child) => delete n[child.key]);
+        return n;
+      });
+      setPendingRowGstAmount(prev => { const n = { ...prev }; delete n[r.key]; return n; });
+      setPendingRowGstSplit(prev => { const n = { ...prev }; delete n[r.key]; return n; });
+      enqueueSnackbar('Quotation & amount saved for the whole batch', { variant: 'success' });
+    } catch (err) {
+      enqueueSnackbar(err?.data?.message || 'Failed to save quotation', { variant: 'error' });
+    } finally {
+      setPendingRowSaving(prev => ({ ...prev, [r.key]: false }));
+    }
+  };
+
+  /* ── WhatsApp reminder tracking (30-min intervals per inventory item key) ── */
+
+  /* ── Inventory item notes (stock_status tab) ── */
+  const [invItemNotes, setInvItemNotes] = useState({});    // { itemKey: [{text, ts}] }
+  const [invNoteInput, setInvNoteInput] = useState({});    // { itemKey: string }
+  const [openInvNotes, setOpenInvNotes] = useState(null);  // itemKey whose notes panel is open
+
+  /* ── Raised-request notes ── */
+  const [openReqNotes, setOpenReqNotes] = useState(null);  // requestKey
+  const [reqNoteInput, setReqNoteInput] = useState('');
+
+  /* ── Inline qty edit for raised requests ── */
+  const [editingReqKey, setEditingReqKey] = useState(null);
+  const [editQtyValue, setEditQtyValue] = useState(1);
+
+  /* ── Track keys whose qty was recently edited (show Re-request button) ── */
+  const [recentlyEditedKeys, setRecentlyEditedKeys] = useState(new Set());
+
+  /* ── Edit Quotation modal (general edit + resend) ── */
+  const [showEditQuotationModal, setShowEditQuotationModal] = useState(false);
+  const [editQuotationTarget, setEditQuotationTarget] = useState(null);
+  const [editReqForm] = Form.useForm();
+
+  const [askQuotationSending, setAskQuotationSending] = useState(false);
+
+  /* ── Per-request loading maps for Modification-status row actions ── */
+  const [reAskQuotationLoading, setReAskQuotationLoading] = useState({});
+  const [resubmitLoading, setResubmitLoading] = useState({});
+
+  const [placeOrderFiftyDate, setPlaceOrderFiftyDate] = useState(null);
+
+  /* ── LR Tracking modal ── */
+  const [showLRModal, setShowLRModal] = useState(false);
+  const [lrOrder, setLrOrder] = useState(null);
+  const [lrNumber, setLrNumber] = useState('');
+  const [lrReminderDate, setLrReminderDate] = useState(null);
+
+  /* LR Upload column (stock_status table) */
+  const [lrData, setLrData] = useState({});
+  const [showLRUploadModal, setShowLRUploadModal] = useState(false);
+  const [lrUploadTarget, setLrUploadTarget] = useState(null);
+  const [lrUploadForm] = Form.useForm();
+  // The Cloudinary upload (customRequest) is async and independent of form submission —
+  // without this, clicking "Save LR Copy" right after dropping a file saves the LR with
+  // no lrFileUrl at all (the PATCH goes out before the file's .url exists yet), and the
+  // Dispatch Order Tracking table permanently shows "No file" for that order since there's
+  // no way to re-attach it afterwards except re-opening Edit and re-uploading.
+  const lrFileWatch = Form.useWatch('lr_file', lrUploadForm);
+  const lrFileUploading = !!lrFileWatch?.fileList?.some((f) => f.status === 'uploading');
+  const [lrScanLoading, setLrScanLoading] = useState(false);
+  // Finance's LR Copy Reminder Date (Financial → Process Payment & Upload Proof) — the
+  // 'lr_copy_reminder' alert rings Purchase from that date until an LR copy FILE is saved,
+  // so the file is mandatory in the LR modal while such a reminder is pending.
+  const lrCopyReminderPending = (order) => !!order?.lrReminderDate && !order.lrFileUrl;
+  const renderLrReminderTag = (order) => {
+    if (!lrCopyReminderPending(order)) return null;
+    const due = !dayjs().isBefore(dayjs(order.lrReminderDate), 'day');
+    return (
+      <Tooltip title="Finance set an LR copy reminder — the alert rings from this date until the LR copy file is uploaded">
+        <Tag color={due ? 'error' : 'orange'} style={{ borderRadius: 8, margin: 0, fontSize: 10 }}>
+          {due ? 'LR copy due' : 'LR copy by'} {dayjs(order.lrReminderDate).format('DD MMM')}
+        </Tag>
+      </Tooltip>
+    );
+  };
+
+  /* ── "Verified by" for received orders ── */
+  const [verifiedByName, setVerifiedByName] = useState('');
+
+  /* ── Quotation Comparison tab ── */
+  const [quotCompareFiles, setQuotCompareFiles] = useState([]);
+  const [quotCompareLoading, setQuotCompareLoading] = useState(false);
+  const [quotCompareResult, setQuotCompareResult] = useState(null);
+  const [quotCompareId, setQuotCompareId] = useState(null);
+  const [quotCompareSelectedIndex, setQuotCompareSelectedIndex] = useState(null);
+  const [quotSelectedDoc, setQuotSelectedDoc] = useState(null);
+  const [quotPreviewOpen, setQuotPreviewOpen] = useState(false);
+  const [compareQuotations] = useCompareQuotationsMutation();
+  const [selectBestQuotation, { isLoading: quotSelecting }] = useSelectBestQuotationMutation();
+  const handleSelectQuotation = async (index) => {
+    if (quotCompareSelectedIndex !== null || !quotCompareId || index == null || index < 0) return;
+    try {
+      const res = await selectBestQuotation({ id: quotCompareId, selectedIndex: index }).unwrap();
+      setQuotCompareSelectedIndex(index);
+      // Resolve the actual uploaded file behind this result (comparison.files[] is
+      // indexed by fileIndex, not by the results/selectedIndex position) so we can
+      // show the real document, not just the AI-extracted summary row.
+      const comparison = res?.data?.comparison;
+      const resultRow = comparison?.results?.[index];
+      const file = resultRow ? comparison.files?.[resultRow.fileIndex] : null;
+      if (file) {
+        setQuotSelectedDoc({ ...resultRow, url: file.url, originalName: file.originalName, mimetype: file.mimetype });
+        setQuotPreviewOpen(true);
+      }
+      enqueueSnackbar(res?.message || 'Quotation selected', { variant: 'success' });
+    } catch (err) {
+      const msg = err?.data?.error || err?.data || 'Failed to select quotation.';
+      enqueueSnackbar(typeof msg === 'string' ? msg : 'Failed to select quotation.', { variant: 'error' });
+    }
+  };
+
+  /* ── Dispatch Order Tracking tab state — from RTK Query ── */
+  // 'Partially Received' orders stay in this fetch (not just 'In Transit') so the
+  // Missing/Short-Received table and the attach-to-upcoming banner keep working after
+  // a partial receipt is confirmed — a plain 'Received' order still rolls off.
+  const { data: dispatchTrackingData } = useGetPurchaseOrdersQuery({ dispatchStatus: 'In Transit,Partially Received', limit: 500 });
+  // Pickup Order Taken Status (set by the dispatch person in Dispatch → Pickup Order tab)
+  // drives the pre-received delivery status shown here — 'Pickups' tag is invalidated on
+  // every updatePickupOrder call, so this stays live without any extra plumbing.
+  const { data: dtPickupOrdersData } = useGetPickupOrdersQuery();
+  const [dispatchTrackingOrders, setDispatchTrackingOrders] = useState([]);
+  useEffect(() => {
+    const takenStatusByPurchaseOrderId = {};
+    (dtPickupOrdersData?.data || []).forEach((p) => {
+      if (p.purchaseOrderId) takenStatusByPurchaseOrderId[p.purchaseOrderId] = p.takenStatus;
+    });
+    setDispatchTrackingOrders((dispatchTrackingData?.data || []).map((o) => {
+      const missingItems = (o.receivedItems || [])
+        .filter((li) => li.missingQty > 0)
+        .map((li) => ({ key: li.itemId?._id || li.itemId || li.itemName, name: li.itemName, ordered: li.orderedQty, received: li.receivedQty, missing: li.missingQty }));
+      const pickupTakenStatus = takenStatusByPurchaseOrderId[o._id];
+      let deliveryStatus;
+      if (o.dispatchStatus === 'Received') deliveryStatus = 'Delivered';
+      else if (o.dispatchStatus === 'Partially Received') deliveryStatus = 'Partial Delivery';
+      else if (pickupTakenStatus === 'Taken') deliveryStatus = 'Taken';
+      else if (pickupTakenStatus === 'Pickup Dropped') deliveryStatus = 'Pickup Received';
+      else deliveryStatus = 'In Transit';
+      return {
+        key: o._id, orderId: o.poCode, date: o.createdAt?.slice(0, 10),
+        supplier: o.vendorId?.name || '-', vendorId: o.vendorId?._id || o.vendorId,
+        item: o.itemId?.itemName || o.itemName,
+        qty: o.qty, unit: o.unit, amount: o.amount,
+        // Bulk requests are consolidated into ONE PurchaseOrder (see upsertOrderForApprovedRequest)
+        // whose top-level itemId/itemName/qty/unit only ever mirror the FIRST product — the real
+        // per-product breakdown lives in `items[]`. Only exposed here when there's more than one
+        // product, so single-item orders keep rendering exactly as before.
+        items: (o.items && o.items.length > 1) ? o.items.map((it) => ({ itemName: it.itemName, qty: it.qty, unit: it.unit, amount: it.amount })) : null,
+        lrNumber: o.lrNumber, trackingUrl: o.trackingUrl,
+        expectedDelivery: o.expectedDeliveryDate ? o.expectedDeliveryDate.slice(0, 10) : null,
+        lrCopyFile: o.lrFileUrl, paymentStatus: o.paymentStatus,
+        paymentProof: o.paymentProofUrl || null,
+        paymentHistory: o.paymentHistory || [],
+        deliveryStatus,
+        receivedStatus: o.dispatchStatus === 'Received' ? 'received' : o.dispatchStatus === 'Partially Received' ? 'partial' : null,
+        missingItems,
+        missedBy: o.missedBy || null,
+        vendorMissedAction: o.vendorMissedAction || null,
+        missingResolved: !!o.missingResolved,
+        actionTakenStatus: o.actionTakenStatus || null,
+      };
+    }));
+    // Surface any actionTakenStatus already persisted on the server (including custom,
+    // admin-typed values from another session) as a selectable option, so the dropdown
+    // renders the saved value instead of showing blank.
+    const savedActionValues = (dispatchTrackingData?.data || []).map((o) => o.actionTakenStatus).filter(Boolean);
+    if (savedActionValues.length) {
+      setCustomActionOptions((prev) => [...new Set([...prev, ...savedActionValues])]);
+    }
+  }, [dispatchTrackingData, dtPickupOrdersData]);
+
+  const [showTakenModal, setShowTakenModal] = useState(false);
+  const [takenTarget, setTakenTarget] = useState(null);
+  const [takenForm] = Form.useForm();
+
+  const [showReceivedModal, setShowReceivedModal] = useState(false);
+  const [receivedTarget, setReceivedTarget] = useState(null);
+  const [invoiceScanLoading, setInvoiceScanLoading] = useState(false);
+  const [invoiceScanned, setInvoiceScanned] = useState(false);
+  const [invoiceProducts, setInvoiceProducts] = useState([]);
+  // Invoice lines the AI found that weren't part of this PO at all — surfaced separately so
+  // Purchase can still bring them into stock (via Item Code merge, or as a new item) instead of
+  // the vendor's extra goods silently never reaching Inventory.
+  const [extraInvoiceProducts, setExtraInvoiceProducts] = useState([]);
+  const [extraProductCodes, setExtraProductCodes] = useState({});
+  const [extraProductIncluded, setExtraProductIncluded] = useState({});
+  const [productQtys, setProductQtys] = useState({});
+  const [receivedInvoiceFile, setReceivedInvoiceFile] = useState(null);
+  const [receivedConfirmLoading, setReceivedConfirmLoading] = useState(false);
+  const [scannedInvoiceDetails, setScannedInvoiceDetails] = useState(null);
+  const [productNotes, setProductNotes] = useState({});
+  // Purchase Price per invoice line, fetched from the AI scan and editable before confirming —
+  // credited onto this vendor's own purchaseBatches entry so multi-vendor/multi-price stock is
+  // costed batch-wise instead of overwriting one flat price on the item.
+  const [productPrices, setProductPrices] = useState({});
+  // Whether the fetched/entered Purchase Price already includes GST — 'exclusive' (default,
+  // matches how most invoices print a Rate column) or 'inclusive'. Applies to the whole
+  // invoice being received; the taxable base is backed out per-line using that line's GST%.
+  const [receivePriceType, setReceivePriceType] = useState('exclusive');
+  const [partialReceived, setPartialReceived] = useState(false);
+  const [missedBy, setMissedBy] = useState(null);
+  const [vendorMissedAction, setVendorMissedAction] = useState(null);
+  const [customActionOptions, setCustomActionOptions] = useState(['Completely Received']);
+  const [newActionInput, setNewActionInput] = useState('');
+  const [viewLRCopyModal, setViewLRCopyModal] = useState(null);
+
+  /* ── Place Order — LR copy reminder after send ── */
+  const [showPlaceOrderSuccess, setShowPlaceOrderSuccess] = useState(false);
+  const [lrCopyReminderChecked, setLrCopyReminderChecked] = useState(false);
+  const [lrCopyReminderCount, setLrCopyReminderCount] = useState(0);
+  const lrCopyReminderRef = useRef(null);
+
+  const closePlaceOrderModal = () => {
+    if (lrCopyReminderRef.current) { clearInterval(lrCopyReminderRef.current); lrCopyReminderRef.current = null; }
+    setShowPlaceOrderModal(false);
+    setSelectedPlaceOrderItem(null);
+    setSelectedPlaceOrderReq(null);
+    setPlaceOrderFiftyDate(null);
+    setShowPlaceOrderSuccess(false);
+    setLrCopyReminderChecked(false);
+    setLrCopyReminderCount(0);
+  };
+
+  const toggleLrCopyReminder = (checked) => {
+    setLrCopyReminderChecked(checked);
+    if (checked) {
+      setLrCopyReminderCount(0);
+      lrCopyReminderRef.current = setInterval(() => {
+        setLrCopyReminderCount(c => c + 1);
+        enqueueSnackbar(['LR Copy Pending', `Please collect the LR copy from the purchase team for the order placed with ${selectedPlaceOrderReq?.supplier || 'supplier'}.`].filter(Boolean).join(' — '), { variant: 'warning' });
+      }, 30 * 60 * 1000);
+      enqueueSnackbar('30-minute LR copy reminder is now active.', { variant: 'info' });
+    } else {
+      if (lrCopyReminderRef.current) { clearInterval(lrCopyReminderRef.current); lrCopyReminderRef.current = null; }
+    }
+  };
+
+  /* ── Received Order — extra invoice lines that are really an ordered product ── */
+  // An "extra" invoice line (on the invoice but not name-matched to any PO line, e.g. printed as
+  // "Amul Creamer 3gm 120's Pack" for the ordered "Amul milk powder") can be given an Item Code
+  // that is the very Inventory item one of this PO's lines ordered. That line then IS the ordered
+  // product's delivery: it counts toward that PO line's invoice/received qty (instead of leaving
+  // the line short and the goods as a separate extra), and on confirm it's folded into that line
+  // rather than posted as an extra. Returns the PO row key it resolves to, or null.
+  const extraPoTargetKey = (e, code, included, products = invoiceProducts) => {
+    if (!included || !code) return null;
+    const itemId = code === e.matchedItemCode && e.matchedItemId
+      ? e.matchedItemId
+      : inventoryItems.find((i) => i.code === code)?.key;
+    if (!itemId) return null;
+    const target = products.find((p) => p.itemId && String(p.itemId) === String(itemId));
+    return target ? target.key : null;
+  };
+
+  // The scan scopes Amount/GST/Total to this PO's own lines when the invoice also lists extra
+  // products (scopedToOrder). Linking an extra line to an ordered product moves its amount into
+  // that scope (sign 1); unlinking takes it back out (sign -1) — same per-line math as the scan.
+  const shiftScopedInvoiceFigures = (details, e, sign) => {
+    if (!details?.scopedToOrder) return details;
+    const taxable = sign * (Number(e.amount) || (Number(e.qty) || 0) * (Number(e.price) || 0));
+    const gst = taxable * ((Number(e.gstPercent) || 0) / 100);
+    const add = (v, d) => Math.round(((Number(v) || 0) + d) * 100) / 100;
+    const igstOnly = Number(details.igstAmount) > 0 && !(Number(details.cgstAmount) > 0) && !(Number(details.sgstAmount) > 0);
+    return {
+      ...details,
+      amount: add(details.amount, taxable),
+      gstAmount: add(details.gstAmount, gst),
+      totalAmount: add(details.totalAmount, taxable + gst),
+      ...(igstOnly
+        ? { igstAmount: add(details.igstAmount, gst) }
+        : { cgstAmount: add(details.cgstAmount, gst / 2), sgstAmount: add(details.sgstAmount, gst / 2) }),
+    };
+  };
+
+  // Item Code / Add-to-Stock change on an extra invoice line — moves its qty (and price/amount)
+  // onto or off the PO line it now resolves to (see extraPoTargetKey).
+  const relinkExtraInvoiceLine = (e, nextCode, nextIncluded) => {
+    const prevTarget = extraPoTargetKey(e, extraProductCodes[e.key] || '', !!extraProductIncluded[e.key]);
+    const nextTarget = extraPoTargetKey(e, nextCode, nextIncluded);
+    setExtraProductCodes((prev) => ({ ...prev, [e.key]: nextCode }));
+    setExtraProductIncluded((prev) => ({ ...prev, [e.key]: nextIncluded }));
+    if (prevTarget === nextTarget) return;
+    const qty = Number(e.qty) || 0;
+    const price = Number(e.price) || 0;
+    setProductQtys((prev) => {
+      const next = { ...prev };
+      if (prevTarget != null) next[prevTarget] = Math.max(0, (Number(next[prevTarget]) || 0) - qty);
+      if (nextTarget != null) next[nextTarget] = (Number(next[nextTarget]) || 0) + qty;
+      return next;
+    });
+    setProductPrices((prev) => {
+      const next = { ...prev };
+      if (prevTarget != null && next[prevTarget] === price) {
+        next[prevTarget] = invoiceProducts.find((p) => p.key === prevTarget)?.scannedPrice || 0;
+      }
+      if (nextTarget != null && !next[nextTarget]) next[nextTarget] = price;
+      return next;
+    });
+    if ((prevTarget == null) !== (nextTarget == null)) {
+      setScannedInvoiceDetails((prev) => shiftScopedInvoiceFigures(prev, e, nextTarget != null ? 1 : -1));
+    }
+  };
+
+  // PO row key → extra invoice lines currently linked to it (see extraPoTargetKey).
+  const linkedExtrasByProduct = {};
+  const linkedExtraKeys = new Set();
+  extraInvoiceProducts.forEach((e) => {
+    const target = extraPoTargetKey(e, extraProductCodes[e.key] || '', !!extraProductIncluded[e.key]);
+    if (target == null) return;
+    (linkedExtrasByProduct[target] = linkedExtrasByProduct[target] || []).push(e);
+    linkedExtraKeys.add(e.key);
+  });
+  // PO rows as shown and posted — a linked extra line's invoice qty / HSN / GST count on its row.
+  const effectiveInvoiceProducts = invoiceProducts.map((p) => {
+    const linked = linkedExtrasByProduct[p.key];
+    if (!linked) return p;
+    return {
+      ...p,
+      invoiceQty: (Number(p.invoiceQty) || 0) + linked.reduce((s, e) => s + (Number(e.qty) || 0), 0),
+      matched: true,
+      hsn: p.hsn && p.hsn !== '-' ? p.hsn : (linked[0].hsn || '-'),
+      gst: p.gst && p.gst !== '-' ? p.gst : (linked[0].gst || '-'),
+      gstPercent: p.gstPercent || Number(linked[0].gstPercent) || 0,
+      linkedExtras: linked,
+    };
+  });
+  // The scan's ordered-vs-invoice check, re-derived once a linked extra line adds to a PO row.
+  const effectiveQtyVerification = scannedInvoiceDetails?.qtyVerification && linkedExtraKeys.size
+    ? (() => {
+      const short = effectiveInvoiceProducts.filter((p) => (p.invoiceQty || 0) < p.originalQty);
+      return {
+        ...scannedInvoiceDetails.qtyVerification,
+        totalInvoiceQty: effectiveInvoiceProducts.reduce((s, p) => s + (p.invoiceQty || 0), 0),
+        missingItemsCount: short.length,
+        missingQtyTotal: short.reduce((s, p) => s + (p.originalQty - (p.invoiceQty || 0)), 0),
+      };
+    })()
+    : scannedInvoiceDetails?.qtyVerification;
+
+  const openReceivedModal = (record) => {
+    setReceivedTarget(record);
+    setInvoiceScanned(false);
+    setInvoiceProducts([]);
+    setExtraInvoiceProducts([]);
+    setExtraProductCodes({});
+    setExtraProductIncluded({});
+    setProductQtys({});
+    setProductNotes({});
+    setProductPrices({});
+    setReceivePriceType('exclusive');
+    setPartialReceived(false);
+    setMissedBy(null);
+    setVendorMissedAction(null);
+    setReceivedInvoiceFile(null);
+    setScannedInvoiceDetails(null);
+    setShowReceivedModal(true);
+  };
+
+  const handleInvoiceScan = async () => {
+    if (!receivedTarget) return;
+    if (!receivedInvoiceFile) {
+      enqueueSnackbar('Upload the invoice or open the camera to capture it first.', { variant: 'warning' });
+      return;
+    }
+    setInvoiceScanLoading(true);
+    try {
+      const fd = new FormData();
+      fd.append('invoice', receivedInvoiceFile);
+      const res = await scanReceivedInvoiceMutation({ id: receivedTarget.key, formData: fd }).unwrap();
+      const scannedItems = res?.data?.items || [];
+      const products = scannedItems.map((it, idx) => ({
+        key: it.itemId ? String(it.itemId) : idx,
+        itemId: it.itemId,
+        name: it.itemName,
+        hsn: it.hsn || '-', gst: it.gst || '-',
+        gstPercent: Number(it.gstPercent) || 0,
+        originalQty: it.orderedQty,
+        invoiceQty: it.invoiceQty ?? it.receivedQty,
+        matched: !!it.matched,
+        unit: it.unit || receivedTarget.unit,
+        // Price the scan read for this PO line itself — restored if a linked extra line that
+        // filled in a missing price is unlinked again (see relinkExtraInvoiceLine).
+        scannedPrice: Number(it.price) || 0,
+      }));
+      setInvoiceProducts(products);
+      const qtys = {};
+      const prices = {};
+      scannedItems.forEach((it, idx) => {
+        qtys[products[idx].key] = it.receivedQty;
+        prices[products[idx].key] = Number(it.price) || 0;
+      });
+      // Extra items on the invoice with no corresponding PO line — default to included (the
+      // vendor actually delivered them), pre-filled with the matched Inventory item's code
+      // when the AI's exact-name lookup found one so it merges automatically without the
+      // user having to hunt it down.
+      const extras = res?.data?.extraItems || [];
+      setExtraInvoiceProducts(extras);
+      const extraCodes = {};
+      const extraIncluded = {};
+      const linkedAtScan = [];
+      extras.forEach((e) => {
+        extraCodes[e.key] = e.matchedItemCode || '';
+        extraIncluded[e.key] = true;
+        // Pre-filled code is already one of this PO's ordered items — count it on that line
+        // from the start, same as picking it by hand (see extraPoTargetKey).
+        const target = extraPoTargetKey(e, extraCodes[e.key], true, products);
+        if (target == null) return;
+        qtys[target] = (Number(qtys[target]) || 0) + (Number(e.qty) || 0);
+        if (!prices[target]) prices[target] = Number(e.price) || 0;
+        linkedAtScan.push(e);
+      });
+      setProductQtys(qtys);
+      setProductPrices(prices);
+      setExtraProductCodes(extraCodes);
+      setExtraProductIncluded(extraIncluded);
+      setInvoiceScanned(true);
+      // Header fields (invoice no / vendor name / GST no / address / total amount) the AI
+      // actually read off the uploaded document — surfaced separately from the item table so
+      // Purchase can check them against the PO before confirming, instead of only seeing the
+      // pre-filled ordered qtys. qtyVerification compares ordered vs the invoice's own printed
+      // qty (immutable), independent of any later manual edits to the received-qty steppers.
+      setScannedInvoiceDetails(linkedAtScan.reduce((details, e) => shiftScopedInvoiceFigures(details, e, 1), {
+        invoiceNo: res?.data?.invoiceNo || '',
+        vendorName: res?.data?.vendorName || '',
+        vendorPhone: res?.data?.vendorPhone || '',
+        vendorAddress: res?.data?.vendorAddress || '',
+        vendorGST: res?.data?.vendorGST || '',
+        amount: res?.data?.amount,
+        cgstAmount: res?.data?.cgstAmount,
+        sgstAmount: res?.data?.sgstAmount,
+        igstAmount: res?.data?.igstAmount,
+        gstAmount: res?.data?.gstAmount,
+        totalAmount: res?.data?.totalAmount,
+        scopedToOrder: !!res?.data?.scopedToOrder,
+        invoiceGrandTotal: res?.data?.invoiceGrandTotal,
+        vendorMismatch: !!res?.data?.vendorMismatch,
+        poVendorName: res?.data?.poVendorName,
+        qtyVerification: res?.data?.qtyVerification || null,
+      }));
+      enqueueSnackbar('Invoice scanned — products fetched successfully!', { variant: 'success' });
+    } catch (err) {
+      enqueueSnackbar(err?.data?.message || err?.data || 'AI scan failed', { variant: 'error' });
+    } finally {
+      setInvoiceScanLoading(false);
+    }
+  };
+
+  const getMissingItems = () => effectiveInvoiceProducts.filter(p => (productQtys[p.key] || 0) < p.originalQty)
+    .map(p => ({ ...p, receivedQty: productQtys[p.key] || 0, missingQty: p.originalQty - (productQtys[p.key] || 0) }));
+
+  const handleConfirmReceived = async () => {
+    if (!receivedTarget) return;
+    const missing = getMissingItems();
+    const isPartial = missing.length > 0;
+    if (isPartial && !missedBy) {
+      enqueueSnackbar('Select whether the shortfall was missed by the vendor or the lorry.', { variant: 'warning' });
+      return;
+    }
+    if (isPartial && missedBy === 'vendor' && !vendorMissedAction) {
+      enqueueSnackbar('Choose a vendor action for the missing items.', { variant: 'warning' });
+      return;
+    }
+    setReceivedConfirmLoading(true);
+    try {
+      const fd = new FormData();
+      fd.append('items', JSON.stringify(effectiveInvoiceProducts.map(p => ({
+        itemId: p.itemId,
+        itemName: p.name,
+        orderedQty: p.originalQty,
+        receivedQty: productQtys[p.key] ?? p.originalQty,
+        reason: productNotes[p.key] || '',
+        hsn: p.hsn && p.hsn !== '-' ? p.hsn : '',
+        gst: p.gst && p.gst !== '-' ? p.gst : '',
+        purchasePrice: productPrices[p.key] || 0,
+        gstPercent: p.gstPercent || 0,
+        priceType: receivePriceType,
+      }))));
+      // Extra lines linked to an ordered product are already counted in that PO line's
+      // receivedQty above — posting them again would credit the same stock twice.
+      const includedExtras = extraInvoiceProducts.filter((e) => extraProductIncluded[e.key] && !linkedExtraKeys.has(e.key));
+      if (includedExtras.length) {
+        fd.append('extraItems', JSON.stringify(includedExtras.map((e) => ({
+          itemName: e.itemName,
+          receivedQty: e.qty,
+          unit: e.unit,
+          hsn: e.hsn && e.hsn !== '-' ? e.hsn : '',
+          gst: e.gst && e.gst !== '-' ? e.gst : '',
+          gstPercent: e.gstPercent || 0,
+          purchasePrice: e.price || 0,
+          priceType: receivePriceType,
+          itemCode: (extraProductCodes[e.key] || '').trim(),
+        }))));
+      }
+      if (missedBy) fd.append('missedBy', missedBy);
+      if (vendorMissedAction) fd.append('vendorMissedAction', vendorMissedAction);
+      if (receivedInvoiceFile) fd.append('invoice', receivedInvoiceFile);
+      if (scannedInvoiceDetails?.invoiceNo) fd.append('invoiceNo', scannedInvoiceDetails.invoiceNo);
+      if (scannedInvoiceDetails?.vendorName) fd.append('vendorName', scannedInvoiceDetails.vendorName);
+      if (scannedInvoiceDetails?.totalAmount) fd.append('totalAmount', scannedInvoiceDetails.totalAmount);
+      if (scannedInvoiceDetails?.vendorGST) fd.append('vendorGST', scannedInvoiceDetails.vendorGST);
+      if (scannedInvoiceDetails?.vendorAddress) fd.append('vendorAddress', scannedInvoiceDetails.vendorAddress);
+      // CGST/SGST/IGST breakdown as shown (and now editable) above — the value the user
+      // confirmed, AI-read or hand-corrected, is what feeds this order's Input GST in the
+      // GST Report. Sent whenever it's a real number so an explicit 0 correction also sticks
+      // (only a blank/cleared field is skipped).
+      if (Number.isFinite(scannedInvoiceDetails?.cgstAmount)) fd.append('cgstAmount', scannedInvoiceDetails.cgstAmount);
+      if (Number.isFinite(scannedInvoiceDetails?.sgstAmount)) fd.append('sgstAmount', scannedInvoiceDetails.sgstAmount);
+      if (Number.isFinite(scannedInvoiceDetails?.igstAmount)) fd.append('igstAmount', scannedInvoiceDetails.igstAmount);
+      if (Number.isFinite(scannedInvoiceDetails?.gstAmount)) fd.append('gstAmount', scannedInvoiceDetails.gstAmount);
+      await receiveOrderMutation({ id: receivedTarget.key, formData: fd }).unwrap();
+    } catch (err) {
+      enqueueSnackbar(err?.data?.message || err?.data || 'Failed to record receipt', { variant: 'error' });
+      setReceivedConfirmLoading(false);
+      return;
+    }
+    setReceivedConfirmLoading(false);
+    enqueueSnackbar(isPartial ? 'Partial delivery recorded!' : 'Order marked as Received!', { variant: 'success' });
+    setShowReceivedModal(false);
+    setReceivedTarget(null);
+  };
+
+  /* ── Search & Filter state (per-tab) ── */
+  const [stockSearch, setStockSearch] = useState('');
+  const [stockReqStatusFilter, setStockReqStatusFilter] = useState(null);
+  const [bulkDateRange, setBulkDateRange] = useState(null);
+  const [dtSearch, setDtSearch] = useState('');
+  const [dtDeliveryFilter, setDtDeliveryFilter] = useState(null);
+  const [dtPayFilter, setDtPayFilter] = useState(null);
+  const [dtDateRange, setDtDateRange] = useState(null);
+  const [expenseSearch, setExpenseSearch] = useState('');
+  const [expensePaidFilter, setExpensePaidFilter] = useState(null);
+  const [expenseDateRange, setExpenseDateRange] = useState(null);
+  const [localSearch, setLocalSearch] = useState('');
+  const [localPayFilter, setLocalPayFilter] = useState(null);
+  const [localDateRange, setLocalDateRange] = useState(null);
+
+  /* ── Local Purchase tab state ── */
+  const [localPurchases, setLocalPurchases] = useState([]);
+  const [showAddLocalPurchaseModal, setShowAddLocalPurchaseModal] = useState(false);
+  const [localPurchaseForm] = Form.useForm();
+  // Subscribing here (rather than reading via getFieldValue only inside Form.List's render
+  // prop) forces a re-render on every keystroke in any item row, so the name-collision hint
+  // below stays live instead of only updating when a row is added/removed.
+  const watchedLPItems = Form.useWatch('items', localPurchaseForm);
+  const [localPurchasePaymentType, setLocalPurchasePaymentType] = useState('credit');
+  const [localPurchasePaidBy, setLocalPurchasePaidBy] = useState('');
+  const [localPurchaseScanLoading, setLocalPurchaseScanLoading] = useState(false);
+  const [localPurchaseInvoiceFile, setLocalPurchaseInvoiceFile] = useState(null);
+  const [localPurchaseScannedDetails, setLocalPurchaseScannedDetails] = useState(null);
+  const [localPurchaseNewVendorDetected, setLocalPurchaseNewVendorDetected] = useState(false);
+  // Whether each line's Amount was entered/scanned as GST-inclusive or -exclusive — applies to
+  // the whole invoice, matches the same toggle on the Purchase Order Received Order modal.
+  const [localPurchasePriceType, setLocalPurchasePriceType] = useState('exclusive');
+  // Which pool this purchase's items land in — 'inventory' (default) keeps everything exactly
+  // as before; 'material_stock' routes the items into Inventory > Material Stocks instead.
+  const [localPurchaseTarget, setLocalPurchaseTarget] = useState('inventory');
+  const localPurchaseNotifyRef = useRef({});
+  const [localPurchaseDetailView, setLocalPurchaseDetailView] = useState(null);
+
+  /* ── Inline Add Supplier / Vendor from dropdown ── */
+  const [showAddSupplierInlineModal, setShowAddSupplierInlineModal] = useState(false);
+  const [addSupplierInlineForm] = Form.useForm();
+  const [showAddVendorInlineModal, setShowAddVendorInlineModal] = useState(false);
+  const [addVendorInlineForm] = Form.useForm();
+  const [inlineDropdownContext, setInlineDropdownContext] = useState(''); // which dropdown triggered it
+  const [showAddPurchasePersonInlineModal, setShowAddPurchasePersonInlineModal] = useState(false);
+  const [addPurchasePersonInlineForm] = Form.useForm();
+
+  /* ── Camera capture (shared across all "Open Camera" buttons) ── */
+  const [showCameraModal, setShowCameraModal] = useState(false);
+  const [cameraStream, setCameraStream] = useState(null);
+  const [cameraSetFile, setCameraSetFile] = useState(null);
+  const cameraVideoRef = useRef(null);
+
+  const openCameraCapture = async (setFileFn) => {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      enqueueSnackbar('Camera not available on this device or browser.', { variant: 'warning' });
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } }
+      });
+      setCameraStream(stream);
+      setCameraSetFile(() => setFileFn);
+      setShowCameraModal(true);
+    } catch {
+      enqueueSnackbar('Camera access denied. Please allow camera permissions and try again.', { variant: 'error' });
+    }
+  };
+
+  const capturePhoto = () => {
+    const video = cameraVideoRef.current;
+    if (!video) return;
+    // No decoded frame yet — capturing now would produce a blank black photo that the AI can't read.
+    if (!video.videoWidth) {
+      enqueueSnackbar('Camera is still starting — wait a moment and tap Capture Photo again.', { variant: 'warning' });
+      return;
+    }
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth || 1280;
+    canvas.height = video.videoHeight || 720;
+    canvas.getContext('2d').drawImage(video, 0, 0);
+    canvas.toBlob((blob) => {
+      if (!blob) return;
+      const file = new File([blob], `camera_${Date.now()}.jpg`, { type: 'image/jpeg' });
+      if (cameraSetFile) cameraSetFile(file);
+      enqueueSnackbar('Document captured successfully', { variant: 'success' });
+      closeCameraCapture();
+    }, 'image/jpeg', 0.92);
+  };
+
+  const closeCameraCapture = () => {
+    if (cameraStream) { cameraStream.getTracks().forEach(t => t.stop()); setCameraStream(null); }
+    if (cameraVideoRef.current) cameraVideoRef.current.srcObject = null;
+    setShowCameraModal(false);
+    setCameraSetFile(null);
+  };
+
+  const filteredSuppliers = suppliers.filter((s) =>
+    s.name.toLowerCase().includes(supplierSearch.toLowerCase()) ||
+    s.phone.includes(supplierSearch)
+  );
+
+  const handleSaveSupplier = async () => {
+    const vals = supplierForm.getFieldsValue();
+    try {
+      await createVendorMutation({
+        name: vals.sup_name || 'New Supplier',
+        phone: vals.sup_phone || '',
+        email: vals.sup_email || '',
+        address: vals.sup_address || '',
+        taxId: vals.sup_tax || '',
+        bankDetails: vals.bankDetails || {},
+        vendorType: 'raw_material',
+      }).unwrap();
+      supplierForm.resetFields();
+      setShowAddSupplierModal(false);
+      enqueueSnackbar('Supplier added successfully', { variant: 'success' });
+    } catch (e) {
+      enqueueSnackbar(e?.data || 'Failed to add supplier', { variant: 'error' });
+    }
+  };
+
+  const purchases = purchaseOrders.map((o) => ({
+    key: o.key,
+    date: o.date,
+    bill_no: o.bill_no,
+    inv_no: o.inv_no,
+    invoice_file: null,
+    items: o.item ? [{ name: o.item, qty: `${o.qty} ${o.unit}`, price: '', total: `₹${(o.amount || 0).toLocaleString()}` }] : [],
+    entity: o.supplier,
+    amount: `₹${(o.amount || 0).toLocaleString()}`,
+    paid_status: o.status,
+    paid_amount: o.paid_amount || 0,
+    remaining: Math.max(0, (o.amount || 0) - (o.paid_amount || 0)),
+    status: o.status,
+    req_status: 'Confirmed',
+  }));
+
+  const handleOpenRequest = (product) => {
+    if (!requireAccess('add')) return;
+    setSelectedProduct(product);
+    setSelectedSupplier(null);
+    purchaseForm.setFieldsValue({
+      product: product.name,
+      product_code: product.code || '',
+      qty: undefined,
+      unit: product.unit
+    });
+    setShowAddPurchaseModal(true);
+  };
+
+  // Per-row "Ask Quotation" counterpart to handleBulkAskQuotation — builds a real
+  // Product/Required-Quantity PDF for just this table row's item and sends it through
+  // its own "purchase-ask-quotation" WhatsApp event/template mapping (separate from
+  // "bulk-purchase-request"), same reference pipeline as the bulk flow.
+  const handleAskQuotationSend = async () => {
+    let values;
+    try {
+      values = await purchaseForm.validateFields();
+    } catch {
+      return; // antd already highlights the invalid/empty fields (supplier, qty)
+    }
+    if (!selectedSupplier) { enqueueSnackbar('Please select a supplier first', { variant: 'warning' }); return; }
+    const mainQty = Number(values.qty) || 0;
+    if (mainQty <= 0) { enqueueSnackbar('Enter a valid quantity to request', { variant: 'warning' }); return; }
+
+    const items = [{
+      name: values.product,
+      category: selectedProduct?.category || 'Other',
+      qty: mainQty,
+      unit: values.unit || selectedProduct?.unit || '',
+    }];
+
+    // Carry the chosen supplier + qty forward so Raise Request doesn't ask again.
+    if (selectedProduct?.key) {
+      setAskQuotationDetails(prev => ({
+        ...prev,
+        [selectedProduct.key]: {
+          supplierId: selectedSupplier.id,
+          supplierName: selectedSupplier.name,
+          qty: mainQty,
+          unit: values.unit || selectedProduct?.unit || '',
+        },
+      }));
+    }
+
+    setAskQuotationSending(true);
+    try {
+      const pdfBlob = await generateBulkRequestPdfBlob(selectedSupplier.name, '', items, 'Quotation Request');
+      const filename = `quotation-request-${selectedSupplier.name}.pdf`;
+
+      let sent = false;
+      const isObjectId = (v) => /^[a-f0-9]{24}$/i.test(String(v || ''));
+      const mapping = (whatsAppMappingsData?.data || []).find(
+        (m) => m.eventId?.key === 'purchase-ask-quotation' && m.isEnabled !== false && m.templateId?.name
+      );
+      if (selectedSupplier?.phone && isObjectId(selectedSupplier?.id) && mapping) {
+        const formData = new FormData();
+        formData.append('files', new File([pdfBlob], filename, { type: 'application/pdf' }));
+        const uploadRes = await uploadFilesMutation({ formData, folder: 'purchase' }).unwrap();
+        const documentUrl = uploadRes?.data?.[0]?.url;
+        if (documentUrl) {
+          const totalQty = items.reduce((sum, i) => sum + (Number(i.qty) || 0), 0);
+          const fieldValues = {
+            vendorName: selectedSupplier.name,
+            itemName: values.product,
+            itemCount: String(items.length),
+            totalQty: String(totalQty),
+            companyName: 'HNG',
+          };
+          const parameters = {};
+          (mapping.variables || []).forEach((v) => {
+            if (v.templateVariable && v.eventField) parameters[v.templateVariable] = fieldValues[v.eventField] ?? '';
+          });
+          const phone = selectedSupplier.phone.replace(/\D/g, '');
+          await sendWhatsAppMessageMutation({
+            to: phone,
+            templateName: mapping.templateId.name,
+            language: mapping.templateId.language || 'en',
+            parameters,
+            documentUrl,
+            documentFilename: filename,
+          }).unwrap();
+          sent = true;
+        }
+      }
+      if (selectedProduct?.key) {
+        setWhatsappSentItems(prev => new Set(prev).add(selectedProduct.key));
+        // Backend record of this "ask" — the anchor timestamp the Quotation Request Alert
+        // (Settings → Alert Configuration) measures its configured grace period from.
+        // Best-effort: a failure here must never block the actual quotation-request flow.
+        recordQuotationAskMutation({
+          itemId: selectedProduct.key,
+          itemName: values.product,
+          vendorId: isObjectId(selectedSupplier?.id) ? selectedSupplier.id : undefined,
+          vendorName: selectedSupplier.name,
+        }).unwrap().catch(() => {});
+      }
+      enqueueSnackbar(
+        sent
+          ? 'Quotation request document sent to supplier via WhatsApp!'
+          : 'Quotation request document generated. Map a document template to the "Purchase - Ask Quotation (Per Item)" event in Integrations → WhatsApp to auto-send it to the supplier.',
+        { variant: sent ? 'success' : 'info', autoHideDuration: 5000 }
+      );
+      setShowAddPurchaseModal(false);
+      purchaseForm.resetFields();
+      setSelectedProduct(null);
+      setSelectedSupplier(null);
+    } catch (err) {
+      enqueueSnackbar(err?.data?.message || err?.data || err?.message || 'Failed to prepare quotation request', { variant: 'error' });
+    } finally {
+      setAskQuotationSending(false);
+    }
+  };
+
+  // Re-Ask Quotation for a request Finance sent back for Modification — re-sends the
+  // same "Purchase - Ask Quotation (Per Item)" WhatsApp request (regenerated PDF from
+  // the request's already-known item/qty/unit/supplier) instead of making Purchase
+  // re-open the Ask Quotation modal and re-enter details that were already captured
+  // when the request was first raised.
+  const handleReAskQuotation = async (req) => {
+    const isObjectId = (v) => /^[a-f0-9]{24}$/i.test(String(v || ''));
+    const sup = suppliers.find(s => s.name === req.supplier);
+    if (!sup?.phone || !isObjectId(sup?.id)) {
+      enqueueSnackbar('Supplier WhatsApp details not found for this request', { variant: 'warning' });
+      return;
+    }
+    setReAskQuotationLoading(prev => ({ ...prev, [req.key]: true }));
+    try {
+      const items = [{ name: req.item, category: req.category || 'Other', qty: req.qty, unit: req.unit }];
+      const pdfBlob = await generateBulkRequestPdfBlob(sup.name, req.payment_terms, items, 'Quotation Request');
+      const filename = `quotation-request-${sup.name}.pdf`;
+
+      let sent = false;
+      const mapping = (whatsAppMappingsData?.data || []).find(
+        (m) => m.eventId?.key === 'purchase-ask-quotation' && m.isEnabled !== false && m.templateId?.name
+      );
+      if (mapping) {
+        const formData = new FormData();
+        formData.append('files', new File([pdfBlob], filename, { type: 'application/pdf' }));
+        const uploadRes = await uploadFilesMutation({ formData, folder: 'purchase' }).unwrap();
+        const documentUrl = uploadRes?.data?.[0]?.url;
+        if (documentUrl) {
+          const fieldValues = {
+            vendorName: sup.name,
+            itemName: req.item,
+            itemCount: '1',
+            totalQty: String(req.qty || 0),
+            companyName: 'HNG',
+          };
+          const parameters = {};
+          (mapping.variables || []).forEach((v) => {
+            if (v.templateVariable && v.eventField) parameters[v.templateVariable] = fieldValues[v.eventField] ?? '';
+          });
+          const phone = sup.phone.replace(/\D/g, '');
+          await sendWhatsAppMessageMutation({
+            to: phone,
+            templateName: mapping.templateId.name,
+            language: mapping.templateId.language || 'en',
+            parameters,
+            documentUrl,
+            documentFilename: filename,
+          }).unwrap();
+          sent = true;
+        }
+      }
+      // Backend record of this re-ask — restarts the Quotation Request Alert's grace-period
+      // countdown (Settings → Alert Configuration). Best-effort, never blocks the flow.
+      if (req.itemId) {
+        recordQuotationAskMutation({
+          itemId: req.itemId, itemName: req.item, vendorId: sup.id, vendorName: sup.name,
+        }).unwrap().catch(() => {});
+      }
+      enqueueSnackbar(
+        sent
+          ? 'Quotation request re-sent to supplier via WhatsApp!'
+          : 'Quotation request document generated. Map a document template to the "Purchase - Ask Quotation (Per Item)" event in Integrations → WhatsApp to auto-send it to the supplier.',
+        { variant: sent ? 'success' : 'info', autoHideDuration: 5000 }
+      );
+    } catch (err) {
+      enqueueSnackbar(err?.data?.message || err?.data || err?.message || 'Failed to re-ask quotation', { variant: 'error' });
+    } finally {
+      setReAskQuotationLoading(prev => { const n = { ...prev }; delete n[req.key]; return n; });
+    }
+  };
+
+  const handleSupplierAIScan = async () => {
+    if (!supplierScannedFile) { enqueueSnackbar('Please upload a document first', { variant: 'warning' }); return; }
+    setSupplierScanLoading(true);
+    try {
+      const formData = new FormData();
+      formData.append('document', supplierScannedFile);
+      const res = await scanVendorDocument(formData).unwrap();
+      const extracted = res?.data || {};
+      const fields = {};
+      if (extracted.name) fields.sup_name = extracted.name;
+      if (extracted.phone) fields.sup_phone = extracted.phone;
+      if (extracted.email) fields.sup_email = extracted.email;
+      if (extracted.taxId) fields.sup_tax = extracted.taxId;
+      if (extracted.address) fields.sup_address = extracted.address;
+      if (extracted.notes) fields.sup_notes = extracted.notes;
+      const bd = extracted.bankDetails || {};
+      if (bd.accountHolderName || bd.accountNo || bd.ifsc || bd.bankName) {
+        fields.bankDetails = {
+          method: 'bank',
+          ...(bd.accountHolderName && { accountHolderName: bd.accountHolderName }),
+          ...(bd.accountNo && { accountNo: bd.accountNo }),
+          ...(bd.ifsc && { ifsc: bd.ifsc }),
+          ...(bd.bankName && { bankName: bd.bankName }),
+        };
+      }
+      if (Object.keys(fields).length === 0) {
+        enqueueSnackbar('AI could not find any usable details in this document', { variant: 'warning' });
+      } else {
+        supplierForm.setFieldsValue(fields);
+        enqueueSnackbar('AI extracted supplier details from the document!', { variant: 'success' });
+      }
+    } catch (err) {
+      enqueueSnackbar(err?.data?.message || err?.data || 'AI scan failed — please fill the details manually', { variant: 'error' });
+    } finally {
+      setSupplierScanLoading(false);
+    }
+  };
+
+  const handleQuotationAI = () => {
+    if (!quotationFile) { enqueueSnackbar('Please upload a quotation file first', { variant: 'warning' }); return; }
+    setQuotationScanLoading(true);
+    setTimeout(() => {
+      const vals = purchaseForm.getFieldsValue();
+      if (!vals.product || !vals.supplier) {
+        setQuotationScanLoading(false);
+        enqueueSnackbar('Please select product and supplier first', { variant: 'warning' });
+        return;
+      }
+      const newRequest = {
+        key: Date.now(),
+        item: vals.product,
+        supplier: vals.supplier,
+        qty: vals.qty || 0,
+        unit: vals.unit || (selectedProduct?.unit || ''),
+        payment_terms: 'From Quotation',
+        date: dayjs().format('YYYY-MM-DD'),
+        quotation_file: quotationFile.name,
+      };
+      dispatch(addRaisedRequest(newRequest));
+      setQuotationScanLoading(false);
+      enqueueSnackbar('Quotation scanned by AI and sent to Financial Quotation Requests!', { variant: 'success' });
+      setShowAddPurchaseModal(false);
+      purchaseForm.resetFields();
+      setSelectedProduct(null);
+      setSelectedSupplier(null);
+      setQuotationFile(null);
+    }, 2200);
+  };
+
+  const handleOpenRaiseRequest = (product) => {
+    setRaiseRequestProduct(product);
+    // Supplier + quantity were already captured when "Ask Quotation" was sent for this
+    // item — reuse them here instead of asking again.
+    const details = askQuotationDetails[product.key];
+    const supplierFromDetails = details
+      ? (suppliers.find(s => s.id === details.supplierId) || { id: details.supplierId, key: details.supplierId, name: details.supplierName, phone: '', email: '', address: '' })
+      : null;
+    setRaiseRequestSupplier(supplierFromDetails);
+    setRaiseRequestFile(null);
+    setRaiseRequestAmount(null);
+    setRaiseRequestPaymentTerms('');
+    const qty = details?.qty ?? (product.min > product.current ? (product.min - product.current) * 2 : product.min);
+    const unit = details?.unit || product.unit;
+    raiseRequestForm.resetFields();
+    raiseRequestForm.setFieldsValue({ product: product.name, product_code: product.code || '', qty, unit });
+    setShowRaiseRequestModal(true);
+  };
+
+  // Matches the AI's scanned line items against the product this request is for.
+  // An exact normalized name match is trusted outright. Otherwise we fall back to
+  // substring containment, but ONLY when exactly one scanned line qualifies — with
+  // short/generic product names (e.g. "Soap") a plain "does this contain that"
+  // check can be satisfied by several different line items ("Liquid Soap", "Bar
+  // Soap 100g", ...), and picking the first hit via .find() silently stamps the
+  // wrong line's amount onto the product. Reporting "no match" in that ambiguous
+  // case is safer — the caller falls back to the document total / manual entry
+  // instead of a confidently-wrong number.
+  // `usedItems`, when passed, excludes scanned lines already claimed by another
+  // product in the same batch scan so two products can't both be assigned the
+  // same line's amount.
+  const matchScannedItem = (items, productName, usedItems = null) => {
+    const norm = (s) => (s || '').toLowerCase().trim();
+    const target = norm(productName);
+    if (!target) return null;
+    const candidates = (items || []).filter((it) => !usedItems || !usedItems.has(it));
+    const exact = candidates.find((it) => norm(it.name) === target);
+    if (exact) return exact;
+    const substringMatches = candidates.filter((it) => {
+      const name = norm(it.name);
+      return name && (name.includes(target) || target.includes(name));
+    });
+    return substringMatches.length === 1 ? substringMatches[0] : null;
+  };
+
+  // Resolves what amount a single/separate purchase request should trust from a scanned
+  // quotation/invoice. A document that quotes only ONE product means its totalAmount
+  // already IS that product's amount — but a document quoting SEVERAL products shares
+  // one totalAmount across all of them, so once the product is verified by name, that
+  // matched line item's OWN `amount` must be used instead of stamping the whole
+  // multi-product total onto a single product (same product-wise matching the Bulk
+  // batch-group AI scan already does via matchScannedItem, applied here to one product).
+  const resolveScannedAmount = (scanned, productName) => {
+    const scannedItems = scanned.items || [];
+    const match = matchScannedItem(scannedItems, productName);
+    const totalAmount = Number(scanned.totalAmount) || 0;
+    const isMultiProduct = scannedItems.length > 1;
+    const amount = isMultiProduct ? (match ? Number(match.amount) || 0 : totalAmount) : totalAmount;
+    return { match, amount, isMultiProduct, itemCount: scannedItems.length };
+  };
+
+  const handleRaiseRequestAIScan = async () => {
+    if (!raiseRequestFile) { enqueueSnackbar('Please upload the quotation file first', { variant: 'warning' }); return; }
+    setRaiseRequestScanLoading(true);
+    try {
+      const fd = new FormData();
+      fd.append('quotation', raiseRequestFile);
+      const extracted = await scanQuotationFile(fd).unwrap();
+      const scanned = extracted?.data || {};
+      const gstAmount = Number(scanned.gstAmount) || 0;
+      const gstSplit = readGstSplit(scanned);
+      const { match, amount, isMultiProduct, itemCount } = resolveScannedAmount(scanned, raiseRequestProduct?.name);
+      const matchedQty = match ? Number(match.qty) || 0 : 0;
+
+      if (matchedQty > 0) raiseRequestForm.setFieldsValue({ qty: matchedQty });
+      setRaiseRequestAmount(amount || null);
+      setRaiseRequestGstAmount(gstAmount || null);
+      setRaiseRequestGstSplit((gstSplit.cgstAmount || gstSplit.sgstAmount || gstSplit.igstAmount) ? gstSplit : null);
+
+      if (!match && (scanned.items || []).length) {
+        enqueueSnackbar(`Couldn't confidently match "${raiseRequestProduct?.name}" to a line item on the quotation — please verify the quantity and amount manually. ${isMultiProduct ? `Document total ₹${amount.toLocaleString()}` : `Amount ₹${amount.toLocaleString()}`} and GST ₹${gstAmount.toLocaleString()} were read from the document.${interStateNote(gstSplit)}`, { variant: 'warning' });
+      } else if (isMultiProduct) {
+        enqueueSnackbar(`Verified "${raiseRequestProduct?.name}" among ${itemCount} products on this quotation — Qty: ${matchedQty || raiseReqQtyWatch || 0}, Amount: ₹${amount.toLocaleString()} (this product's own line total), GST: ₹${gstAmount.toLocaleString()}${interStateNote(gstSplit)}`, { variant: 'success' });
+      } else {
+        enqueueSnackbar(`AI extracted — Qty: ${matchedQty || raiseReqQtyWatch || 0}, Amount: ₹${amount.toLocaleString()}, GST: ₹${gstAmount.toLocaleString()}${interStateNote(gstSplit)}`, { variant: 'success' });
+      }
+    } catch (err) {
+      enqueueSnackbar(err?.data?.message || 'AI extraction failed — please enter the details manually', { variant: 'error' });
+    } finally {
+      setRaiseRequestScanLoading(false);
+    }
+  };
+
+  const handleRaiseRequestSubmit = () => {
+    raiseRequestForm.validateFields().then(async (values) => {
+      if (!raiseRequestFile) { enqueueSnackbar('Please upload the received quotation file to raise a request', { variant: 'warning' }); return; }
+      if (raiseRequestAmount == null) { enqueueSnackbar('Enter the quoted amount', { variant: 'warning' }); return; }
+      const isObjectId = (v) => /^[a-f0-9]{24}$/i.test(String(v || ''));
+      const vendorId = raiseRequestSupplier?.id;
+      const paymentTerms = values.payment_terms;
+      const reminderRequired = paymentTerms === '50% Advance, 50% on Dispatch' || paymentTerms === '50% Advance, 50% After Delivery (Max 15 days)';
+      if (reminderRequired && !values.payment_reminder_date) {
+        enqueueSnackbar('Select a reminder date for the 2nd payment', { variant: 'warning' });
+        return;
+      }
+
+      const items = [{
+        itemName: values.product,
+        itemId: raiseRequestProduct?.key,
+        qty: Number(values.qty) || 0,
+        unit: values.unit || raiseRequestProduct?.unit || '',
+      }];
+
+      try {
+        const payload = {
+          items: items.map((r) => ({
+            itemName: r.itemName,
+            qty: r.qty,
+            unit: r.unit,
+            ...(isObjectId(r.itemId) ? { itemId: r.itemId } : {}),
+          })),
+          paymentTerms,
+          ...(isObjectId(vendorId) ? { vendorId } : {}),
+          // Drives the "Separate Purchase Payment Reminder" WhatsApp event (separatePurchasePaymentReminderScheduler.js).
+          ...(reminderRequired && values.payment_reminder_date ? { secondReminderDate: values.payment_reminder_date.toISOString() } : {}),
+        };
+        const res = await raiseRequestMutation(payload).unwrap();
+        const created = res?.data || [];
+        const complaintNote = (values.complaint_notes || '').trim();
+
+        enqueueSnackbar(`${created.length || items.length} request(s) sent to Financial Quotation!`, { variant: 'success' });
+        if (raiseRequestProduct?.key) {
+          setWhatsappSentItems(prev => { const s = new Set(prev); s.delete(raiseRequestProduct.key); return s; });
+        }
+
+        // Close the modal immediately once the request itself has been raised — the
+        // quotation-file upload and complaint note below are best-effort follow-ups
+        // and shouldn't hold the modal open while they run.
+        const fileToUpload = raiseRequestFile;
+        const amountToUpload = raiseRequestAmount;
+        const gstAmountToUpload = raiseRequestGstAmount;
+        const gstSplitToUpload = raiseRequestGstSplit;
+        setShowRaiseRequestModal(false);
+        raiseRequestForm.resetFields();
+        setRaiseRequestProduct(null);
+        setRaiseRequestSupplier(null);
+        setRaiseRequestFile(null);
+        setRaiseRequestPaymentTerms('');
+        setRaiseRequestAmount(null);
+        setRaiseRequestGstAmount(null);
+        setRaiseRequestGstSplit(null);
+
+        for (const reqDoc of created) {
+          const id = reqDoc?._id;
+          if (id && fileToUpload) {
+            try {
+              const fd = new FormData();
+              fd.append('quotation', fileToUpload);
+              fd.append('amount', amountToUpload);
+              if (gstAmountToUpload != null) fd.append('gstAmount', gstAmountToUpload);
+              appendGstSplit(fd, gstSplitToUpload);
+              await uploadQuotationFile({ id, formData: fd }).unwrap();
+            } catch { /* file upload is best-effort */ }
+          }
+          if (id && complaintNote) {
+            try {
+              await addPurchaseNoteMutation({ id, text: `Complaint/Issue: ${complaintNote}` }).unwrap();
+            } catch { /* note is best-effort */ }
+          }
+        }
+      } catch (err) {
+        enqueueSnackbar(err?.data?.message || err?.data || 'Failed to raise request', { variant: 'error' });
+      }
+    });
+  };
+
+  /* ── Local Purchase handlers ── */
+  const handleLocalPurchaseInvoiceScan = async () => {
+    if (!localPurchaseInvoiceFile) { enqueueSnackbar('Please upload an invoice first', { variant: 'warning' }); return; }
+    setLocalPurchaseScanLoading(true);
+    try {
+      const formData = new FormData();
+      formData.append('invoice', localPurchaseInvoiceFile);
+      const res = await scanLocalPurchaseInvoice(formData).unwrap();
+      const extracted = res?.data || {};
+
+      const vendorNameLc = (extracted.vendorName || '').trim().toLowerCase();
+      const knownVendor = vendors.find(v =>
+        (vendorNameLc && (v.name || '').trim().toLowerCase() === vendorNameLc) ||
+        (extracted.vendorPhone && v.phone === extracted.vendorPhone)
+      );
+
+      const items = (extracted.items || []).map(it => ({
+        name: it.name, qty: it.qty, unit: it.unit, amount: it.amount,
+        gstPercent: it.gst ? Number(String(it.gst).replace(/[^0-9.]/g, '')) || 0 : 0,
+      }));
+      const scanned = {
+        invoiceNo: extracted.invoiceNo || 'INV-' + Date.now(),
+        invoiceDate: extracted.invoiceDate || '',
+        vendorName: extracted.vendorName || '',
+        vendorPhone: knownVendor?.phone || extracted.vendorPhone || '',
+        vendorAddress: knownVendor?.address || extracted.vendorAddress || '',
+        vendorGST: extracted.vendorGST || '',
+        items,
+        gstAmount: Number(extracted.gstAmount) || 0,
+        // CGST/SGST/IGST split as printed on the bill — an inter-state bill prints IGST only,
+        // an intra-state bill prints CGST+SGST. Persisted with the Local Purchase so the GST /
+        // Monthly GST reports use the bill's real split instead of assuming a 50/50 divide.
+        cgstAmount: Number(extracted.cgstAmount) || 0,
+        sgstAmount: Number(extracted.sgstAmount) || 0,
+        igstAmount: Number(extracted.igstAmount) || 0,
+        totalAmount: extracted.totalAmount || items.reduce((s, it) => s + (Number(it.amount) || 0), 0),
+        isNewVendor: !knownVendor && !!extracted.vendorName,
+      };
+
+      setLocalPurchaseScannedDetails(scanned);
+      setLocalPurchaseNewVendorDetected(scanned.isNewVendor);
+      const fieldValues = { invoiceNo: scanned.invoiceNo };
+      if (scanned.invoiceDate && dayjs(scanned.invoiceDate).isValid()) fieldValues.invoiceDate = dayjs(scanned.invoiceDate);
+      if (scanned.vendorName) fieldValues.vendorName = scanned.vendorName;
+      if (scanned.vendorPhone) fieldValues.vendorPhone = scanned.vendorPhone;
+      if (scanned.totalAmount) fieldValues.totalAmount = scanned.totalAmount;
+      if (scanned.gstAmount) fieldValues.gstAmount = scanned.gstAmount;
+      // Fill whichever GST components the bill actually printed — inter-state bills carry
+      // IGST only, intra-state carry CGST+SGST. A bill with no breakdown leaves all three
+      // blank (backend keeps the existing even CGST/SGST divide).
+      if (scanned.cgstAmount) fieldValues.cgstAmount = scanned.cgstAmount;
+      if (scanned.sgstAmount) fieldValues.sgstAmount = scanned.sgstAmount;
+      if (scanned.igstAmount) fieldValues.igstAmount = scanned.igstAmount;
+      if (items.length) fieldValues.items = items.map(it => ({ itemName: it.name, qty: it.qty, unit: it.unit, amount: it.amount, gstPercent: it.gstPercent, itemType: 'standard' }));
+      localPurchaseForm.setFieldsValue(fieldValues);
+
+      enqueueSnackbar(
+        items.length === 0
+          ? 'AI scanned the invoice but could not read any line items — please add them manually'
+          : (scanned.isNewVendor
+            ? 'AI scanned invoice — new vendor detected! Review and add to vendors list.'
+            : 'AI scanned invoice — vendor matched in existing vendors list.'),
+        { variant: items.length === 0 ? 'warning' : 'success' }
+      );
+    } catch (err) {
+      enqueueSnackbar(err?.data?.message || err?.data || 'AI scan failed — please fill the details manually', { variant: 'error' });
+    } finally {
+      setLocalPurchaseScanLoading(false);
+    }
+  };
+
+  const handleAddLocalPurchase = async (values) => {
+    const newLP = {
+      key: 'LP-' + Date.now(),
+      date: dayjs().format('YYYY-MM-DD'),
+      invoiceNo: values.invoiceNo || localPurchaseScannedDetails?.invoiceNo || 'INV-' + Date.now(),
+      invoiceFile: localPurchaseInvoiceFile?.name || null,
+      vendorName: values.vendorName || localPurchaseScannedDetails?.vendorName || '',
+      vendorPhone: values.vendorPhone || localPurchaseScannedDetails?.vendorPhone || '',
+      items: (values.items || []).filter(it => (it?.itemName || '').trim()).map(it => ({ name: it.itemName, qty: it.qty || 1, unit: it.unit || 'Pcs', amount: it.amount || 0, gstPercent: Number(it.gstPercent) || 0, itemCode: String(it.itemCode || '').trim().toUpperCase() || undefined, itemType: it.itemType === 'bulk' ? 'bulk' : 'standard', size: it.size || undefined, hotelName: it.hotelName || undefined })),
+      totalAmount: values.totalAmount || localPurchaseScannedDetails?.totalAmount || 0,
+      gstAmount: Number(values.gstAmount ?? localPurchaseScannedDetails?.gstAmount) || 0,
+      // Bill's CGST/SGST/IGST split — the editable form fields (auto-filled from the scan)
+      // take priority so a manual correction is what's saved; reports use igstAmount to route
+      // an inter-state bill's GST to IGST instead of an even CGST/SGST divide.
+      cgstAmount: Number(values.cgstAmount ?? localPurchaseScannedDetails?.cgstAmount) || 0,
+      sgstAmount: Number(values.sgstAmount ?? localPurchaseScannedDetails?.sgstAmount) || 0,
+      igstAmount: Number(values.igstAmount ?? localPurchaseScannedDetails?.igstAmount) || 0,
+      paymentType: values.paymentType || 'credit',
+      // Instant + Finance Team = already settled → Paid immediately, just logged for tracking.
+      // Instant + Purchase Person = needs reimbursement → Pending, same follow-up flow as Credit.
+      paymentStatus: values.paymentType === 'instant' && values.paidBy === 'finance_team' ? 'Paid' : 'Pending',
+      gPayNumber: values.paymentType === 'instant' ? (values.gPayNumber || null) : null,
+      paidBy: values.paymentType === 'instant' ? (values.paidBy === 'finance_team' ? 'Finance Team' : 'Purchase Person') : null,
+      purchasePersonName: values.paymentType === 'instant' && values.paidBy === 'purchase_person' ? (values.purchasePersonName || null) : null,
+      purchasePersonPhone: values.paymentType === 'instant' && values.paidBy === 'purchase_person' ? (values.purchasePersonPhone || null) : null,
+      paymentProofUrl: values.paymentType === 'instant' ? (getFileUrl(values.paymentProofFile?.fileList?.[0]) || null) : null,
+    };
+
+    // Confirm the merge-vs-new decision for every line before anything is committed — same
+    // "reject silent duplication" rule as Inventory's Add Item mergeItemCode, adapted to a
+    // multi-row form as one summary popup instead of a per-row confirm.
+    const proceed = async () => {
+    if (localPurchaseNewVendorDetected && values.addToVendors) {
+      const newVendor = {
+        id: Date.now(),
+        name: newLP.vendorName,
+        phone: newLP.vendorPhone,
+        email: '',
+        address: localPurchaseScannedDetails?.vendorAddress || '',
+        totalPaid: 0,
+        pending: newLP.paymentStatus === 'Pending' ? newLP.totalAmount : 0,
+      };
+      createVendorMutation({
+        name: newVendor.name,
+        phone: newVendor.phone,
+        email: newVendor.email,
+        address: newVendor.address,
+      });
+      enqueueSnackbar('New vendor added to vendors list!', { variant: 'success' });
+    }
+
+    if (newLP.paymentStatus === 'Pending') {
+      // Applies to Credit purchases AND Instant purchases paid by the Purchase Person
+      // (awaiting reimbursement) — both need Finance to settle from the
+      // Reimbursement Expense → Local Purchase Expense tab.
+      const intervalId = setInterval(() => {
+        enqueueSnackbar(
+          `Local Purchase Pending Payment — Local purchase ${newLP.invoiceNo} from ${newLP.vendorName} of ₹${newLP.totalAmount.toLocaleString()} is pending. Please process payment.`,
+          { variant: 'info', autoHideDuration: 8000 },
+        );
+      }, 30 * 60 * 1000);
+      localPurchaseNotifyRef.current[newLP.key] = intervalId;
+      // Save to localStorage for Financial page
+      const pending = JSON.parse(localStorage.getItem('hng_local_purchase_pending') || '[]');
+      localStorage.setItem('hng_local_purchase_pending', JSON.stringify([...pending, newLP]));
+      enqueueSnackbar(
+        newLP.paymentType === 'instant'
+          ? 'Purchase Person payment recorded — sent to Finance for reimbursement approval.'
+          : 'Credit purchase created — financial team will be notified every 30 minutes.',
+        { variant: 'info', autoHideDuration: 5000 },
+      );
+    }
+
+    try {
+      await createLocalPurchaseMutation({
+        invoiceNo: newLP.invoiceNo,
+        vendorName: newLP.vendorName,
+        vendorPhone: newLP.vendorPhone,
+        purchaseTarget: localPurchaseTarget,
+        items: (newLP.items || []).map((it) => ({
+          itemName: it.itemName || it.name || 'Item',
+          itemCode: it.itemCode || undefined,
+          qty: Number(it.qty) || 0,
+          unit: it.unit || 'Pcs',
+          amount: Number(it.amount) || 0,
+          gstPercent: Number(it.gstPercent) || 0,
+          priceType: localPurchasePriceType,
+          ...(localPurchaseTarget === 'material_stock'
+            ? { size: it.size || undefined, hotelName: it.hotelName || undefined }
+            : { itemType: it.itemType === 'bulk' ? 'bulk' : 'standard' }),
+        })),
+        totalAmount: Number(newLP.totalAmount) || 0,
+        gstAmount: Number(newLP.gstAmount) || 0,
+        ...(Number(newLP.cgstAmount) ? { cgstAmount: Number(newLP.cgstAmount) } : {}),
+        ...(Number(newLP.sgstAmount) ? { sgstAmount: Number(newLP.sgstAmount) } : {}),
+        ...(Number(newLP.igstAmount) ? { igstAmount: Number(newLP.igstAmount) } : {}),
+        paymentType: newLP.paymentType,
+        paymentStatus: newLP.paymentStatus,
+        ...(newLP.paymentStatus === 'Paid' ? { paidAmount: Number(newLP.totalAmount) || 0, paidDate: new Date().toISOString() } : {}),
+        ...(newLP.gPayNumber ? { gPayNumber: newLP.gPayNumber } : {}),
+        ...(newLP.paidBy ? { paidBy: newLP.paidBy } : {}),
+        ...(newLP.purchasePersonName ? { purchasePersonName: newLP.purchasePersonName } : {}),
+        ...(newLP.purchasePersonPhone ? { purchasePersonPhone: newLP.purchasePersonPhone } : {}),
+        ...(newLP.paymentProofUrl ? { paymentProofUrl: newLP.paymentProofUrl } : {}),
+        ...(values.invoiceDate ? { invoiceDate: values.invoiceDate.toDate() } : {}),
+        ...(values.paymentType === 'credit' && values.dueDate ? { dueDate: values.dueDate.toDate() } : {}),
+      }).unwrap();
+    } catch (err) {
+      enqueueSnackbar(err?.data?.message || err?.data || 'Failed to record local purchase', { variant: 'error' });
+      return;
+    }
+    setShowAddLocalPurchaseModal(false);
+    localPurchaseForm.resetFields();
+    setLocalPurchaseInvoiceFile(null);
+    setLocalPurchaseScannedDetails(null);
+    setLocalPurchaseNewVendorDetected(false);
+    setLocalPurchasePaymentType('credit');
+    setLocalPurchasePaidBy('');
+    setLocalPurchasePriceType('exclusive');
+    setLocalPurchaseTarget('inventory');
+    enqueueSnackbar('Local purchase recorded successfully!', { variant: 'success' });
+    };
+
+    const isMaterialMode = localPurchaseTarget === 'material_stock';
+    const summaryLines = newLP.items.map((it) => {
+      const code = String(it.itemCode || '').trim().toUpperCase();
+      if (isMaterialMode) {
+        if (!code) return `${it.name} — add as NEW material stock${it.size ? ` (${it.size})` : ''}`;
+        const matched = materialStocksList.find((s) => s.code === code);
+        return `${it.name} — merge into "${matched ? matched.name : code}" (${code})`;
+      }
+      const typeLabel = it.itemType === 'bulk' ? 'Bulk Raw Material' : 'Direct Stock';
+      if (!code) return `${it.name} — add as NEW ${typeLabel} item`;
+      const matched = inventoryItems.find((i) => i.code === code);
+      return `${it.name} — merge into "${matched ? matched.name : code}" (${code}, ${typeLabel})`;
+    });
+    Modal.confirm({
+      title: 'Confirm items before saving',
+      width: 480,
+      content: (
+        <div style={{ maxHeight: 260, overflowY: 'auto' }}>
+          {summaryLines.map((line, i) => (
+            <div key={i} style={{ fontSize: 13, padding: '4px 0', borderBottom: i < summaryLines.length - 1 ? `1px solid ${isDark ? '#2a2a3e' : '#f0f0f0'}` : 'none' }}>{line}</div>
+          ))}
+        </div>
+      ),
+      okText: 'Confirm & Save',
+      onOk: proceed,
+    });
+  };
+
+  const handleAddSupplierInline = () => {
+    addSupplierInlineForm.validateFields().then(async vals => {
+      try {
+        await createVendorMutation({ name: vals.name, phone: vals.phone || '', email: vals.email || '', address: vals.address || '', taxId: vals.tax || '', bankDetails: vals.bankDetails || {}, vendorType: 'raw_material' }).unwrap();
+        setShowAddSupplierInlineModal(false);
+        addSupplierInlineForm.resetFields();
+        enqueueSnackbar(`Supplier "${vals.name}" added!`, { variant: 'success' });
+      } catch (e) {
+        enqueueSnackbar(e?.data || 'Failed to add supplier', { variant: 'error' });
+      }
+    });
+  };
+
+  const handleAddVendorInline = () => {
+    addVendorInlineForm.validateFields().then(async vals => {
+      try {
+        await createVendorMutation({ name: vals.name, phone: vals.phone || '', email: vals.email || '', address: vals.address || '', taxId: vals.tax || '', bankDetails: vals.bankDetails || {} }).unwrap();
+        setShowAddVendorInlineModal(false);
+        addVendorInlineForm.resetFields();
+        enqueueSnackbar(`Vendor "${vals.name}" added!`, { variant: 'success' });
+      } catch (e) {
+        enqueueSnackbar(e?.data || 'Failed to add vendor', { variant: 'error' });
+      }
+    });
+  };
+
+  const handleAddPurchasePersonInline = () => {
+    addPurchasePersonInlineForm.validateFields().then(async vals => {
+      try {
+        await createPurchasePersonMutation({ name: vals.name, phone: vals.phone || '', gPayNumber: vals.gPayNumber || '' }).unwrap();
+        setShowAddPurchasePersonInlineModal(false);
+        addPurchasePersonInlineForm.resetFields();
+        // Auto-select the newly added person back into the Local Purchase form.
+        localPurchaseForm.setFieldsValue({ purchasePersonName: vals.name, purchasePersonPhone: vals.phone || '', gPayNumber: vals.gPayNumber || '' });
+        enqueueSnackbar(`Purchase person "${vals.name}" added!`, { variant: 'success' });
+      } catch (e) {
+        enqueueSnackbar(e?.data || 'Failed to add purchase person', { variant: 'error' });
+      }
+    });
+  };
+
+  const handleBulkSupplierSelect = (supplierName) => {
+    setBulkSupplierName(supplierName);
+    setBulkQuotationAsked(false);
+    setBulkReminderDate(null);
+    const supplierItems = lowStockInventoryItems.filter(i => i.sellerName === supplierName);
+    const otherLowStock = lowStockInventoryItems.filter(i => i.sellerName !== supplierName);
+    const allItems = [...supplierItems, ...otherLowStock];
+    setBulkItems(allItems.map(i => ({
+      invKey: i.key,
+      name: i.name,
+      unit: i.unit,
+      category: i.category || 'Other',
+      currentStock: i.current,
+      minStock: i.min,
+      status: i.status,
+      fromSupplier: i.sellerName === supplierName,
+      selected: i.sellerName === supplierName,
+      qty: undefined,
+    })));
+  };
+
+  // Renders a Product Name / Required Quantity table to a real PDF Blob using html2pdf
+  // (html2canvas + jsPDF), the same recipe Billing uses for invoice/quotation documents.
+  const generateBulkRequestPdfBlob = async (supplierName, paymentTerms, items, title = 'Bulk Purchase Request') => {
+    const rows = items.map(i => `
+      <tr>
+        <td style="padding:8px 10px;border:1px solid #ddd;">${i.name}</td>
+        <td style="padding:8px 10px;border:1px solid #ddd;">${i.category || 'Other'}</td>
+        <td style="padding:8px 10px;border:1px solid #ddd;text-align:right;">${i.qty}</td>
+        <td style="padding:8px 10px;border:1px solid #ddd;">${i.unit || ''}</td>
+      </tr>`).join('');
+    const html = `
+      <div style="font-family:Arial,sans-serif;padding:20px;width:700px;">
+        <h2 style="color:#B11E6A;margin:0 0 4px;">${title}</h2>
+        <p style="margin:0 0 2px;"><strong>Supplier:</strong> ${supplierName}</p>
+        ${paymentTerms ? `<p style="margin:0 0 2px;"><strong>Payment Terms:</strong> ${paymentTerms}</p>` : ''}
+        <p style="margin:0 0 14px;"><strong>Date:</strong> ${dayjs().format('DD MMM YYYY')}</p>
+        <table style="width:100%;border-collapse:collapse;font-size:13px;">
+          <thead>
+            <tr style="background:#B11E6A;color:#fff;">
+              <th style="padding:8px 10px;text-align:left;">Product Name</th>
+              <th style="padding:8px 10px;text-align:left;">Category</th>
+              <th style="padding:8px 10px;text-align:right;">Required Quantity</th>
+              <th style="padding:8px 10px;text-align:left;">Unit</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+    const container = document.createElement('div');
+    container.innerHTML = html;
+    document.body.appendChild(container);
+    try {
+      return await html2pdf()
+        .from(container)
+        .set({
+          margin: 5,
+          image: { type: 'jpeg', quality: 0.95 },
+          html2canvas: { scale: 2, useCORS: true },
+          jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+        })
+        .outputPdf('blob');
+    } finally {
+      document.body.removeChild(container);
+    }
+  };
+
+  const handleBulkAskQuotation = async () => {
+    const selected = bulkSelectedItems;
+    if (selected.length === 0) { enqueueSnackbar('Select at least one product', { variant: 'warning' }); return; }
+    if (!bulkSupplierName) { enqueueSnackbar('Select a supplier first', { variant: 'warning' }); return; }
+    if (!bulkPayTerms) { enqueueSnackbar('Select payment terms', { variant: 'warning' }); return; }
+    if (!bulkQtyValid) { enqueueSnackbar('Enter a required quantity (Pcs) for every selected product', { variant: 'warning' }); return; }
+    if (!bulkReminderValid) { enqueueSnackbar('Select a payment reminder date', { variant: 'warning' }); return; }
+
+    const supplierInfo = suppliers.find(s => s.name === bulkSupplierName);
+    setBulkAskingQuotation(true);
+    try {
+      const pdfBlob = await generateBulkRequestPdfBlob(bulkSupplierName, bulkPayTerms, selected);
+      const filename = `bulk-purchase-request-${bulkSupplierName}.pdf`;
+
+      let sent = false;
+      const isObjectId = (v) => /^[a-f0-9]{24}$/i.test(String(v || ''));
+      const mapping = (whatsAppMappingsData?.data || []).find(
+        (m) => m.eventId?.key === 'bulk-purchase-request' && m.isEnabled !== false && m.templateId?.name
+      );
+      if (supplierInfo?.phone && isObjectId(supplierInfo?.id) && mapping) {
+        const formData = new FormData();
+        formData.append('files', new File([pdfBlob], filename, { type: 'application/pdf' }));
+        const uploadRes = await uploadFilesMutation({ formData, folder: 'purchase' }).unwrap();
+        const documentUrl = uploadRes?.data?.[0]?.url;
+        if (documentUrl) {
+          const totalQty = selected.reduce((sum, i) => sum + (Number(i.qty) || 0), 0);
+          const fieldValues = {
+            vendorName: bulkSupplierName,
+            itemCount: String(selected.length),
+            totalQty: String(totalQty),
+            paymentTerms: bulkPayTerms,
+            companyName: 'HNG',
+          };
+          const parameters = {};
+          (mapping.variables || []).forEach((v) => {
+            if (v.templateVariable && v.eventField) parameters[v.templateVariable] = fieldValues[v.eventField] ?? '';
+          });
+          const phone = supplierInfo.phone.replace(/\D/g, '');
+          await sendWhatsAppMessageMutation({
+            to: phone,
+            templateName: mapping.templateId.name,
+            language: mapping.templateId.language || 'en',
+            parameters,
+            documentUrl,
+            documentFilename: filename,
+          }).unwrap();
+          sent = true;
+        }
+      }
+      setBulkQuotationAsked(true);
+      enqueueSnackbar(
+        sent
+          ? 'Quotation request document sent to supplier via WhatsApp!'
+          : 'Quotation request document generated. Map a document template to the "Bulk Purchase Request" event in Integrations → WhatsApp to auto-send it to the supplier.',
+        { variant: sent ? 'success' : 'info' }
+      );
+    } catch (err) {
+      enqueueSnackbar(err?.data?.message || err?.data || err?.message || 'Failed to prepare quotation request', { variant: 'error' });
+    } finally {
+      setBulkAskingQuotation(false);
+    }
+  };
+
+  const handleBulkRaiseRequest = async () => {
+    const selected = bulkSelectedItems;
+    if (selected.length === 0) { enqueueSnackbar('Select at least one product', { variant: 'warning' }); return; }
+    if (!bulkSupplierName) { enqueueSnackbar('Select a supplier first', { variant: 'warning' }); return; }
+    if (!bulkPayTerms) { enqueueSnackbar('Select payment terms', { variant: 'warning' }); return; }
+    if (!bulkQtyValid) { enqueueSnackbar('Enter a required quantity (Pcs) for every selected product', { variant: 'warning' }); return; }
+    if (!bulkReminderValid) { enqueueSnackbar('Select a payment reminder date', { variant: 'warning' }); return; }
+    const isObjectId = (v) => /^[a-f0-9]{24}$/i.test(String(v || ''));
+    const vendorId = suppliers.find(s => s.name === bulkSupplierName)?.id;
+    try {
+      await createBulkRequestMutation({
+        ...(isObjectId(vendorId) ? { vendorId } : {}),
+        paymentTerms: bulkPayTerms,
+        ...(bulkReminderRequired && bulkReminderDate ? { firstReminderDate: bulkReminderDate.toISOString() } : {}),
+        items: selected.map(item => ({
+          ...(isObjectId(item.invKey) ? { itemId: item.invKey } : {}),
+          itemName: item.name,
+          qty: Number(item.qty) || 0,
+          unit: item.unit,
+          category: item.category || 'Other',
+        })),
+      }).unwrap();
+      enqueueSnackbar(`${selected.length} bulk purchase request(s) raised — upload the quotation & amount from the table below once received.`, { variant: 'success' });
+      setShowBulkPurchaseModal(false);
+      setBulkSupplierName('');
+      setBulkItems([]);
+      setBulkPayTerms('');
+      setBulkReminderDate(null);
+      setBulkQuotationAsked(false);
+    } catch (err) {
+      enqueueSnackbar(err?.data?.message || err?.data || 'Failed to raise bulk requests', { variant: 'error' });
+    }
+  };
+
+  // Re-submit revised quotation file after Finance sends back for modification (or
+  // rejects it) — amount/gstAmount/qty are optional since not every resubmit path collects them.
+  const handleResubmitQuotation = async (requestId, file, amount, gstAmount, qty, gstSplit) => {
+    setResubmitLoading(prev => ({ ...prev, [requestId]: true }));
+    try {
+      const fd = new FormData();
+      fd.append('quotation', file);
+      if (amount !== undefined && amount !== null && amount !== '') fd.append('amount', amount);
+      if (gstAmount !== undefined && gstAmount !== null && gstAmount !== '') fd.append('gstAmount', gstAmount);
+      if (qty !== undefined && qty !== null && qty !== '') fd.append('qty', qty);
+      appendGstSplit(fd, gstSplit);
+      await uploadQuotationFile({ id: requestId, formData: fd }).unwrap();
+      enqueueSnackbar('Quotation re-submitted — Finance will review it again.', { variant: 'success' });
+    } catch (err) {
+      enqueueSnackbar(err?.data?.message || 'Failed to re-submit quotation', { variant: 'error' });
+    } finally {
+      setResubmitLoading(prev => { const n = { ...prev }; delete n[requestId]; return n; });
+    }
+  };
+
+  // AI-scans a re-uploaded quotation before re-submitting it (used by the quick
+  // "Re-Submit Quotation" upload button on Modification requests), so the revised
+  // document gets the same qty/amount/GST verification as the original Raise Request
+  // scan instead of being uploaded blind — and reports back what it read.
+  const handleQuickResubmitScan = async (req, file) => {
+    setResubmitLoading(prev => ({ ...prev, [req.key]: true }));
+    let amount;
+    let gstAmount;
+    let qty;
+    let gstSplit;
+    try {
+      const fd = new FormData();
+      fd.append('quotation', file);
+      const extracted = await scanQuotationFile(fd).unwrap();
+      const scanned = extracted?.data || {};
+      const { match, amount: resolvedAmount, isMultiProduct, itemCount } = resolveScannedAmount(scanned, req?.item);
+      amount = resolvedAmount || undefined;
+      gstAmount = scanned.gstAmount !== undefined ? Number(scanned.gstAmount) || 0 : undefined;
+      gstSplit = readGstSplit(scanned);
+      qty = match?.qty ? Number(match.qty) || undefined : undefined;
+      const verifyNote = isMultiProduct
+        ? (match ? ` (matched "${req?.item}" among ${itemCount} products, own line amount)` : ` (couldn't match "${req?.item}" among ${itemCount} products — using document total, please verify)`)
+        : '';
+      enqueueSnackbar(`AI-verified quotation${verifyNote} — Qty: ${qty ?? req?.qty ?? '—'}, Amount: ₹${(amount || 0).toLocaleString()}, GST: ₹${(gstAmount || 0).toLocaleString()}${interStateNote(gstSplit)}`, { variant: isMultiProduct && !match ? 'warning' : 'success' });
+    } catch (err) {
+      enqueueSnackbar(err?.data?.message || 'AI could not read the quotation — re-submitting without auto-filled amounts', { variant: 'warning' });
+    }
+    await handleResubmitQuotation(req.key, file, amount, gstAmount, qty, gstSplit);
+  };
+
+  // Re-Request Quotation modal (for Rejected requests) — collects both the revised
+  // quotation file AND the quoted amount before sending it back to Finance as Pending.
+  const handleRerequestAIScan = async () => {
+    if (!rerequestFile) { enqueueSnackbar('Please upload the revised quotation file first', { variant: 'warning' }); return; }
+    setRerequestScanLoading(true);
+    try {
+      const fd = new FormData();
+      fd.append('quotation', rerequestFile);
+      const extracted = await scanQuotationFile(fd).unwrap();
+      const scanned = extracted?.data || {};
+      const gstAmount = Number(scanned.gstAmount) || 0;
+      const gstSplit = readGstSplit(scanned);
+      const { match, amount, isMultiProduct, itemCount } = resolveScannedAmount(scanned, rerequestTarget?.item);
+      setRerequestAmount(amount || null);
+      setRerequestGstAmount(gstAmount || null);
+      setRerequestGstSplit((gstSplit.cgstAmount || gstSplit.sgstAmount || gstSplit.igstAmount) ? gstSplit : null);
+      const verifyNote = isMultiProduct
+        ? (match ? ` — matched among ${itemCount} products, using its own line amount` : ` — couldn't match among ${itemCount} products, using document total, please verify`)
+        : '';
+      enqueueSnackbar(`AI extracted${verifyNote} — Qty read: ${match?.qty ?? '—'}, Amount: ₹${amount.toLocaleString()}, GST: ₹${gstAmount.toLocaleString()}${interStateNote(gstSplit)}`, { variant: isMultiProduct && !match ? 'warning' : 'success' });
+    } catch (err) {
+      enqueueSnackbar(err?.data?.message || 'AI extraction failed — please enter the amount manually', { variant: 'error' });
+    } finally {
+      setRerequestScanLoading(false);
+    }
+  };
+
+  const handleRerequestSubmit = async () => {
+    if (!rerequestFile) { enqueueSnackbar('Please upload the revised quotation file', { variant: 'warning' }); return; }
+    if (rerequestAmount == null) { enqueueSnackbar('Enter the quoted amount', { variant: 'warning' }); return; }
+    setRerequestSubmitting(true);
+    try {
+      await handleResubmitQuotation(rerequestTarget.key, rerequestFile, rerequestAmount, rerequestGstAmount, undefined, rerequestGstSplit);
+      setShowRerequestModal(false);
+      setRerequestTarget(null);
+      setRerequestFile(null);
+      setRerequestGstAmount(null);
+      setRerequestGstSplit(null);
+      setRerequestAmount(null);
+    } finally {
+      setRerequestSubmitting(false);
+    }
+  };
+
+  // Update Order Details modal (for Approved requests) — Purchase edits qty/unit/
+  // payment terms/amount and resends the request to Finance as Pending for re-approval.
+  // Bulk-purchase requests don't expose payment terms here — that's fixed at the
+  // batch level, not editable per product.
+  const handleUpdateDetailsSubmit = async () => {
+    if (!updateDetailsTarget) return;
+    try {
+      const vals = await updateDetailsForm.validateFields();
+      setUpdateDetailsSubmitting(true);
+      await updatePurchaseRequestDetails({
+        id: updateDetailsTarget.key,
+        qty: vals.qty,
+        unit: vals.unit,
+        paymentTerms: updateDetailsTarget.requestType === 'bulk' ? undefined : vals.payment_terms,
+        amount: vals.amount,
+      }).unwrap();
+      enqueueSnackbar('Order details updated — sent to Finance for re-approval.', { variant: 'success' });
+      setShowUpdateDetailsModal(false);
+      setUpdateDetailsTarget(null);
+      updateDetailsForm.resetFields();
+    } catch (err) {
+      if (err?.errorFields) return; // form validation error, already shown inline
+      enqueueSnackbar(err?.data?.message || 'Failed to update order details', { variant: 'error' });
+    } finally {
+      setUpdateDetailsSubmitting(false);
+    }
+  };
+
+  // Update Order Details — bulk batch variant: one submit walks every product row
+  // in the modal and resends only the ones that actually changed (the backend
+  // rejects a no-op update per request), each as its own request to Finance.
+  // Payment Terms and Amount are single fields shared by the whole batch (not
+  // per-product) — if either changed, every product in the batch is resent.
+  const handleBatchUpdateDetailsSubmit = async () => {
+    if (!batchUpdateDetailsTarget) return;
+    try {
+      const vals = await batchUpdateDetailsForm.validateFields();
+      const originals = batchUpdateDetailsTarget.children || [];
+      const paymentTermsChanged = vals.payment_terms !== batchUpdateDetailsTarget.payment_terms;
+      const amountChanged = (vals.amount ?? null) !== (batchUpdateDetailsTarget.amount ?? null);
+      const batchLevelChanged = paymentTermsChanged || amountChanged;
+      const changed = vals.products.filter((p, i) => {
+        const orig = originals[i];
+        return batchLevelChanged || !orig || Number(p.qty) !== Number(orig.qty) || p.unit !== orig.unit;
+      });
+      if (changed.length === 0) {
+        enqueueSnackbar('No changes to update', { variant: 'warning' });
+        return;
+      }
+      setBatchUpdateDetailsSubmitting(true);
+      await Promise.all(changed.map((p) =>
+        updatePurchaseRequestDetails({
+          id: p.key,
+          qty: p.qty,
+          unit: p.unit,
+          amount: amountChanged ? vals.amount : undefined,
+          paymentTerms: paymentTermsChanged ? vals.payment_terms : undefined,
+        }).unwrap()
+      ));
+      enqueueSnackbar(`Updated ${changed.length} product${changed.length > 1 ? 's' : ''} — sent to Finance for re-approval.`, { variant: 'success' });
+      setShowBatchUpdateDetailsModal(false);
+      setBatchUpdateDetailsTarget(null);
+      batchUpdateDetailsForm.resetFields();
+    } catch (err) {
+      if (err?.errorFields) return;
+      enqueueSnackbar(err?.data?.message || 'Failed to update order details', { variant: 'error' });
+    } finally {
+      setBatchUpdateDetailsSubmitting(false);
+    }
+  };
+
+  // ── Add inventory-item note helper ───────────────────────────────────
+  const handleAddInvNote = (itemKey) => {
+    const text = (invNoteInput[itemKey] || '').trim();
+    if (!text) return;
+    const ts = new Date().toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' });
+    setInvItemNotes(prev => ({
+      ...prev,
+      [itemKey]: [...(prev[itemKey] || []), { text, ts }],
+    }));
+    setInvNoteInput(prev => ({ ...prev, [itemKey]: '' }));
+  };
+
+  // ── Add raised-request note helper ──────────────────────────────────
+  const handleAddReqNote = (requestKey) => {
+    const text = reqNoteInput.trim();
+    if (!text) return;
+    const ts = new Date().toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' });
+    dispatch(addRequestNote({ key: requestKey, text, timestamp: ts }));
+    setReqNoteInput('');
+  };
+
+  return (
+    <div className="page-container fade-in">
+      <div style={{ marginBottom: 20 }}>
+        <PageBreadcrumb title="Purchase Module" items={[{ label: 'Purchase' }]} style={{ marginBottom: 0 }} />
+      </div>
+
+      <Row gutter={[16, 16]}>
+        <Col xs={24}>
+          <Card
+            style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }}
+            styles={{ body: { padding: '8px 16px 16px' } }}
+          >
+            <Tabs
+              defaultActiveKey="stock_status"
+              items={filterTabs([
+                {
+                  key: 'stock_status',
+                  label: <Space><WarningOutlined /> Quotation & Raise Request</Space>,
+                  children: (
+                    <div style={{ marginTop: 12 }}>
+                      {/* ── New Product Requests from Sales ── */}
+                      {newProductRequests.length > 0 && (
+                        <div style={{ marginBottom: 20, padding: '14px 16px', borderRadius: 12, border: '1.5px solid #fa8c1666', background: isDark ? '#1a1500' : '#fffbe6' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10, flexWrap: 'wrap', gap: 8 }}>
+                            <Space>
+                              <WarningOutlined style={{ color: '#fa8c16', fontSize: 16 }} />
+                              <Text strong style={{ color: '#d46b08', fontSize: 13 }}>New Product Requests from Sales</Text>
+                              <Tag color="warning" style={{ borderRadius: 10 }}>{newProductRequests.length} New</Tag>
+                            </Space>
+                            <Text type="secondary" style={{ fontSize: 11 }}>Sales team listed new products — raise purchase requests below</Text>
+                          </div>
+                          <Table
+                            size="small"
+                            dataSource={newProductRequests}
+                            pagination={false}
+                            rowKey="key"
+                            scroll={{ x: 'max-content' }}
+                            columns={[
+                              { title: 'Product Name', dataIndex: 'productName', key: 'productName', width: 180, render: v => <Text strong style={{ color: '#d46b08', fontSize: 13 }}>{v}</Text> },
+                              { title: 'Qty (from Sales)', dataIndex: 'qty', key: 'qty', render: (v) => v || '-' },
+                              { title: 'Hotel / Customer', dataIndex: 'hotelName', key: 'hotelName', render: v => v || '-' },
+                              { title: 'Sales Person', dataIndex: 'salesPerson', key: 'salesPerson', render: v => v || '-' },
+                              { title: 'Quotation Ref', dataIndex: 'fromOrder', key: 'fromOrder', render: v => <Text style={{ color: '#B11E6A', fontSize: 11 }}>{v}</Text> },
+                              { title: 'Date', dataIndex: 'date', key: 'date' },
+                              {
+                                title: 'Action', key: 'action',
+                                render: (_, r) => (
+                                  <Space>
+                                    <Button
+                                      size="small"
+                                      type="primary"
+                                      icon={<PlusOutlined />}
+                                      style={{ background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none', fontWeight: 600 }}
+                                      onClick={() => {
+                                        const fakeProduct = { key: r.key, name: r.productName, unit: 'Pcs', current: 0, min: r.qty || 1 };
+                                        handleOpenRaiseRequest(fakeProduct);
+                                        dispatch(dismissNewProductRequest(r.key));
+                                      }}
+                                    >
+                                      Raise Request
+                                    </Button>
+                                    <Button size="small" danger onClick={() => dispatch(dismissNewProductRequest(r.key))}>Dismiss</Button>
+                                  </Space>
+                                )
+                              }
+                            ]}
+                          />
+                        </div>
+                      )}
+
+                      {/* ── Stock Availability Header with Bulk Purchase button ── */}
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
+                        <div>
+                          <Title level={5} style={{ margin: 0, color: textColor }}>Inventory Stock Availability</Title>
+                          <Text type="secondary">Raise purchase requests directly for low stock products</Text>
+                        </div>
+                        <Button
+                          type="primary"
+                          icon={<ShoppingOutlined />}
+                          onClick={() => { setBulkSupplierName(''); setBulkItems([]); setBulkPayTerms(''); setShowBulkPurchaseModal(true); }}
+                          style={{ background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none', fontWeight: 600 }}
+                        >
+                          Bulk Purchase Request
+                        </Button>
+                      </div>
+                      <div style={{ marginBottom: 10, display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                        <Input prefix={<SearchOutlined style={{ color: '#B11E6A' }} />} placeholder="Search item, category..." allowClear value={stockSearch} onChange={(e) => setStockSearch(e.target.value)} style={{ width: 230, borderRadius: 8 }} />
+                        <Select allowClear placeholder="Quotation Status" value={stockReqStatusFilter} onChange={setStockReqStatusFilter} style={{ width: 180, borderRadius: 8 }}>
+                          <Option value="Pending">Pending</Option>
+                          <Option value="Approved">Approved</Option>
+                          <Option value="Rejected">Rejected</Option>
+                        </Select>
+                      </div>
+                      <Table
+                        size="small"
+                        dataSource={lowStockInventoryItems.filter((inv) => {
+                          const q = stockSearch.toLowerCase();
+                          const matchSearch = !q || (inv.name || '').toLowerCase().includes(q) || (inv.category || '').toLowerCase().includes(q) || (inv.code || '').toLowerCase().includes(q);
+                          const linkedReq = findActiveRequestForItem(inv);
+                          const matchStatus = !stockReqStatusFilter || (linkedReq?.status || '') === stockReqStatusFilter;
+                          return matchSearch && matchStatus;
+                        })}
+                        pagination={{ showSizeChanger: true, pageSizeOptions: ['10', '20', '50', '100'], defaultPageSize: 10 }}
+                        rowKey="key"
+                        scroll={{ x: 'max-content' }}
+                        expandable={{
+                          expandedRowKeys: openInvNotes ? [openInvNotes] : [],
+                          onExpand: () => {},
+                          showExpandColumn: false,
+                          expandedRowRender: (r) => {
+                            const linkedReq = findActiveRequestForItem(r);
+                            if (linkedReq) {
+                              // 2-way shared notes with Financial page (stored in Redux)
+                              const reqNotes = linkedReq.notes || [];
+                              return (
+                                <div style={{ padding: '12px 16px', background: isDark ? '#16192a' : '#fafcff', borderRadius: 8 }}>
+                                  <Text style={{ fontSize: 12, fontWeight: 600, color: '#B11E6A', display: 'block', marginBottom: 4 }}>
+                                    <MessageOutlined style={{ marginRight: 4 }} />Shared Notes — {r.name}
+                                  </Text>
+                                  <Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 8 }}>
+                                    Notes added here are visible to the Financial team and vice versa.
+                                  </Text>
+                                  {reqNotes.length === 0 && <Text type="secondary" style={{ fontSize: 11 }}>No notes yet. Add one below.</Text>}
+                                  {reqNotes.map((n, i) => (
+                                    <div key={i} style={{ padding: '6px 10px', marginBottom: 6, borderRadius: 6, background: isDark ? '#1e2235' : '#f0f4ff', border: `1px solid ${isDark ? '#2a2d40' : '#d6e4ff'}` }}>
+                                      <Text style={{ fontSize: 12 }}>{n.text}</Text>
+                                      <br />
+                                      <Text type="secondary" style={{ fontSize: 10 }}><ClockCircleOutlined style={{ marginRight: 3 }} />{n.timestamp}</Text>
+                                    </div>
+                                  ))}
+                                  <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                                    <Input
+                                      size="small"
+                                      placeholder="Add a shared note (visible to Finance)..."
+                                      value={reqNoteInput}
+                                      onChange={e => setReqNoteInput(e.target.value)}
+                                      onPressEnter={() => handleAddReqNote(linkedReq.key)}
+                                      style={{ flex: 1, borderRadius: 6 }}
+                                    />
+                                    <Button size="small" type="primary" onClick={() => handleAddReqNote(linkedReq.key)}
+                                      style={{ background: '#B11E6A', border: 'none', borderRadius: 6 }}>Add</Button>
+                                  </div>
+                                </div>
+                              );
+                            }
+                            // Local inventory notes (no linked request yet)
+                            const notes = invItemNotes[r.key] || [];
+                            return (
+                              <div style={{ padding: '10px 16px', background: isDark ? '#16192a' : '#fafcff', borderRadius: 8 }}>
+                                <Text style={{ fontSize: 12, fontWeight: 600, color: '#B11E6A', display: 'block', marginBottom: 8 }}>
+                                  <MessageOutlined style={{ marginRight: 4 }} />Notes for {r.name}
+                                </Text>
+                                {notes.length === 0 && <Text type="secondary" style={{ fontSize: 11 }}>No notes yet. Add one below.</Text>}
+                                {notes.map((n, i) => (
+                                  <div key={i} style={{ padding: '6px 10px', marginBottom: 6, borderRadius: 6, background: isDark ? '#1e2235' : '#f0f4ff', border: `1px solid ${isDark ? '#2a2d40' : '#d6e4ff'}` }}>
+                                    <Text style={{ fontSize: 12 }}>{n.text}</Text>
+                                    <br />
+                                    <Text type="secondary" style={{ fontSize: 10 }}><ClockCircleOutlined style={{ marginRight: 3 }} />{n.ts}</Text>
+                                  </div>
+                                ))}
+                                <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                                  <Input
+                                    size="small"
+                                    placeholder="Add a note..."
+                                    value={invNoteInput[r.key] || ''}
+                                    onChange={e => setInvNoteInput(prev => ({ ...prev, [r.key]: e.target.value }))}
+                                    onPressEnter={() => handleAddInvNote(r.key)}
+                                    style={{ flex: 1, borderRadius: 6 }}
+                                  />
+                                  <Button size="small" type="primary" onClick={() => handleAddInvNote(r.key)}
+                                    style={{ background: '#B11E6A', border: 'none', borderRadius: 6 }}>Add</Button>
+                                </div>
+                              </div>
+                            );
+                          },
+                        }}
+                        columns={[
+                          { title: 'Item Name', dataIndex: 'name', key: 'name', render: (v) => <Text strong>{v}</Text> },
+                          { title: 'Category', dataIndex: 'category', key: 'category' },
+                          { title: 'Stock Count', dataIndex: 'current', key: 'current', render: (v, r) => <Text style={{ color: v <= r.min ? '#ff4d4f' : 'inherit' }}>{formatQty(v)}{r.unitValue ? <Text type="secondary" style={{ fontSize: 10, marginLeft: 4 }}>({formatQty(r.unitValue)} {r.unit}/pc)</Text> : null}</Text> },
+                          { title: 'Min. Required', dataIndex: 'min', key: 'min', render: (v) => `${v}` },
+                          {
+                            title: 'Supplier', key: 'supplier',
+                            render: (_, r) => {
+                              const req = findActiveRequestForItem(r);
+                              if (!req?.supplier) return <Text type="secondary">—</Text>;
+                              return <Text style={{ color: '#B11E6A', fontWeight: 600, fontSize: 13 }}>{req.supplier}</Text>;
+                            }
+                          },
+                          {
+                            title: 'Payment Terms', key: 'payment_terms',
+                            render: (_, r) => {
+                              const req = findActiveRequestForItem(r);
+                              if (!req?.payment_terms) return <Text type="secondary">—</Text>;
+                              return <Text style={{ fontSize: 13 }}>{req.payment_terms}</Text>;
+                            }
+                          },
+                          {
+                            title: 'Payment Doc', key: 'payment_doc',
+                            render: (_, r) => {
+                              const req = findActiveRequestForItem(r);
+                              const linkedOrder = req ? findLinkedOrder(req) : null;
+                              const paymentHistory = linkedOrder?.paymentHistory || [];
+                              const quotationFiles = req?.quotationFiles || [];
+                              const hasAny = paymentHistory.length > 0 || quotationFiles.length > 0 || linkedOrder?.payment_proof;
+                              if (!hasAny) return <Text type="secondary" style={{ fontSize: 11 }}>—</Text>;
+                              return (
+                                <Button size="small" icon={<FileTextOutlined />}
+                                  onClick={() => setViewApprovalDoc({ ...req, paymentHistory, quotationFiles, payment_doc: linkedOrder?.payment_proof || null })}
+                                  style={{ color: '#52c41a', borderColor: '#52c41a', fontWeight: 600, fontSize: 11, background: 'transparent' }}>
+                                  View File{(paymentHistory.length + quotationFiles.length) > 1 ? `s (${paymentHistory.length + quotationFiles.length})` : ''}
+                                </Button>
+                              );
+                            }
+                          },
+                          {
+                            title: 'Quotation Status',
+                            key: 'req_status',
+                            render: (_, r) => {
+                              const req = findActiveRequestForItem(r);
+                              if (!req) return <Text type="secondary" style={{ fontSize: 11 }}>—</Text>;
+                              const colorMap = { Approved: 'success', Rejected: 'error', Pending: 'processing', Modification: 'warning' };
+                              return <Tag color={colorMap[req.status]} style={{ borderRadius: 12 }}>{req.status}</Tag>;
+                            }
+                          },
+                          {
+                            title: 'Finance Status',
+                            key: 'finance_status',
+                            render: (_, r) => {
+                              const req = findActiveRequestForItem(r);
+                              if (!req) return <Text type="secondary" style={{ fontSize: 11 }}>—</Text>;
+                              if (req.status === 'Approved') return <Tag color="success" style={{ borderRadius: 12 }}>Approved</Tag>;
+                              if (req.status === 'Rejected') return (
+                                <Tooltip title={req.financeNote || 'Rejected by finance'}>
+                                  <Tag color="error" style={{ borderRadius: 12, cursor: 'pointer' }}>Rejected</Tag>
+                                </Tooltip>
+                              );
+                              if (req.status === 'Modification') return (
+                                <Tooltip title={req.financeNote || 'Modify requested by finance'}>
+                                  <Tag color="warning" style={{ borderRadius: 12, cursor: 'pointer' }}>Modify Requested</Tag>
+                                </Tooltip>
+                              );
+                              return <Text type="secondary" style={{ fontSize: 11 }}>—</Text>;
+                            }
+                          },
+                          {
+                            title: 'Upload LR Copies',
+                            key: 'lr_copies',
+                            render: (_, r) => {
+                              const req = findActiveRequestForItem(r);
+                              const linkedOrder = req ? findLinkedOrder(req) : null;
+                              if (!linkedOrder) return <Text type="secondary">—</Text>;
+                              // Local lrData is session-only; fall back to the persisted PurchaseOrder
+                              // fields so an already-uploaded LR still shows after a refresh.
+                              const lr = lrData[linkedOrder.key] || (linkedOrder.lrNumber ? {
+                                lrNumber: linkedOrder.lrNumber,
+                                deliveryDate: linkedOrder.expectedDeliveryDate,
+                                paidStatus: linkedOrder.lrPaymentStatus || 'Not Paid',
+                                billTotalAmount: linkedOrder.billTotalAmount || 0,
+                              } : null);
+                              if (lr) {
+                                return (
+                                  <Space direction="vertical" size={2}>
+                                    <Tag color={lr.paidStatus === 'Paid' ? 'success' : lr.paidStatus === 'Partial Paid' ? 'warning' : 'error'} style={{ borderRadius: 8, margin: 0 }}>
+                                      {lr.paidStatus === 'Paid' ? <CheckCircleOutlined style={{ marginRight: 3 }} /> : null}{lr.paidStatus}
+                                    </Tag>
+                                    <Text type="secondary" style={{ fontSize: 11 }}>LR: <Text strong style={{ fontSize: 11 }}>{lr.lrNumber}</Text></Text>
+                                    <Text type="secondary" style={{ fontSize: 10 }}>Delivery: {lr.deliveryDate}</Text>
+                                    {renderLrReminderTag(linkedOrder)}
+                                    <Button size="small" icon={<EditOutlined />}
+                                      onClick={() => { setLrUploadTarget({ order: linkedOrder, itemName: r.name }); lrUploadForm.setFieldsValue({ lr_number: lr.lrNumber, delivery_date: dayjs(lr.deliveryDate), paid_status: lr.paidStatus, bill_total_amount: lr.billTotalAmount || linkedOrder.billTotalAmount || 0, lr_gst_amount: linkedOrder.lrGstAmount || 0, lr_cgst_amount: linkedOrder.lrCgstAmount || 0, lr_sgst_amount: linkedOrder.lrSgstAmount || 0, lr_igst_amount: linkedOrder.lrIgstAmount || 0 }); setShowLRUploadModal(true); }}
+                                      style={{ fontSize: 11, height: 22, padding: '0 8px' }}>Edit</Button>
+                                  </Space>
+                                );
+                              }
+                              return (
+                                <Space direction="vertical" size={2}>
+                                  <Button size="small" icon={<UploadOutlined />}
+                                    onClick={() => { setLrUploadTarget({ order: linkedOrder, itemName: r.name }); lrUploadForm.resetFields(); setShowLRUploadModal(true); }}
+                                    style={{ borderColor: '#1890ff', color: '#1890ff' }}>
+                                    Upload
+                                  </Button>
+                                  {renderLrReminderTag(linkedOrder)}
+                                </Space>
+                              );
+                            }
+                          },
+                          {
+                            title: 'Action',
+                            key: 'action',
+                            render: (_, r) => {
+                              const req = findActiveRequestForItem(r);
+                              const orderAlreadyRaised = !!findLinkedOrder(req);
+                              const noteCount = req ? (req.notes || []).length : (invItemNotes[r.key] || []).length;
+                              const noteBtn = (
+                                <Badge count={noteCount} size="small" offset={[-2, 2]}>
+                                  <Button
+                                    size="small"
+                                    icon={<MessageOutlined />}
+                                    onClick={() => setOpenInvNotes(openInvNotes === r.key ? null : r.key)}
+                                    style={{ color: openInvNotes === r.key ? '#fff' : '#B11E6A', background: openInvNotes === r.key ? '#B11E6A' : 'transparent', borderColor: '#B11E6A55' }}
+                                  >{req ? 'Modify' : ''}</Button>
+                                </Badge>
+                              );
+
+                              // Direct WA Ask Quotation button (uses raised request supplier details)
+                              const buildReqWABtn = (label = 'Ask Quotation') => {
+                                if (!req) return null;
+                                const sup = suppliers.find(s => s.name === req.supplier);
+                                const phone = sup ? sup.phone.replace(/\D/g, '') : '';
+                                const latestNote = (req.notes || []).at(-1);
+                                const msg = `*Quotation Follow-up*\n\n*Item:* ${req.item}\n*Quantity:* ${req.qty} ${req.unit}\n*Payment Terms:* ${req.payment_terms}${latestNote ? `\n\nNote: ${latestNote.text}` : ''}\n\nPlease provide a quotation at the earliest.`;
+                                return (
+                                  <Button size="small" icon={<WhatsAppOutlined />}
+                                    style={{ borderColor: '#25D366', color: '#25D366', fontWeight: 600 }}
+                                    onClick={() => window.open(`https://wa.me/${phone}?text=${encodeURIComponent(msg)}`, '_blank')}>
+                                    {label}
+                                  </Button>
+                                );
+                              };
+
+                              // Approved & PO already created (the normal case, since Finance's approve
+                              // action creates the PO immediately) — Purchase can still edit qty/unit/
+                              // payment terms/amount and resend to Finance for re-approval.
+                              if (orderAlreadyRaised) return (
+                                <Space wrap size={4}>
+                                  {req?.status === 'Approved' && (
+                                    <Button
+                                      size="small"
+                                      icon={<EditOutlined />}
+                                      onClick={() => {
+                                        setUpdateDetailsTarget(req);
+                                        updateDetailsForm.setFieldsValue({ qty: req.qty, unit: req.unit, payment_terms: req.payment_terms, amount: req.amount });
+                                        setShowUpdateDetailsModal(true);
+                                      }}
+                                      style={{ borderColor: '#B11E6A', color: '#B11E6A', fontWeight: 600 }}
+                                    >
+                                      Update Order Details
+                                    </Button>
+                                  )}
+                                  {noteBtn}
+                                </Space>
+                              );
+
+                              if (req?.status === 'Approved') return (
+                                <Space wrap size={4}>
+                                  <Button
+                                    size="small"
+                                    type="primary"
+                                    icon={<ShoppingOutlined />}
+                                    onClick={() => { setSelectedPlaceOrderReq(req); setSelectedPlaceOrderItem(r); setShowPlaceOrderModal(true); }}
+                                    style={{ background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none', fontWeight: 600 }}
+                                  >
+                                    Place Order
+                                  </Button>
+                                  {noteBtn}
+                                </Space>
+                              );
+
+                              // Pending: request has already been raised & sent to Finance for
+                              // review — no need to ask the supplier again until Finance responds
+                              // (Approved / Rejected / Modification), so just leave the notes button.
+                              if (req?.status === 'Pending') return <Space>{noteBtn}</Space>;
+
+                              // Modification: Finance sent the quotation back — Purchase can re-ask
+                              // the supplier for a fresh quote (same item/qty/supplier, same WhatsApp
+                              // event as the original Ask Quotation) and/or re-upload a revised file.
+                              if (req?.status === 'Modification') return (
+                                <Space direction="vertical" size={4}>
+                                  {req.financeNote && (
+                                    <Tooltip title={req.financeNote}>
+                                      <Tag color="warning" style={{ fontSize: 11, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', cursor: 'pointer' }}>
+                                        Finance: {req.financeNote}
+                                      </Tag>
+                                    </Tooltip>
+                                  )}
+                                  <Space size={4} wrap>
+                                    <Button
+                                      size="small"
+                                      icon={<WhatsAppOutlined />}
+                                      loading={!!reAskQuotationLoading[req.key]}
+                                      onClick={() => handleReAskQuotation(req)}
+                                      style={{ borderColor: '#25D366', color: '#25D366', fontWeight: 600 }}
+                                    >
+                                      Re-Ask Quotation
+                                    </Button>
+                                    <Upload
+                                      maxCount={1}
+                                      beforeUpload={file => { handleQuickResubmitScan(req, file); return false; }}
+                                      accept=".pdf,.jpg,.jpeg,.png"
+                                      showUploadList={false}
+                                      disabled={!!resubmitLoading[req.key]}
+                                    >
+                                      <Button size="small" icon={<UploadOutlined />} loading={!!resubmitLoading[req.key]} style={{ borderColor: '#fa8c16', color: '#fa8c16', fontWeight: 600 }}>
+                                        Re-Submit Quotation
+                                      </Button>
+                                    </Upload>
+                                    {noteBtn}
+                                  </Space>
+                                </Space>
+                              );
+
+                              // Rejected: Finance turned it down — Purchase can either re-request
+                              // (upload a revised quotation + amount) or go back to asking the
+                              // supplier again over WhatsApp.
+                              if (req?.status === 'Rejected') return (
+                                <Space direction="vertical" size={4}>
+                                  {req.financeNote && (
+                                    <Tooltip title={req.financeNote}>
+                                      <Tag color="error" style={{ fontSize: 11, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', cursor: 'pointer' }}>
+                                        Rejected: {req.financeNote}
+                                      </Tag>
+                                    </Tooltip>
+                                  )}
+                                  <Space size={4} wrap>
+                                    <Button
+                                      size="small"
+                                      icon={<UploadOutlined />}
+                                      onClick={() => { setRerequestTarget(req); setRerequestFile(null); setRerequestAmount(null); setRerequestGstAmount(null); setRerequestGstSplit(null); setShowRerequestModal(true); }}
+                                      style={{ borderColor: '#B11E6A', color: '#B11E6A', fontWeight: 600 }}
+                                    >
+                                      Re-Request Quotation
+                                    </Button>
+                                    {buildReqWABtn()}
+                                    {noteBtn}
+                                  </Space>
+                                </Space>
+                              );
+
+                              if (whatsappSentItems.has(r.key)) return (
+                                <Space direction="vertical" size={4}>
+                                  <Space>
+                                    <Button size="small" type="primary" icon={<PlusOutlined />}
+                                      onClick={() => handleOpenRaiseRequest(r)}
+                                      style={{ background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none', fontWeight: 600 }}>
+                                      Raise Request
+                                    </Button>
+                                    {noteBtn}
+                                  </Space>
+                                </Space>
+                              );
+
+                              return (
+                                <Space>
+                                  <Button size="small" icon={<WhatsAppOutlined />} onClick={() => handleOpenRequest(r)}
+                                    style={{ borderColor: '#25D366', color: '#25D366', fontWeight: 600 }}>
+                                    Ask Quotation
+                                  </Button>
+                                  {noteBtn}
+                                </Space>
+                              );
+                            }
+                          }
+                        ]}
+                      />
+
+                      {/* ── Bulk Purchase Requests Table ── */}
+                      {(() => {
+                        const allBulkReqs = raisedRequests.filter(r => r.requestType === 'bulk');
+                        if (allBulkReqs.length === 0) return null;
+                        const bulkReqs = allBulkReqs.filter(req => {
+                          if (!bulkDateRange) return true;
+                          const d = req.date ? req.date.slice(0, 10) : '';
+                          return d >= bulkDateRange[0] && d <= bulkDateRange[1];
+                        });
+
+                        // Collapse items that share a batchId into one expandable parent row
+                        const groupItemsByBatch = (items) => {
+                          const batchMap = {};
+                          const singles = [];
+                          items.forEach((it) => {
+                            if (it.batchId) {
+                              if (!batchMap[it.batchId]) batchMap[it.batchId] = [];
+                              batchMap[it.batchId].push(it);
+                            } else {
+                              singles.push(it);
+                            }
+                          });
+                          const rows = [];
+                          Object.values(batchMap).forEach((batchItems) => {
+                            if (batchItems.length > 1) {
+                              const first = batchItems[0];
+                              const statuses = batchItems.map(b => b.status);
+                              const status = statuses.every(s => s === 'Approved') ? 'Approved'
+                                : statuses.some(s => s === 'Rejected') ? 'Rejected'
+                                : statuses.some(s => s === 'Modification') ? 'Modification'
+                                : 'Pending';
+                              // The group row's Amount/GST are the batch TOTAL — sum every
+                              // product's own amount, not just the first product's — otherwise
+                              // the header row shows one product's amount instead of the total
+                              // (e.g. Loofahs' ₹787.5 instead of ₹1312.5 for the whole batch).
+                              const hasAnyAmount = batchItems.some(b => b.amount != null);
+                              const totalAmount = hasAnyAmount ? batchItems.reduce((s, b) => s + (b.amount || 0), 0) : null;
+                              // gstAmount is saved as one whole-batch value repeated on every
+                              // child (see handleBatchRowSave), not a per-product split, so the
+                              // group total is just that shared value, not a sum.
+                              const totalGst = batchItems.find(b => b.gstAmount != null)?.gstAmount ?? null;
+                              // CGST/SGST/IGST split is likewise the shared whole-batch value, not a sum.
+                              const gstSplitRow = batchItems.find(b => b.igstAmount || b.cgstAmount || b.sgstAmount);
+                              rows.push({
+                                key: `batch-${first.batchId}`,
+                                isBatchGroup: true,
+                                item: `${batchItems.length} Products`,
+                                supplier: first.supplier,
+                                payment_terms: first.payment_terms,
+                                date: first.date,
+                                status,
+                                amount: totalAmount,
+                                gstAmount: totalGst,
+                                cgstAmount: gstSplitRow?.cgstAmount ?? null,
+                                sgstAmount: gstSplitRow?.sgstAmount ?? null,
+                                igstAmount: gstSplitRow?.igstAmount ?? null,
+                                quotationFiles: first.quotationFiles || [],
+                                batchId: first.batchId,
+                                children: batchItems.map(b => ({ ...b, isBatchChild: true })),
+                              });
+                            } else {
+                              rows.push(batchItems[0]);
+                            }
+                          });
+                          rows.push(...singles);
+                          return rows;
+                        };
+
+                        const bulkTableColumns = [
+                          {
+                            title: 'Item', dataIndex: 'item', key: 'item', width: 180,
+                            render: (v, r) => {
+                              if (r.isBatchGroup) {
+                                return (
+                                  <Space direction="vertical" size={1}>
+                                    <Text strong>{v}</Text>
+                                    <Tag color="blue" style={{ borderRadius: 10, fontSize: 10, margin: 0, padding: '0 6px' }}>
+                                      Bulk ×{r.children.length}
+                                    </Tag>
+                                  </Space>
+                                );
+                              }
+                              return <Text strong>{v}</Text>;
+                            }
+                          },
+                          {
+                            title: 'Supplier', dataIndex: 'supplier', key: 'supplier', width: 140,
+                            render: v => <Text style={{ color: '#B11E6A', fontWeight: 600 }}>{v}</Text>
+                          },
+                          {
+                            title: 'Qty', key: 'qty', width: 90,
+                            render: (_, r) => r.isBatchGroup
+                              ? <Text type="secondary" style={{ fontSize: 12 }}>{r.children.length} items</Text>
+                              : <Text strong>{r.qty} {r.unit}</Text>
+                          },
+                          {
+                            title: 'Payment Terms', dataIndex: 'payment_terms', key: 'payment_terms', width: 200,
+                            render: v => <Text style={{ fontSize: 12 }}>{v || '-'}</Text>
+                          },
+                          {
+                            title: 'Amount', key: 'amount', width: 110, align: 'right',
+                            render: (_, r) => r.amount != null
+                              ? <Text strong style={{ color: '#B11E6A', fontSize: 13 }}>&#8377;{r.amount.toLocaleString()}</Text>
+                              : <Text type="secondary" style={{ fontSize: 11 }}>—</Text>
+                          },
+                          {
+                            title: 'GST Amount', key: 'gstAmount', width: 130, align: 'right',
+                            render: (_, r) => r.gstAmount != null
+                              ? (
+                                <div style={{ lineHeight: 1.3 }}>
+                                  <Text style={{ color: '#888', fontSize: 12 }}>&#8377;{r.gstAmount.toLocaleString()}</Text>
+                                  {r.igstAmount > 0
+                                    ? <div><Text style={{ color: '#1890ff', fontSize: 10 }}>IGST (inter-state)</Text></div>
+                                    : (r.cgstAmount > 0 || r.sgstAmount > 0)
+                                      ? <div><Text style={{ color: '#aaa', fontSize: 10 }}>CGST &#8377;{(r.cgstAmount || 0).toLocaleString()} · SGST &#8377;{(r.sgstAmount || 0).toLocaleString()}</Text></div>
+                                      : null}
+                                </div>
+                              )
+                              : <Text type="secondary" style={{ fontSize: 11 }}>—</Text>
+                          },
+                          {
+                            title: 'Date', dataIndex: 'date', key: 'date', width: 100,
+                            render: v => <Text style={{ fontSize: 12 }}>{v}</Text>
+                          },
+                          {
+                            title: 'Quotation Status', key: 'status', width: 120,
+                            render: (_, r) => {
+                              const colorMap = { Approved: 'success', Rejected: 'error', Pending: 'processing', Modification: 'warning' };
+                              return <Tag color={colorMap[r.status] || 'default'} style={{ borderRadius: 12 }}>{r.status}</Tag>;
+                            }
+                          },
+                          {
+                            title: 'Finance Status', key: 'finance_status', width: 130,
+                            render: (_, r) => {
+                              if (r.status === 'Approved') return <Tag color="success" style={{ borderRadius: 12 }}>Approved</Tag>;
+                              if (r.status === 'Rejected') return (
+                                <Tooltip title={r.financeNote || 'Rejected by finance'}>
+                                  <Tag color="error" style={{ borderRadius: 12, cursor: 'pointer' }}>Rejected</Tag>
+                                </Tooltip>
+                              );
+                              if (r.status === 'Modification') return (
+                                <Tooltip title={r.financeNote || 'Modify requested by finance'}>
+                                  <Tag color="warning" style={{ borderRadius: 12, cursor: 'pointer' }}>Modify Requested</Tag>
+                                </Tooltip>
+                              );
+                              return <Text type="secondary" style={{ fontSize: 11 }}>—</Text>;
+                            }
+                          },
+                          {
+                            title: 'Quotation File', key: 'quotation_file', width: 130,
+                            render: (_, r) => {
+                              const files = r.quotationFiles || [];
+                              if (files.length === 0) return <Text type="secondary" style={{ fontSize: 11 }}>—</Text>;
+                              return (
+                                <Button
+                                  size="small"
+                                  icon={<FileTextOutlined />}
+                                  onClick={() => setViewApprovalDoc({ ...r, quotationFiles: files, paymentHistory: findLinkedOrder(r)?.paymentHistory || [] })}
+                                  style={{ color: '#B11E6A', borderColor: '#B11E6A', fontSize: 11 }}
+                                >
+                                  File{files.length > 1 ? ` (${files.length})` : ''}
+                                </Button>
+                              );
+                            }
+                          },
+                          {
+                            title: 'Payment Status', key: 'payment_status', width: 110, align: 'center',
+                            render: (_, r) => {
+                              if (r.isBatchChild) return <Text type="secondary" style={{ fontSize: 11 }}>—</Text>;
+                              const linkedOrder = findLinkedOrder(r);
+                              if (!linkedOrder) return <Text type="secondary" style={{ fontSize: 11 }}>—</Text>;
+                              const payStatus = linkedOrder.status || 'Unpaid';
+                              return (
+                                <Tag color={payStatus === 'Paid' ? 'success' : payStatus === 'Partial Paid' ? 'warning' : 'error'} style={{ borderRadius: 10, margin: 0 }}>
+                                  {payStatus}
+                                </Tag>
+                              );
+                            }
+                          },
+                          {
+                            title: 'Payment Proof', key: 'payment_proof', width: 140, align: 'center',
+                            render: (_, r) => {
+                              if (r.isBatchChild) return <Text type="secondary" style={{ fontSize: 11 }}>—</Text>;
+                              const linkedOrder = findLinkedOrder(r);
+                              const proofs = (linkedOrder?.paymentHistory || []).filter(p => p.proofUrl);
+                              if (proofs.length === 0 && !linkedOrder?.payment_proof) return <Text type="secondary" style={{ fontSize: 11 }}>—</Text>;
+                              if (proofs.length === 0) {
+                                // Older order paid before paymentHistory existed — only the legacy single proof is available
+                                return (
+                                  <Button size="small" icon={<EyeOutlined />}
+                                    style={{ color: '#52c41a', borderColor: '#52c41a', fontSize: 11 }}
+                                    onClick={() => window.open(linkedOrder.payment_proof, '_blank')}>
+                                    View Proof
+                                  </Button>
+                                );
+                              }
+                              return (
+                                <Popover
+                                  trigger="click"
+                                  title={`Payment Proofs (${proofs.length})`}
+                                  content={
+                                    <Space direction="vertical" size={4}>
+                                      {proofs.slice().reverse().map((p, i) => (
+                                        <Button key={i} size="small" type="link" icon={<EyeOutlined />}
+                                          onClick={() => window.open(p.proofUrl, '_blank')}
+                                          style={{ padding: 0, height: 'auto', fontSize: 11 }}>
+                                          &#8377;{(p.amount || 0).toLocaleString()} — {p.paidDate ? new Date(p.paidDate).toLocaleDateString() : ''}
+                                        </Button>
+                                      ))}
+                                    </Space>
+                                  }
+                                >
+                                  <Button size="small" icon={<EyeOutlined />} style={{ color: '#52c41a', borderColor: '#52c41a', fontSize: 11 }}>
+                                    View Proof{proofs.length > 1 ? `s (${proofs.length})` : ''}
+                                  </Button>
+                                </Popover>
+                              );
+                            }
+                          },
+                          {
+                            title: 'Upload LR Copies', key: 'lr_copies', width: 160,
+                            render: (_, r) => {
+                              if (r.isBatchChild) return <Text type="secondary" style={{ fontSize: 11 }}>—</Text>;
+                              const linkedOrder = findLinkedOrder(r);
+                              if (!linkedOrder) return <Text type="secondary">—</Text>;
+                              // Local lrData is session-only; fall back to the persisted PurchaseOrder
+                              // fields so an already-uploaded LR still shows after a refresh.
+                              const lr = lrData[linkedOrder.key] || (linkedOrder.lrNumber ? {
+                                lrNumber: linkedOrder.lrNumber,
+                                deliveryDate: linkedOrder.expectedDeliveryDate,
+                                paidStatus: linkedOrder.lrPaymentStatus || 'Not Paid',
+                                billTotalAmount: linkedOrder.billTotalAmount || 0,
+                              } : null);
+                              if (lr) {
+                                return (
+                                  <Space direction="vertical" size={2}>
+                                    <Tag color={lr.paidStatus === 'Paid' ? 'success' : lr.paidStatus === 'Partial Paid' ? 'warning' : 'error'} style={{ borderRadius: 8, margin: 0 }}>
+                                      {lr.paidStatus === 'Paid' ? <CheckCircleOutlined style={{ marginRight: 3 }} /> : null}{lr.paidStatus}
+                                    </Tag>
+                                    <Text type="secondary" style={{ fontSize: 11 }}>LR: <Text strong style={{ fontSize: 11 }}>{lr.lrNumber}</Text></Text>
+                                    <Text type="secondary" style={{ fontSize: 10 }}>Delivery: {lr.deliveryDate}</Text>
+                                    {renderLrReminderTag(linkedOrder)}
+                                    <Button size="small" icon={<EditOutlined />}
+                                      onClick={() => { setLrUploadTarget({ order: linkedOrder, itemName: r.item }); lrUploadForm.setFieldsValue({ lr_number: lr.lrNumber, delivery_date: dayjs(lr.deliveryDate), paid_status: lr.paidStatus, bill_total_amount: lr.billTotalAmount || linkedOrder.billTotalAmount || 0, lr_gst_amount: linkedOrder.lrGstAmount || 0, lr_cgst_amount: linkedOrder.lrCgstAmount || 0, lr_sgst_amount: linkedOrder.lrSgstAmount || 0, lr_igst_amount: linkedOrder.lrIgstAmount || 0 }); setShowLRUploadModal(true); }}
+                                      style={{ fontSize: 11, height: 22, padding: '0 8px' }}>Edit</Button>
+                                  </Space>
+                                );
+                              }
+                              return (
+                                <Space direction="vertical" size={2}>
+                                  <Button size="small" icon={<UploadOutlined />}
+                                    onClick={() => { setLrUploadTarget({ order: linkedOrder, itemName: r.item }); lrUploadForm.resetFields(); setShowLRUploadModal(true); }}
+                                    style={{ borderColor: '#1890ff', color: '#1890ff' }}>
+                                    Upload
+                                  </Button>
+                                  {renderLrReminderTag(linkedOrder)}
+                                </Space>
+                              );
+                            }
+                          },
+                          {
+                            title: 'Action', key: 'action', fixed: 'right', width: 200,
+                            render: (_, r) => {
+                              // Bulk batch, still Pending: one Upload/Scan covers every item in
+                              // the batch — shown once on the group row instead of once per
+                              // child item — but each product below gets its OWN amount (AI-
+                              // matched product-wise from that single file, or typed manually)
+                              // instead of one lump amount being stamped on every product.
+                              if (r.isBatchGroup && r.status === 'Pending') {
+                                const file = pendingRowFile[r.key];
+                                const children = r.children || [];
+                                const saving = !!pendingRowSaving[r.key];
+                                const scanning = !!pendingRowScanLoading[r.key];
+                                const allAmountsSet = children.every((child) => batchChildAmount(r, child) != null);
+                                return (
+                                  <Space direction="vertical" size={4} style={{ width: 190 }}>
+                                    <Text type="secondary" style={{ fontSize: 10 }}>{r.payment_terms || '-'} · whole batch</Text>
+                                    <Upload
+                                      maxCount={1}
+                                      beforeUpload={f => { setPendingRowFile(prev => ({ ...prev, [r.key]: f })); return false; }}
+                                      onRemove={() => setPendingRowFile(prev => { const n = { ...prev }; delete n[r.key]; return n; })}
+                                      accept=".pdf,.jpg,.jpeg,.png"
+                                      fileList={file ? [{ uid: '1', name: file.name, status: 'done' }] : []}
+                                    >
+                                      <Button size="small" icon={<UploadOutlined />} style={{ borderColor: '#B11E6A', color: '#B11E6A', fontWeight: 600, width: '100%' }}>
+                                        <span style={{ display: 'inline-block', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', verticalAlign: 'middle' }}>
+                                          {file ? `✓ ${file.name}` : (r.quotationFiles?.length ? 'Re-Upload' : 'Upload Quotation')}
+                                        </span>
+                                      </Button>
+                                    </Upload>
+                                    <Button
+                                      size="small"
+                                      icon={<ThunderboltOutlined />}
+                                      loading={scanning}
+                                      disabled={!file}
+                                      onClick={() => handlePendingRowAIScan(r)}
+                                      style={{ borderColor: '#B11E6A66', color: '#B11E6A', fontWeight: 600, width: '100%' }}
+                                    >
+                                      {scanning ? 'Scanning...' : 'Scan with AI'}
+                                    </Button>
+                                    <Text type="secondary" style={{ fontSize: 10 }}>Amount per product:</Text>
+                                    {children.map((child) => (
+                                      <div key={child.key} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                                        <Text
+                                          style={{ fontSize: 10, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                                          title={child.item}
+                                        >
+                                          {child.item}
+                                        </Text>
+                                        <InputNumber
+                                          size="small"
+                                          min={0}
+                                          placeholder="₹"
+                                          value={batchChildAmount(r, child)}
+                                          onChange={v => setPendingRowAmount(prev => ({ ...prev, [child.key]: v }))}
+                                          style={{ width: 85 }}
+                                        />
+                                      </div>
+                                    ))}
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                                      <Text
+                                        style={{ fontSize: 10, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                                        title="Tax/GST amount for the whole batch quotation"
+                                      >
+                                        Tax Amount (₹)
+                                      </Text>
+                                      <InputNumber
+                                        size="small"
+                                        min={0}
+                                        placeholder="₹"
+                                        value={pendingRowGstAmount[r.key] ?? null}
+                                        onChange={v => setPendingRowGstAmount(prev => ({ ...prev, [r.key]: v }))}
+                                        style={{ width: 85 }}
+                                      />
+                                    </div>
+                                    <Button
+                                      size="small"
+                                      type="primary"
+                                      loading={saving}
+                                      disabled={!file || !allAmountsSet}
+                                      onClick={() => handleBatchRowSave(r)}
+                                      style={{ background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none', fontWeight: 600, width: '100%' }}
+                                    >
+                                      Save for Batch
+                                    </Button>
+                                  </Space>
+                                );
+                              }
+                              // A batch's items share ONE consolidated PurchaseOrder (see
+                              // findLinkedOrder), so "Order Placed" + editing is batch-wide —
+                              // show one tag + one "Update Details" (opens all products in one
+                              // modal) on the group row instead of once per child.
+                              if (r.isBatchGroup) {
+                                if (!!findLinkedOrder(r)) return (
+                                  <Space direction="vertical" size={4}>
+                                    <Tag color="success" style={{ borderRadius: 10, margin: 0 }}>Order Placed</Tag>
+                                    {r.status === 'Approved' && (
+                                      <Button
+                                        size="small"
+                                        icon={<EditOutlined />}
+                                        onClick={() => {
+                                          setBatchUpdateDetailsTarget(r);
+                                          batchUpdateDetailsForm.setFieldsValue({
+                                            payment_terms: r.payment_terms,
+                                            amount: r.amount,
+                                            products: r.children.map(c => ({ key: c.key, qty: c.qty, unit: c.unit })),
+                                          });
+                                          setShowBatchUpdateDetailsModal(true);
+                                        }}
+                                        style={{ borderColor: '#B11E6A', color: '#B11E6A', fontWeight: 600 }}
+                                      >
+                                        Update Details
+                                      </Button>
+                                    )}
+                                  </Space>
+                                );
+                                return <Text type="secondary" style={{ fontSize: 11 }}>Expand to view {r.children.length} items</Text>;
+                              }
+                              if (r.isBatchChild && r.status === 'Pending') return <Text type="secondary" style={{ fontSize: 11 }}>Quotation uploaded once, above</Text>;
+                              // Batch children never render their own action — editing happens
+                              // once for the whole batch via the group row above.
+                              if (r.isBatchChild) return <Text type="secondary" style={{ fontSize: 11 }}>—</Text>;
+                              const orderAlreadyRaised = !!findLinkedOrder(r);
+                              if (orderAlreadyRaised) return (
+                                <Space direction="vertical" size={4}>
+                                  <Tag color="success" style={{ borderRadius: 10, margin: 0 }}>Order Placed</Tag>
+                                  {r.status === 'Approved' && (
+                                    <Button
+                                      size="small"
+                                      icon={<EditOutlined />}
+                                      onClick={() => {
+                                        setUpdateDetailsTarget(r);
+                                        updateDetailsForm.setFieldsValue({ qty: r.qty, unit: r.unit, payment_terms: r.payment_terms, amount: r.amount });
+                                        setShowUpdateDetailsModal(true);
+                                      }}
+                                      style={{ borderColor: '#B11E6A', color: '#B11E6A', fontWeight: 600 }}
+                                    >
+                                      Update Details
+                                    </Button>
+                                  )}
+                                </Space>
+                              );
+
+                              if (r.status === 'Approved') return (
+                                <Space wrap size={4}>
+                                  <Button
+                                    size="small"
+                                    type="primary"
+                                    icon={<ShoppingOutlined />}
+                                    onClick={() => {
+                                      setSelectedPlaceOrderReq(r);
+                                      setSelectedPlaceOrderItem({ name: r.item, unit: r.unit, key: r.key });
+                                      setShowPlaceOrderModal(true);
+                                    }}
+                                    style={{ background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none', fontWeight: 600 }}
+                                  >
+                                    Place Order
+                                  </Button>
+                                </Space>
+                              );
+
+                              // Pending: quotation was already asked for as part of raising the
+                              // request — let Purchase attach/update the quotation file & amount
+                              // directly from the row instead of a plain WhatsApp follow-up link.
+                              if (r.status === 'Pending') {
+                                const file = pendingRowFile[r.key];
+                                const amount = pendingRowAmount[r.key] ?? r.amount ?? null;
+                                const gstAmount = pendingRowGstAmount[r.key] ?? r.gstAmount ?? null;
+                                const saving = !!pendingRowSaving[r.key];
+                                const scanning = !!pendingRowScanLoading[r.key];
+                                return (
+                                  <Space direction="vertical" size={4} style={{ width: 170 }}>
+                                    <Text type="secondary" style={{ fontSize: 10 }}>{r.payment_terms || '-'}</Text>
+                                    <Upload
+                                      maxCount={1}
+                                      beforeUpload={f => { setPendingRowFile(prev => ({ ...prev, [r.key]: f })); return false; }}
+                                      onRemove={() => setPendingRowFile(prev => { const n = { ...prev }; delete n[r.key]; return n; })}
+                                      accept=".pdf,.jpg,.jpeg,.png"
+                                      fileList={file ? [{ uid: '1', name: file.name, status: 'done' }] : []}
+                                    >
+                                      <Button size="small" icon={<UploadOutlined />} style={{ borderColor: '#B11E6A', color: '#B11E6A', fontWeight: 600, width: '100%' }}>
+                                        <span style={{ display: 'inline-block', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', verticalAlign: 'middle' }}>
+                                          {file ? `✓ ${file.name}` : (r.quotationFiles?.length ? 'Re-Upload' : 'Upload Quotation')}
+                                        </span>
+                                      </Button>
+                                    </Upload>
+                                    <Button
+                                      size="small"
+                                      icon={<ThunderboltOutlined />}
+                                      loading={scanning}
+                                      disabled={!file}
+                                      onClick={() => handlePendingRowAIScan(r)}
+                                      style={{ borderColor: '#B11E6A66', color: '#B11E6A', fontWeight: 600, width: '100%' }}
+                                    >
+                                      {scanning ? 'Scanning...' : 'Scan with AI'}
+                                    </Button>
+                                    <InputNumber
+                                      size="small"
+                                      min={0}
+                                      placeholder="Amount (₹)"
+                                      value={amount}
+                                      onChange={v => setPendingRowAmount(prev => ({ ...prev, [r.key]: v }))}
+                                      style={{ width: '100%' }}
+                                    />
+                                    <InputNumber
+                                      size="small"
+                                      min={0}
+                                      placeholder="Tax/GST Amount (₹)"
+                                      value={gstAmount}
+                                      onChange={v => setPendingRowGstAmount(prev => ({ ...prev, [r.key]: v }))}
+                                      style={{ width: '100%' }}
+                                    />
+                                    <Button
+                                      size="small"
+                                      type="primary"
+                                      loading={saving}
+                                      disabled={!file || amount == null}
+                                      onClick={() => handlePendingRowSave(r)}
+                                      style={{ background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none', fontWeight: 600, width: '100%' }}
+                                    >
+                                      Save
+                                    </Button>
+                                  </Space>
+                                );
+                              }
+
+                              if (r.status === 'Modification') return (
+                                <Space direction="vertical" size={4}>
+                                  {r.financeNote && (
+                                    <Tooltip title={r.financeNote}>
+                                      <Tag color="warning" style={{ fontSize: 11, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', cursor: 'pointer' }}>
+                                        Finance: {r.financeNote}
+                                      </Tag>
+                                    </Tooltip>
+                                  )}
+                                  <Space size={4} wrap>
+                                    <Button
+                                      size="small"
+                                      icon={<WhatsAppOutlined />}
+                                      loading={!!reAskQuotationLoading[r.key]}
+                                      onClick={() => handleReAskQuotation(r)}
+                                      style={{ borderColor: '#25D366', color: '#25D366', fontWeight: 600 }}
+                                    >
+                                      Re-Ask
+                                    </Button>
+                                    <Upload
+                                      maxCount={1}
+                                      beforeUpload={file => { handleQuickResubmitScan(r, file); return false; }}
+                                      accept=".pdf,.jpg,.jpeg,.png"
+                                      showUploadList={false}
+                                      disabled={!!resubmitLoading[r.key]}
+                                    >
+                                      <Button size="small" icon={<UploadOutlined />} loading={!!resubmitLoading[r.key]} style={{ borderColor: '#fa8c16', color: '#fa8c16', fontWeight: 600 }}>
+                                        Re-Submit
+                                      </Button>
+                                    </Upload>
+                                  </Space>
+                                </Space>
+                              );
+
+                              // Rejected: Finance turned it down — Purchase can either re-request
+                              // (upload a revised quotation + amount) or ask the supplier again over WhatsApp.
+                              if (r.status === 'Rejected') {
+                                const sup = suppliers.find(s => s.name === r.supplier);
+                                const phone = sup ? sup.phone.replace(/\D/g, '') : '';
+                                const latestNote = (r.notes || []).at(-1);
+                                const msg = `*Bulk Order Follow-up*\n\n*Item:* ${r.item}\n*Quantity:* ${r.qty} ${r.unit}\n*Payment Terms:* ${r.payment_terms}${latestNote ? `\n\nNote: ${latestNote.text}` : ''}\n\nKindly share the quotation at the earliest.`;
+                                return (
+                                  <Space direction="vertical" size={4}>
+                                    {r.financeNote && (
+                                      <Tooltip title={r.financeNote}>
+                                        <Tag color="error" style={{ fontSize: 11, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', cursor: 'pointer' }}>
+                                          Rejected: {r.financeNote}
+                                        </Tag>
+                                      </Tooltip>
+                                    )}
+                                    <Space size={4} wrap>
+                                      <Button
+                                        size="small"
+                                        icon={<UploadOutlined />}
+                                        onClick={() => { setRerequestTarget(r); setRerequestFile(null); setRerequestAmount(null); setRerequestGstAmount(null); setRerequestGstSplit(null); setShowRerequestModal(true); }}
+                                        style={{ borderColor: '#B11E6A', color: '#B11E6A', fontWeight: 600 }}
+                                      >
+                                        Re-Request
+                                      </Button>
+                                      <Button
+                                        size="small"
+                                        icon={<WhatsAppOutlined />}
+                                        style={{ borderColor: '#25D366', color: '#25D366', fontWeight: 600 }}
+                                        onClick={() => window.open(`https://wa.me/${phone}?text=${encodeURIComponent(msg)}`, '_blank')}
+                                      >
+                                        Ask Quotation
+                                      </Button>
+                                    </Space>
+                                  </Space>
+                                );
+                              }
+
+                              return <Text type="secondary" style={{ fontSize: 11 }}>—</Text>;
+                            }
+                          }
+                        ];
+
+                        return (
+                          <div style={{ marginTop: 28 }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, flexWrap: 'wrap', gap: 8 }}>
+                              <div>
+                                <Title level={5} style={{ margin: 0, color: textColor }}>Bulk Purchase Requests</Title>
+                                <Text type="secondary">Requests raised via Bulk Purchase</Text>
+                              </div>
+                              <Space wrap>
+                                <DatePicker.RangePicker
+                                  style={{ borderRadius: 8 }}
+                                  onChange={(dates) => setBulkDateRange(dates ? [dates[0].format('YYYY-MM-DD'), dates[1].format('YYYY-MM-DD')] : null)}
+                                  allowClear
+                                />
+                                <Tag color="pink" style={{ borderRadius: 10, fontWeight: 600, fontSize: 12 }}>{bulkReqs.length} Total</Tag>
+                              </Space>
+                            </div>
+                            <Table
+                              size="small"
+                              dataSource={groupItemsByBatch(bulkReqs)}
+                              rowKey="key"
+                              pagination={false}
+                              scroll={{ x: 'max-content' }}
+                              columns={bulkTableColumns}
+                              style={{
+                                border: `1px solid ${isDark ? '#2a2d40' : '#f0d4e4'}`,
+                                borderRadius: 10,
+                                overflow: 'hidden'
+                              }}
+                              locale={{ emptyText: 'No bulk requests found.' }}
+                            />
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  )
+                },
+                {
+                  key: 'order_tracking',
+                  label: <Space><TruckOutlined />Dispatch Order Tracking</Space>,
+                  children: (
+                    <div style={{ marginTop: 12 }}>
+                      <div style={{ marginBottom: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 8 }}>
+                        <div>
+                          <Title level={5} style={{ margin: 0, color: textColor }}>Dispatch Order Tracking</Title>
+                          <Text type="secondary">Track dispatch orders — LR details, pickup proof, payment status, and delivery confirmation</Text>
+                        </div>
+                      </div>
+                      <div style={{ marginBottom: 10, display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                        <Input prefix={<SearchOutlined style={{ color: '#B11E6A' }} />} placeholder="Search order ID, supplier, item..." allowClear value={dtSearch} onChange={(e) => setDtSearch(e.target.value)} style={{ width: 250, borderRadius: 8 }} />
+                        <Select allowClear placeholder="Delivery Status" value={dtDeliveryFilter} onChange={setDtDeliveryFilter} style={{ width: 170, borderRadius: 8 }}>
+                          <Option value="In Transit">In Transit</Option>
+                          <Option value="Taken">Taken</Option>
+                          <Option value="Pickup Received">Pickup Received</Option>
+                          <Option value="Delivered">Delivered</Option>
+                          <Option value="Partial Delivery">Partial Delivery</Option>
+                        </Select>
+                        <Select allowClear placeholder="Payment Status" value={dtPayFilter} onChange={setDtPayFilter} style={{ width: 160, borderRadius: 8 }}>
+                          <Option value="Paid">Paid</Option>
+                          <Option value="Unpaid">Unpaid</Option>
+                        </Select>
+                        <DatePicker.RangePicker
+                          style={{ borderRadius: 8 }}
+                          onChange={(dates) => setDtDateRange(dates ? [dates[0].format('YYYY-MM-DD'), dates[1].format('YYYY-MM-DD')] : null)}
+                          allowClear
+                        />
+                      </div>
+                      <Table
+                        size="small"
+                        dataSource={dispatchTrackingOrders.filter((o) => {
+                          const q = dtSearch.toLowerCase();
+                          const matchSearch = !q || (o.orderId || '').toLowerCase().includes(q) || (o.supplier || '').toLowerCase().includes(q) || (o.item || '').toLowerCase().includes(q) || (o.items || []).some((it) => (it.itemName || '').toLowerCase().includes(q));
+                          const matchDelivery = !dtDeliveryFilter || o.deliveryStatus === dtDeliveryFilter;
+                          const matchPay = !dtPayFilter || o.paymentStatus === dtPayFilter;
+                          if (dtDateRange) {
+                            const d = o.date ? o.date.slice(0, 10) : '';
+                            if (d < dtDateRange[0] || d > dtDateRange[1]) return false;
+                          }
+                          return matchSearch && matchDelivery && matchPay;
+                        })}
+                        rowKey="key"
+                        pagination={{ showSizeChanger: true, pageSizeOptions: ['10', '20', '50', '100'], defaultPageSize: 10 }}
+                        scroll={{ x: 'max-content' }}
+                        locale={{ emptyText: 'No dispatch tracking orders yet.' }}
+                        columns={[
+                          { title: 'Date', dataIndex: 'date', key: 'date', width: 95 },
+                          {
+                            title: 'Order ID', dataIndex: 'orderId', key: 'orderId', width: 90,
+                            render: v => <Text strong style={{ color: '#B11E6A' }}>{v}</Text>
+                          },
+                          { title: 'Supplier', dataIndex: 'supplier', key: 'supplier', width: 130, render: v => <Text style={{ color: '#B11E6A', fontWeight: 600 }}>{v}</Text> },
+                          {
+                            title: 'Item', dataIndex: 'item', key: 'item', width: 160,
+                            render: (v, r) => {
+                              if (r.items) {
+                                return (
+                                  <Space direction="vertical" size={1}>
+                                    <Text strong>{r.items.length} Products</Text>
+                                    <Tag color="blue" style={{ borderRadius: 10, fontSize: 10, margin: 0, padding: '0 6px' }}>
+                                      Bulk &times;{r.items.length}
+                                    </Tag>
+                                  </Space>
+                                );
+                              }
+                              return <Text strong>{v}</Text>;
+                            }
+                          },
+                          {
+                            title: 'Qty / Amt', key: 'qty_amt', width: 110,
+                            render: (_, r) => (
+                              <Space direction="vertical" size={0}>
+                                {r.items
+                                  ? <Text type="secondary" style={{ fontSize: 12 }}>{r.items.length} items</Text>
+                                  : <Text strong>{r.qty} {r.unit}</Text>}
+                                <Text style={{ color: '#B11E6A', fontSize: 11 }}>&#8377;{r.amount?.toLocaleString()}</Text>
+                              </Space>
+                            )
+                          },
+                          {
+                            title: 'LR Number & Lorry', key: 'lr_lorry', width: 180,
+                            render: (_, r) => r.lrNumber ? (
+                              <Space direction="vertical" size={1}>
+                                <Text strong style={{ color: '#1890ff', fontSize: 12 }}>{r.lrNumber}</Text>
+                                <Text style={{ fontSize: 11, color: isDark ? '#aaa' : '#555' }}><CarOutlined style={{ marginRight: 3 }} />{r.lorryNo}</Text>
+                                <Text style={{ fontSize: 10, color: isDark ? '#888' : '#888' }}>{r.transportCompany}</Text>
+                              </Space>
+                            ) : <Tag color="default" style={{ borderRadius: 8 }}>Not Assigned</Tag>
+                          },
+                          {
+                            title: 'Expected Delivery', key: 'expected_del', width: 120,
+                            render: (_, r) => {
+                              if (!r.expectedDelivery) return <Text type="secondary">—</Text>;
+                              const days = dayjs(r.expectedDelivery).diff(dayjs(), 'day');
+                              const color = days < 0 ? '#ff4d4f' : days <= 2 ? '#fa8c16' : '#52c41a';
+                              return (
+                                <Space direction="vertical" size={0}>
+                                  <Text strong style={{ color, fontSize: 11 }}>{r.expectedDelivery}</Text>
+                                  <Text style={{ fontSize: 10, color }}>
+                                    {days < 0 ? `${Math.abs(days)}d overdue` : days === 0 ? 'Today' : `${days}d left`}
+                                  </Text>
+                                </Space>
+                              );
+                            }
+                          },
+                          {
+                            title: 'LR Copy', key: 'lr_copy', width: 100,
+                            render: (_, r) => r.lrCopyFile ? (
+                              <Button size="small" icon={<FileTextOutlined />}
+                                style={{ color: '#1890ff', borderColor: '#1890ff', fontSize: 11 }}
+                                onClick={() => setViewLRCopyModal(r)}>
+                                View File
+                              </Button>
+                            ) : <Text type="secondary" style={{ fontSize: 11 }}>No file</Text>
+                          },
+                          {
+                            title: 'Payment Status', key: 'payment_status', width: 110, align: 'center',
+                            render: (_, r) => {
+                              const status = r.paymentStatus || 'Unpaid';
+                              return <Tag color={status === 'Paid' ? 'success' : 'error'} style={{ borderRadius: 10, margin: 0 }}>{status}</Tag>;
+                            }
+                          },
+                          {
+                            title: 'Payment Proof', key: 'payment_proof', width: 130, align: 'center',
+                            render: (_, r) => {
+                              const proofs = (r.paymentHistory || []).filter(p => p.proofUrl);
+                              if (proofs.length === 0 && !r.paymentProof) return <Text type="secondary" style={{ fontSize: 11 }}>—</Text>;
+                              if (proofs.length === 0) {
+                                // Older order paid before paymentHistory existed — only the legacy single proof is available
+                                return (
+                                  <Button size="small" icon={<EyeOutlined />}
+                                    style={{ color: '#52c41a', borderColor: '#52c41a', fontSize: 11 }}
+                                    onClick={() => window.open(r.paymentProof, '_blank')}>
+                                    View Proof
+                                  </Button>
+                                );
+                              }
+                              return (
+                                <Popover
+                                  trigger="click"
+                                  title={`Payment Proofs (${proofs.length})`}
+                                  content={
+                                    <Space direction="vertical" size={4}>
+                                      {proofs.slice().reverse().map((p, i) => (
+                                        <Button key={i} size="small" type="link" icon={<EyeOutlined />}
+                                          onClick={() => window.open(p.proofUrl, '_blank')}
+                                          style={{ padding: 0, height: 'auto', fontSize: 11 }}>
+                                          ₹{(p.amount || 0).toLocaleString()} — {p.paidDate ? new Date(p.paidDate).toLocaleDateString() : ''}
+                                        </Button>
+                                      ))}
+                                    </Space>
+                                  }
+                                >
+                                  <Button size="small" icon={<EyeOutlined />} style={{ color: '#52c41a', borderColor: '#52c41a', fontSize: 11 }}>
+                                    View Proof{proofs.length > 1 ? `s (${proofs.length})` : ''}
+                                  </Button>
+                                </Popover>
+                              );
+                            }
+                          },
+                          {
+                            title: 'Delivery Status', key: 'delivery_status', width: 120, align: 'center',
+                            render: (_, r) => {
+                              const statusColorMap = { 'Delivered': 'success', 'Partial Delivery': 'warning', 'Pickup Received': 'cyan', 'Taken': 'blue', 'In Transit': 'processing' };
+                              return <Tag color={statusColorMap[r.deliveryStatus] || 'default'} style={{ borderRadius: 10 }}>{r.deliveryStatus || 'Pending'}</Tag>;
+                            }
+                          },
+                          {
+                            title: 'Action', key: 'action', fixed: 'right', width: 100,
+                            render: (_, r) => {
+                              const menuItems = [
+                                {
+                                  key: 'taken',
+                                  label: (
+                                    <Space>
+                                      <CarOutlined style={{ color: '#B11E6A' }} />
+                                      <span>Taken</span>
+                                      {r.takenStatus === 'taken' && <Tag color="success" style={{ borderRadius: 8, margin: 0, fontSize: 10 }}>Done</Tag>}
+                                    </Space>
+                                  ),
+                                  onClick: () => { setTakenTarget(r); takenForm.setFieldsValue({ gpay_number: r.gPayNumber || '' }); setShowTakenModal(true); }
+                                },
+                                {
+                                  key: 'received',
+                                  label: (
+                                    <Space>
+                                      <CheckCircleOutlined style={{ color: '#52c41a' }} />
+                                      <span>Received Order</span>
+                                      {r.receivedStatus && <Tag color={r.receivedStatus === 'partial' ? 'warning' : 'success'} style={{ borderRadius: 8, margin: 0, fontSize: 10 }}>{r.receivedStatus === 'partial' ? 'Partial' : 'Done'}</Tag>}
+                                    </Space>
+                                  ),
+                                  onClick: () => openReceivedModal(r)
+                                },
+                              ];
+                              return (
+                                <Dropdown menu={{ items: menuItems }} trigger={['click']} placement="bottomRight">
+                                  <Button size="small" icon={<MoreOutlined />} style={{ borderRadius: 6 }}>More</Button>
+                                </Dropdown>
+                              );
+                            }
+                          },
+                        ]}
+                        expandable={{
+                          rowExpandable: (r) => !!r.items,
+                          expandedRowRender: (r) => (
+                            <div style={{ padding: '10px 16px', background: isDark ? '#1a1225' : '#fdf2f8', borderRadius: 8 }}>
+                              <Text strong style={{ color: '#B11E6A', display: 'block', marginBottom: 8, fontSize: 12 }}>
+                                Products in this order — {r.orderId}
+                              </Text>
+                              <Table
+                                size="small"
+                                dataSource={r.items.map((it, idx) => ({ ...it, key: `${r.key}-item-${idx}` }))}
+                                rowKey="key"
+                                pagination={false}
+                                columns={[
+                                  { title: 'Item', dataIndex: 'itemName', key: 'itemName', render: v => <Text strong>{v}</Text> },
+                                  { title: 'Qty', key: 'qty', render: (_, it) => <Text>{it.qty} {it.unit}</Text> },
+                                  {
+                                    title: 'Amount', key: 'amount', align: 'right',
+                                    render: (_, it) => it.amount != null
+                                      ? <Text style={{ color: '#B11E6A', fontWeight: 600 }}>&#8377;{it.amount.toLocaleString()}</Text>
+                                      : <Text type="secondary">—</Text>
+                                  },
+                                ]}
+                              />
+                            </div>
+                          ),
+                        }}
+                      />
+
+                      {/* ── Missing / Short-Received Orders ── */}
+                      {(() => {
+                        const missingOrders = dispatchTrackingOrders.filter(o => o.missingItems && o.missingItems.length > 0);
+                        if (missingOrders.length === 0) return null;
+                        return (
+                          <div style={{ marginTop: 28 }}>
+                            <div style={{ marginBottom: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                              <div>
+                                <Space align="center">
+                                  <ExclamationCircleOutlined style={{ color: '#fa8c16', fontSize: 16 }} />
+                                  <Title level={5} style={{ margin: 0, color: '#fa8c16' }}>Missing / Short-Received Orders</Title>
+                                  <Tag color="warning" style={{ borderRadius: 10, fontWeight: 600 }}>{missingOrders.length} order{missingOrders.length > 1 ? 's' : ''}</Tag>
+                                </Space>
+                                <Text type="secondary" style={{ display: 'block', marginTop: 2 }}>Orders with items that were not fully received — partial delivery recorded</Text>
+                              </div>
+                              <Button
+                                icon={<DownloadOutlined />}
+                                size="small"
+                                onClick={() => exportToCSV(
+                                  ['Order ID', 'Date', 'Supplier', 'Item', 'Qty', 'Unit', 'Amount (₹)', 'Missing Items', 'Delivery Status', 'Missed By', 'Action Taken', 'Status'],
+                                  missingOrders.map(o => [
+                                    o.orderId, o.date, o.supplier, o.item, o.qty, o.unit, o.amount,
+                                    `${o.missingItems?.length || 0} item(s)`,
+                                    o.deliveryStatus,
+                                    o.missedBy === 'vendor' ? 'Vendor' : o.missedBy === 'lorry' ? 'Lorry' : '',
+                                    o.actionTakenStatus || '',
+                                    !o.actionTakenStatus ? 'Pending' : o.actionTakenStatus,
+                                  ]),
+                                  'missed_orders.csv'
+                                )}
+                              >Export</Button>
+                            </div>
+                            <Table
+                              size="small"
+                              dataSource={missingOrders}
+                              rowKey="key"
+                              pagination={false}
+                              scroll={{ x: 'max-content' }}
+                              style={{ borderRadius: 10, overflow: 'hidden', border: '1px solid #fa8c1633' }}
+                              expandable={{
+                                expandedRowRender: (record) => (
+                                  <div style={{ padding: '10px 16px', background: isDark ? '#1a1200' : '#fffbe6', borderRadius: 8 }}>
+                                    <Text strong style={{ color: '#fa8c16', display: 'block', marginBottom: 8, fontSize: 12 }}>
+                                      <ExclamationCircleOutlined style={{ marginRight: 6 }} />Missing Items Detail — {record.orderId}
+                                    </Text>
+                                    <Table
+                                      size="small"
+                                      dataSource={record.missingItems}
+                                      rowKey="key"
+                                      pagination={false}
+                                      style={{ borderRadius: 8, border: '1px solid #fa8c1644' }}
+                                      columns={[
+                                        { title: 'Item Name', dataIndex: 'name', key: 'name', render: v => <Text strong>{v}</Text> },
+                                        { title: 'Ordered Qty', dataIndex: 'ordered', key: 'ordered', align: 'center', render: v => <Text>{v}</Text> },
+                                        { title: 'Received Qty', dataIndex: 'received', key: 'received', align: 'center', render: v => <Text style={{ color: '#52c41a' }}>{v}</Text> },
+                                        { title: 'Missing Qty', dataIndex: 'missing', key: 'missing', align: 'center', render: v => <Text strong style={{ color: '#ff4d4f' }}>{v}</Text> },
+                                      ]}
+                                    />
+                                  </div>
+                                ),
+                                defaultExpandAllRows: true,
+                              }}
+                              columns={[
+                                { title: 'Order ID', dataIndex: 'orderId', key: 'orderId', width: 100, render: v => <Text strong style={{ color: '#B11E6A' }}>{v}</Text> },
+                                { title: 'Date', dataIndex: 'date', key: 'date', width: 95 },
+                                { title: 'Supplier', dataIndex: 'supplier', key: 'supplier', width: 140, render: v => <Text style={{ color: '#B11E6A', fontWeight: 600 }}>{v}</Text> },
+                                { title: 'Item', dataIndex: 'item', key: 'item', width: 180, render: v => <Text strong>{v}</Text> },
+                                {
+                                  title: 'Qty / Amount', key: 'qty_amt', width: 120,
+                                  render: (_, r) => (
+                                    <Space direction="vertical" size={0}>
+                                      <Text strong>{r.qty} {r.unit}</Text>
+                                      <Text style={{ color: '#B11E6A', fontSize: 11 }}>&#8377;{r.amount?.toLocaleString()}</Text>
+                                    </Space>
+                                  )
+                                },
+                                {
+                                  title: 'Missing Items', key: 'missing_count', width: 120, align: 'center',
+                                  render: (_, r) => (
+                                    <Tag color="error" style={{ borderRadius: 10, fontWeight: 600 }}>
+                                      {r.missingItems?.length || 0} item{(r.missingItems?.length || 0) !== 1 ? 's' : ''} missing
+                                    </Tag>
+                                  )
+                                },
+                                {
+                                  title: 'Delivery Status', dataIndex: 'deliveryStatus', key: 'delivery_status', width: 130, align: 'center',
+                                  render: v => <Tag color="warning" style={{ borderRadius: 10 }}>{v}</Tag>
+                                },
+                                {
+                                  title: 'Missed By', key: 'missed_by', width: 120,
+                                  render: (_, r) => r.missedBy ? (
+                                    <Tag color={r.missedBy === 'vendor' ? 'red' : 'orange'} style={{ borderRadius: 8 }}>
+                                      {r.missedBy === 'vendor' ? 'Vendor' : 'Lorry'}
+                                    </Tag>
+                                  ) : <Text type="secondary" style={{ fontSize: 11 }}>—</Text>
+                                },
+                                {
+                                  title: 'Action Taken', key: 'vendor_action', width: 190,
+                                  render: (_, r) => (
+                                    <Select
+                                      size="small"
+                                      placeholder="Select action"
+                                      value={r.actionTakenStatus || undefined}
+                                      style={{ width: '100%', minWidth: 165 }}
+                                      onChange={async (val) => {
+                                        setDispatchTrackingOrders(prev => prev.map(o => o.key === r.key ? { ...o, actionTakenStatus: val } : o));
+                                        try {
+                                          await updateActionTakenMutation({ id: r.key, actionTakenStatus: val }).unwrap();
+                                          enqueueSnackbar(val === 'Completely Received' ? 'Marked as completely received — remaining quantity added to inventory.' : 'Action Taken updated.', { variant: 'success' });
+                                        } catch (err) {
+                                          enqueueSnackbar(err?.data?.message || err?.data || 'Failed to update Action Taken', { variant: 'error' });
+                                        }
+                                      }}
+                                      dropdownRender={menu => (
+                                        <>
+                                          {menu}
+                                          <Divider style={{ margin: '6px 0' }} />
+                                          <Space style={{ padding: '0 8px 6px' }}>
+                                            <Input
+                                              placeholder="Custom action"
+                                              size="small"
+                                              value={newActionInput}
+                                              onChange={e => setNewActionInput(e.target.value)}
+                                              onKeyDown={e => e.stopPropagation()}
+                                              style={{ width: 120 }}
+                                            />
+                                            <Button
+                                              type="text"
+                                              icon={<PlusOutlined />}
+                                              size="small"
+                                              onClick={() => {
+                                                const trimmed = newActionInput.trim();
+                                                if (trimmed && !customActionOptions.includes(trimmed)) {
+                                                  setCustomActionOptions(prev => [...prev, trimmed]);
+                                                  setNewActionInput('');
+                                                }
+                                              }}
+                                            >Add</Button>
+                                          </Space>
+                                        </>
+                                      )}
+                                      options={customActionOptions.map(opt => ({ value: opt, label: opt }))}
+                                    />
+                                  )
+                                },
+                                {
+                                  title: 'Status', key: 'action_status', width: 150, align: 'center',
+                                  render: (_, r) => {
+                                    if (!r.actionTakenStatus) return <Tag color="warning" style={{ borderRadius: 8 }}>Pending</Tag>;
+                                    if (r.actionTakenStatus === 'Completely Received') return <Tag color="success" style={{ borderRadius: 8, fontWeight: 600 }}>Completely Received</Tag>;
+                                    return <Tag color="blue" style={{ borderRadius: 8 }}>{r.actionTakenStatus}</Tag>;
+                                  }
+                                },
+                              ]}
+                            />
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  )
+                },
+                {
+                  key: 'local_purchase',
+                  label: <Space><ShoppingOutlined />Local Purchase</Space>,
+                  children: (
+                    <div style={{ marginTop: 12 }}>
+                      {localPurchaseDetailView ? (
+                        /* ── Detail View ── */
+                        <div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 8 }}>
+                            <Space>
+                              <Button icon={<LeftOutlined />} onClick={() => setLocalPurchaseDetailView(null)}>Back to List</Button>
+                              <Text strong style={{ color: '#B11E6A', fontSize: 15 }}>Local Purchase — {localPurchaseDetailView.invoiceNo}</Text>
+                            </Space>
+                            <Tag color={localPurchaseDetailView.paymentStatus === 'Paid' ? 'success' : localPurchaseDetailView.paymentStatus === 'Partially Paid' ? 'warning' : 'error'} style={{ borderRadius: 10, fontWeight: 700, fontSize: 13 }}>
+                              {localPurchaseDetailView.paymentStatus}
+                            </Tag>
+                          </div>
+                          <Row gutter={[16, 16]}>
+                            <Col xs={24} md={12}>
+                              <Card size="small" style={{ borderRadius: 10, background: isDark ? '#16192a' : '#fafbff', border: `1px solid ${isDark ? '#2a2d40' : '#e8eeff'}` }}>
+                                <Text strong style={{ display: 'block', marginBottom: 10, color: '#B11E6A' }}>Vendor Details</Text>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                  {localPurchaseDetailView.lpCode && <div><Text type="secondary" style={{ fontSize: 12 }}>LP Code: </Text><Text strong style={{ color: '#B11E6A' }}>{localPurchaseDetailView.lpCode}</Text></div>}
+                                  <div><Text type="secondary" style={{ fontSize: 12 }}>Vendor Name: </Text><Text strong>{localPurchaseDetailView.vendorName}</Text></div>
+                                  <div><Text type="secondary" style={{ fontSize: 12 }}>Phone: </Text><Text>{localPurchaseDetailView.vendorPhone || '-'}</Text></div>
+                                </div>
+                              </Card>
+                            </Col>
+                            <Col xs={24} md={12}>
+                              <Card size="small" style={{ borderRadius: 10, background: isDark ? '#16192a' : '#fafbff', border: `1px solid ${isDark ? '#2a2d40' : '#e8eeff'}` }}>
+                                <Text strong style={{ display: 'block', marginBottom: 10, color: '#B11E6A' }}>Payment Details</Text>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                  <div><Text type="secondary" style={{ fontSize: 12 }}>Type: </Text><Tag color={localPurchaseDetailView.paymentType === 'instant' ? 'green' : 'orange'}>{localPurchaseDetailView.paymentType === 'instant' ? 'Instant' : 'Credit'}</Tag></div>
+                                  <div><Text type="secondary" style={{ fontSize: 12 }}>Status: </Text><Tag color={localPurchaseDetailView.paymentStatus === 'Paid' ? 'success' : localPurchaseDetailView.paymentStatus === 'Partially Paid' ? 'warning' : 'error'}>{localPurchaseDetailView.paymentStatus}</Tag></div>
+                                  {localPurchaseDetailView.paymentType === 'credit' && localPurchaseDetailView.dueDate && <div><Text type="secondary" style={{ fontSize: 12 }}>Due Date: </Text><Text strong>{localPurchaseDetailView.dueDate}</Text></div>}
+                                  {localPurchaseDetailView.gPayNumber && <div><Text type="secondary" style={{ fontSize: 12 }}>GPay: </Text><Text>{localPurchaseDetailView.gPayNumber}</Text></div>}
+                                  {localPurchaseDetailView.paidBy && <div><Text type="secondary" style={{ fontSize: 12 }}>Paid By: </Text><Text strong>{localPurchaseDetailView.paidBy}</Text></div>}
+                                  {localPurchaseDetailView.purchasePersonName && <div><Text type="secondary" style={{ fontSize: 12 }}>Purchase Person: </Text><Text strong>{localPurchaseDetailView.purchasePersonName}</Text></div>}
+                                  {localPurchaseDetailView.purchasePersonPhone && <div><Text type="secondary" style={{ fontSize: 12 }}>Purchase Person Phone: </Text><Text>{localPurchaseDetailView.purchasePersonPhone}</Text></div>}
+                                  {localPurchaseDetailView.paidDate && <div><Text type="secondary" style={{ fontSize: 12 }}>Paid Date: </Text><Text>{localPurchaseDetailView.paidDate}</Text></div>}
+                                  <div><Text type="secondary" style={{ fontSize: 12 }}>Total: </Text><Text strong style={{ color: '#B11E6A' }}>₹{localPurchaseDetailView.totalAmount?.toLocaleString()}</Text></div>
+                                  {localPurchaseDetailView.gstAmount > 0 && <div><Text type="secondary" style={{ fontSize: 12 }}>GST Amount: </Text><Text strong>₹{localPurchaseDetailView.gstAmount.toLocaleString()}</Text></div>}
+                                  {localPurchaseDetailView.igstAmount > 0 && <div><Text type="secondary" style={{ fontSize: 12 }}>IGST (Inter-state): </Text><Text strong style={{ color: '#1890ff' }}>₹{localPurchaseDetailView.igstAmount.toLocaleString()}</Text></div>}
+                                  {localPurchaseDetailView.cgstAmount > 0 && <div><Text type="secondary" style={{ fontSize: 12 }}>CGST: </Text><Text strong>₹{localPurchaseDetailView.cgstAmount.toLocaleString()}</Text></div>}
+                                  {localPurchaseDetailView.sgstAmount > 0 && <div><Text type="secondary" style={{ fontSize: 12 }}>SGST: </Text><Text strong>₹{localPurchaseDetailView.sgstAmount.toLocaleString()}</Text></div>}
+                                  <div><Text type="secondary" style={{ fontSize: 12 }}>Paid Amount: </Text><Text strong style={{ color: '#52c41a' }}>₹{(localPurchaseDetailView.paidAmount || 0).toLocaleString()}</Text></div>
+                                  {localPurchaseDetailView.balance > 0 && <div><Text type="secondary" style={{ fontSize: 12 }}>Balance: </Text><Text strong style={{ color: '#fa8c16' }}>₹{localPurchaseDetailView.balance.toLocaleString()}</Text></div>}
+                                </div>
+                              </Card>
+                            </Col>
+                            <Col xs={24}>
+                              <Card size="small" style={{ borderRadius: 10, background: isDark ? '#16192a' : '#fafbff', border: `1px solid ${isDark ? '#2a2d40' : '#e8eeff'}` }}>
+                                <Text strong style={{ display: 'block', marginBottom: 10, color: '#B11E6A' }}>Items Purchased</Text>
+                                <Table
+                                  size="small"
+                                  pagination={false}
+                                  dataSource={localPurchaseDetailView.items || []}
+                                  rowKey={(r, i) => i}
+                                  columns={[
+                                    { title: 'Item Name', dataIndex: 'itemName', render: (v, r) => v || r.name || '—' },
+                                    { title: 'Qty', dataIndex: 'qty', width: 80, render: v => v ?? '—' },
+                                    { title: 'Unit', dataIndex: 'unit', width: 90, render: v => v || '—' },
+                                    { title: 'Stock Type', dataIndex: 'itemType', width: 110, render: v => <Tag color={v === 'bulk' ? 'blue' : 'default'} style={{ borderRadius: 8 }}>{v === 'bulk' ? 'Bulk' : 'Direct'}</Tag> },
+                                    { title: 'Amount', dataIndex: 'amount', width: 120, render: v => <Text strong>₹{(v || 0).toLocaleString()}</Text> },
+                                  ]}
+                                  summary={rows => {
+                                    const sum = rows.reduce((s, r) => s + (Number(r.amount) || 0), 0);
+                                    return (
+                                      <Table.Summary.Row>
+                                        <Table.Summary.Cell index={0} colSpan={4}><Text strong>Total</Text></Table.Summary.Cell>
+                                        <Table.Summary.Cell index={1}><Text strong style={{ color: '#B11E6A' }}>₹{sum.toLocaleString()}</Text></Table.Summary.Cell>
+                                      </Table.Summary.Row>
+                                    );
+                                  }}
+                                />
+                              </Card>
+                            </Col>
+                            {localPurchaseDetailView.invoiceFile && (
+                              <Col xs={24}>
+                                <Card size="small" style={{ borderRadius: 10 }}>
+                                  <Space>
+                                    <FileTextOutlined style={{ color: '#B11E6A', fontSize: 16 }} />
+                                    <Text strong>Invoice File: </Text>
+                                    <Button type="link" style={{ color: '#1890ff', padding: 0 }}
+                                      onClick={() => window.open(localPurchaseDetailView.invoiceFile, '_blank')}
+                                    >View Invoice</Button>
+                                  </Space>
+                                </Card>
+                              </Col>
+                            )}
+                            <Col xs={24}>
+                              <Card size="small" style={{ borderRadius: 10, background: isDark ? '#16192a' : '#fafbff', border: `1px solid ${isDark ? '#2a2d40' : '#e8eeff'}` }}>
+                                <Text strong style={{ display: 'block', marginBottom: 10, color: '#B11E6A' }}>Payment History</Text>
+                                {(localPurchaseDetailView.paymentHistory || []).length > 0 ? (
+                                  <Table
+                                    size="small"
+                                    pagination={false}
+                                    dataSource={(localPurchaseDetailView.paymentHistory || []).slice().reverse()}
+                                    rowKey={(r, i) => i}
+                                    columns={[
+                                      { title: 'Date & Time', dataIndex: 'paidDate', render: v => <Text>{v ? dayjs(v).format('DD-MM-YYYY hh:mm A') : '—'}</Text> },
+                                      { title: 'Amount', dataIndex: 'amount', render: v => <Text strong style={{ color: '#52c41a' }}>₹{(v || 0).toLocaleString()}</Text> },
+                                      { title: 'Paid By', dataIndex: 'paidBy', render: v => v || '—' },
+                                      {
+                                        title: 'Proof', dataIndex: 'proofUrl',
+                                        render: v => v ? <Button size="small" type="link" icon={<CheckCircleOutlined />} style={{ color: '#52c41a', padding: 0 }} onClick={() => window.open(v, '_blank')}>View Proof</Button> : <Text type="secondary">—</Text>
+                                      },
+                                    ]}
+                                  />
+                                ) : localPurchaseDetailView.paymentProof ? (
+                                  <Space>
+                                    <CheckCircleOutlined style={{ color: '#52c41a', fontSize: 16 }} />
+                                    <Text strong>{localPurchaseDetailView.paidDate}: </Text>
+                                    <Button type="link" style={{ color: '#52c41a', padding: 0 }}
+                                      onClick={() => window.open(localPurchaseDetailView.paymentProof, '_blank')}
+                                    >View Proof</Button>
+                                  </Space>
+                                ) : (
+                                  <Text type="secondary">No payments recorded yet.</Text>
+                                )}
+                              </Card>
+                            </Col>
+                          </Row>
+                        </div>
+                      ) : (
+                        /* ── List View ── */
+                        <div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16, flexWrap: 'wrap', gap: 12 }}>
+                            <div>
+                              <Title level={5} style={{ margin: 0, color: textColor }}>Local Purchase Records</Title>
+                              <Text type="secondary">Local purchases made directly from vendors — track invoices, payment type and status</Text>
+                            </div>
+                            <Button
+                              type="primary"
+                              icon={<PlusOutlined />}
+                              style={{ background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none', fontWeight: 700 }}
+                              onClick={() => {
+                                if (!requireAccess('add')) return;
+                                localPurchaseForm.resetFields();
+                                setLocalPurchaseInvoiceFile(null);
+                                setLocalPurchaseScannedDetails(null);
+                                setLocalPurchaseNewVendorDetected(false);
+                                setLocalPurchasePaymentType('credit');
+                                setLocalPurchasePriceType('exclusive');
+                                setShowAddLocalPurchaseModal(true);
+                              }}
+                            >
+                              Add Local Purchase
+                            </Button>
+                          </div>
+                          <div style={{ marginBottom: 10, display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                            <Input prefix={<SearchOutlined style={{ color: '#B11E6A' }} />} placeholder="Search vendor, invoice..." allowClear value={localSearch} onChange={(e) => setLocalSearch(e.target.value)} style={{ width: 230, borderRadius: 8 }} />
+                            <Select allowClear placeholder="Payment Status" value={localPayFilter} onChange={setLocalPayFilter} style={{ width: 160, borderRadius: 8 }}>
+                              <Option value="Paid">Paid</Option>
+                              <Option value="Partially Paid">Partially Paid</Option>
+                              <Option value="Pending">Pending</Option>
+                            </Select>
+                            <DatePicker.RangePicker
+                              style={{ borderRadius: 8 }}
+                              onChange={(dates) => setLocalDateRange(dates ? [dates[0].format('YYYY-MM-DD'), dates[1].format('YYYY-MM-DD')] : null)}
+                              allowClear
+                            />
+                          </div>
+                          <Table
+                            size="small"
+                            dataSource={localPurchases.filter((lp) => {
+                              const q = localSearch.toLowerCase();
+                              const matchSearch = !q || (lp.vendorName || '').toLowerCase().includes(q) || (lp.invoiceNo || '').toLowerCase().includes(q) || (lp.items || []).some(i => (i.itemName || i.name || '').toLowerCase().includes(q));
+                              const matchPay = !localPayFilter || lp.paymentStatus === localPayFilter;
+                              if (localDateRange) {
+                                const d = lp.date ? lp.date.slice(0, 10) : '';
+                                if (d < localDateRange[0] || d > localDateRange[1]) return false;
+                              }
+                              return matchSearch && matchPay;
+                            })}
+                            rowKey="key"
+                            pagination={{ showSizeChanger: true, pageSizeOptions: ['10', '20', '50', '100'], defaultPageSize: 10 }}
+                            scroll={{ x: 'max-content' }}
+                            onRow={r => ({ onClick: () => setLocalPurchaseDetailView(r), style: { cursor: 'pointer' } })}
+                            columns={[
+                              { title: 'Date', dataIndex: 'date', key: 'date', width: 95 },
+                              {
+                                title: 'Invoice No', dataIndex: 'invoiceNo', key: 'invoiceNo', width: 140,
+                                render: v => <Text style={{ color: '#B11E6A', fontWeight: 600 }}>{v}</Text>
+                              },
+                              {
+                                title: 'Invoice', dataIndex: 'invoiceFile', key: 'invoiceFile', width: 110,
+                                render: v => v ? (
+                                  <Button
+                                    size="small"
+                                    icon={<FileTextOutlined />}
+                                    style={{ color: '#1890ff', borderColor: '#1890ff', fontSize: 11 }}
+                                    onClick={e => { e.stopPropagation(); window.open(v, '_blank'); }}
+                                  >View</Button>
+                                ) : <Tag color="default" style={{ borderRadius: 8, fontSize: 10 }}>No File</Tag>
+                              },
+                              { title: 'Vendor', dataIndex: 'vendorName', key: 'vendorName', width: 150, render: v => <Text style={{ fontWeight: 600 }}>{v}</Text> },
+                              {
+                                title: 'Items', dataIndex: 'items', key: 'items', width: 180,
+                                render: (items) => {
+                                  const list = items || [];
+                                  const names = list.map(i => i.itemName || i.name).filter(Boolean);
+                                  if (!names.length) return <Text type="secondary">—</Text>;
+                                  const label = names.length > 2 ? `${names.slice(0, 2).join(', ')} +${names.length - 2} more` : names.join(', ');
+                                  return <Tooltip title={names.join(', ')}><Text style={{ fontSize: 12 }}>{label}</Text></Tooltip>;
+                                }
+                              },
+                              {
+                                title: 'Total', dataIndex: 'totalAmount', key: 'totalAmount', width: 100, align: 'right',
+                                render: v => <Text strong style={{ color: '#B11E6A' }}>₹{v?.toLocaleString()}</Text>
+                              },
+                              {
+                                title: 'GST Amount', dataIndex: 'gstAmount', key: 'gstAmount', width: 100, align: 'right',
+                                render: v => v > 0 ? <Text>₹{v.toLocaleString()}</Text> : <Text type="secondary">—</Text>
+                              },
+                              {
+                                title: 'Balance', dataIndex: 'balance', key: 'balance', width: 100, align: 'right',
+                                render: v => v > 0 ? <Text strong style={{ color: '#fa8c16' }}>₹{v?.toLocaleString()}</Text> : <Text type="secondary">—</Text>
+                              },
+                              {
+                                title: 'Due Date', dataIndex: 'dueDate', key: 'dueDate', width: 100,
+                                render: (v, r) => r.paymentType === 'credit' && v ? <Text>{v}</Text> : <Text type="secondary">—</Text>
+                              },
+                              {
+                                title: 'Payment Type', dataIndex: 'paymentType', key: 'paymentType', width: 110, align: 'center',
+                                render: v => <Tag color={v === 'instant' ? 'green' : 'orange'} style={{ borderRadius: 8 }}>{v === 'instant' ? 'Instant' : 'Credit'}</Tag>
+                              },
+                              {
+                                title: 'Paid By', dataIndex: 'paidBy', key: 'paidBy', width: 150,
+                                render: (v, r) => v === 'Purchase Person' ? (
+                                  <div>
+                                    <Tag color="purple" style={{ borderRadius: 8, marginBottom: 2 }}>Purchase Person</Tag>
+                                    {r.purchasePersonName && <div><Text style={{ fontSize: 12 }}>{r.purchasePersonName}</Text></div>}
+                                    {r.purchasePersonPhone && <div><Text type="secondary" style={{ fontSize: 11 }}>{r.purchasePersonPhone}</Text></div>}
+                                  </div>
+                                ) : v ? <Tag color="blue" style={{ borderRadius: 8 }}>{v}</Tag> : <Text type="secondary">—</Text>
+                              },
+                              {
+                                title: 'Payment Status', dataIndex: 'paymentStatus', key: 'paymentStatus', width: 120, align: 'center',
+                                render: v => <Tag color={v === 'Paid' ? 'success' : v === 'Partially Paid' ? 'warning' : 'error'} style={{ borderRadius: 10 }}>{v}</Tag>
+                              },
+                              {
+                                title: 'Payment Proof', dataIndex: 'paymentProof', key: 'paymentProof', width: 120,
+                                render: v => v ? (
+                                  <Button size="small" icon={<CheckCircleOutlined />} style={{ color: '#52c41a', borderColor: '#52c41a', fontSize: 11 }}>View Proof</Button>
+                                ) : <Text type="secondary" style={{ fontSize: 11 }}>—</Text>
+                              },
+                              {
+                                title: 'Action', key: 'action', fixed: 'right', width: 70,
+                                render: (_, r) => <Button size="small" type="link" icon={<EyeOutlined />} onClick={e => { e.stopPropagation(); setLocalPurchaseDetailView(r); }} style={{ color: '#B11E6A' }}>View</Button>
+                              },
+                            ]}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  )
+                },
+                {
+                  key: 'history',
+                  label: <Space><FileTextOutlined /> Purchase Order History</Space>,
+                  children: (
+                    <div style={{ marginTop: 12 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16, flexWrap: 'wrap', gap: 8 }}>
+                        <div>
+                          <Title level={5} style={{ margin: 0, color: textColor }}>Purchase Order History</Title>
+                          <Text type="secondary">Complete purchase order history with invoices, items, quantities and payment status</Text>
+                        </div>
+                        <Button icon={<DownloadOutlined />}>Export</Button>
+                      </div>
+                      <div style={{ marginBottom: 10, paddingBottom: 10, borderBottom: `1px solid ${borderColor}`, display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                        <Input
+                          prefix={<SearchOutlined style={{ color: '#B11E6A' }} />}
+                          placeholder="Search supplier, invoice..."
+                          allowClear
+                          value={expenseSearch}
+                          onChange={(e) => setExpenseSearch(e.target.value)}
+                          style={{ width: 230, borderRadius: 8 }}
+                        />
+                        <Select
+                          allowClear
+                          placeholder="Paid Status"
+                          value={expensePaidFilter}
+                          onChange={setExpensePaidFilter}
+                          style={{ width: 160, borderRadius: 8 }}
+                        >
+                          <Option value="Paid">Paid</Option>
+                          <Option value="Partially Paid">Partially Paid</Option>
+                          <Option value="Unpaid">Unpaid</Option>
+                        </Select>
+                        <DatePicker.RangePicker
+                          style={{ borderRadius: 8 }}
+                          onChange={(dates) => setExpenseDateRange(dates ? [dates[0].format('YYYY-MM-DD'), dates[1].format('YYYY-MM-DD')] : null)}
+                          allowClear
+                        />
+                      </div>
+                      <Table
+                        size="small"
+                        dataSource={purchases.filter((p) => {
+                          const q = expenseSearch.toLowerCase();
+                          const matchSearch = !q || (p.entity || '').toLowerCase().includes(q) || (p.inv_no || '').toLowerCase().includes(q) || (p.bill_no || '').toLowerCase().includes(q) || (p.items || []).some(i => (i.name || '').toLowerCase().includes(q));
+                          const matchPaid = !expensePaidFilter || (p.paid_status || 'Unpaid') === expensePaidFilter;
+                          if (expenseDateRange) {
+                            const d = p.date ? p.date.slice(0, 10) : '';
+                            if (d < expenseDateRange[0] || d > expenseDateRange[1]) return false;
+                          }
+                          return matchSearch && matchPaid;
+                        })}
+                        rowKey="key"
+                        scroll={{ x: 'max-content' }}
+                        expandable={{
+                          expandedRowRender: (record) => (
+                            <div style={{ padding: '12px 16px', background: isDark ? '#16192a' : '#fafcff', borderRadius: 8, margin: '4px 0' }}>
+                              <Row gutter={[16, 12]}>
+                                <Col xs={24} md={12}>
+                                  <Text strong style={{ color: '#B11E6A', display: 'block', marginBottom: 8 }}>Order Details</Text>
+                                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                                    <div><Text type="secondary" style={{ fontSize: 12 }}>Purchase Date: </Text><Text strong>{record.date}</Text></div>
+                                    <div><Text type="secondary" style={{ fontSize: 12 }}>Bill No: </Text><Text strong>{record.bill_no}</Text></div>
+                                    <div><Text type="secondary" style={{ fontSize: 12 }}>Invoice No: </Text><Text style={{ color: '#B11E6A', fontWeight: 600 }}>{record.inv_no}</Text></div>
+                                    <div><Text type="secondary" style={{ fontSize: 12 }}>Supplier: </Text><Text strong>{record.entity}</Text></div>
+                                    <div><Text type="secondary" style={{ fontSize: 12 }}>Total Amount: </Text><Text strong style={{ color: '#B11E6A' }}>{record.amount}</Text></div>
+                                    <div><Text type="secondary" style={{ fontSize: 12 }}>Paid Status: </Text>
+                                      <Tag color={record.paid_status === 'Paid' ? 'success' : record.paid_status === 'Partially Paid' ? 'warning' : 'error'} style={{ borderRadius: 8 }}>
+                                        {record.paid_status || 'Unpaid'}
+                                      </Tag>
+                                    </div>
+                                  </div>
+                                </Col>
+                                <Col xs={24} md={12}>
+                                  <Text strong style={{ color: '#B11E6A', display: 'block', marginBottom: 8 }}>Items & Quantities</Text>
+                                  <Table
+                                    size="small"
+                                    dataSource={record.items}
+                                    pagination={false}
+                                    columns={[
+                                      { title: 'Item Name', dataIndex: 'name', render: v => <Text strong>{v}</Text> },
+                                      { title: 'Quantity', dataIndex: 'qty' },
+                                      { title: 'Unit Price', dataIndex: 'price' },
+                                      { title: 'Total', dataIndex: 'total', render: v => <Text style={{ color: '#B11E6A', fontWeight: 600 }}>{v}</Text> },
+                                    ]}
+                                  />
+                                </Col>
+                              </Row>
+                            </div>
+                          ),
+                        }}
+                        columns={[
+                          { title: 'Purchase Date', dataIndex: 'date', key: 'date', width: 100, render: v => <Text strong>{v}</Text> },
+                          {
+                            title: 'Invoice No', key: 'inv', width: 140,
+                            render: (_, r) => (
+                              <Button
+                                type="link"
+                                style={{ color: '#B11E6A', padding: 0, fontWeight: 700 }}
+                                onClick={() => window.open('#', '_blank')}
+                                title="Click to open invoice"
+                              >{r.inv_no}</Button>
+                            )
+                          },
+                          {
+                            title: 'Invoice File', key: 'inv_file', width: 110,
+                            render: (_, r) => r.invoice_file ? (
+                              <Button
+                                size="small"
+                                icon={<FileTextOutlined />}
+                                style={{ color: '#1890ff', borderColor: '#1890ff', fontSize: 11 }}
+                                onClick={() => window.open('#', '_blank')}
+                              >Open</Button>
+                            ) : <Tag color="default" style={{ borderRadius: 8, fontSize: 10 }}>No File</Tag>
+                          },
+                          {
+                            title: 'Items', key: 'items', width: 200,
+                            render: (_, r) => (
+                              <div>
+                                {r.items.map((item, idx) => (
+                                  <div key={idx} style={{ fontSize: 11, marginBottom: 2 }}>
+                                    <Text strong>{item.name}</Text>
+                                    <Text type="secondary"> — {item.qty}</Text>
+                                  </div>
+                                ))}
+                              </div>
+                            )
+                          },
+                          { title: 'Supplier', dataIndex: 'entity', key: 'entity', width: 130, render: (v) => <Text style={{ color: '#B11E6A', fontWeight: 600 }}>{v}</Text> },
+                          { title: 'Total Amount', dataIndex: 'amount', key: 'amount', width: 110, render: (v) => <Text strong>{v}</Text> },
+                          {
+                            title: 'Paid Status', key: 'paid_status', width: 140,
+                            render: (_, r) => (
+                              <Space direction="vertical" size={0}>
+                                <Tag
+                                  color={r.paid_status === 'Paid' ? 'success' : r.paid_status === 'Partially Paid' ? 'warning' : 'error'}
+                                  style={{ borderRadius: 10 }}
+                                >{r.paid_status || 'Unpaid'}</Tag>
+                                {r.paid_amount > 0 && <Text style={{ fontSize: 10, color: '#52c41a' }}>Paid: ₹{r.paid_amount?.toLocaleString()}</Text>}
+                                {r.remaining > 0 && <Text style={{ fontSize: 10, color: '#ff4d4f' }}>Due: ₹{r.remaining?.toLocaleString()}</Text>}
+                              </Space>
+                            )
+                          },
+                          { title: 'Order Status', dataIndex: 'req_status', key: 'status', width: 110, render: (v) => <Tag color={v === 'Confirmed' ? 'success' : 'processing'}>{v}</Tag> },
+                          {
+                            title: 'Actions', key: 'actions', fixed: 'right', width: 120,
+                            render: (_, r) => (
+                              <Space>
+                                <Button size="small" type="link" icon={<EyeOutlined />} style={{ color: '#B11E6A' }}>View</Button>
+                                {r.paid_status !== 'Paid' && (
+                                  <Button size="small" icon={<UploadOutlined />} style={{ color: '#1890ff', fontSize: 11 }}>Proof</Button>
+                                )}
+                              </Space>
+                            )
+                          }
+                        ]}
+                      />
+                    </div>
+                  )
+                },
+                {
+                  key: 'quotation_comparison',
+                  label: <Space><RobotOutlined />Quotation Comparison</Space>,
+                  children: (
+                    <div style={{ marginTop: 12 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 10 }}>
+                        <div>
+                          <Title level={5} style={{ margin: 0, color: isDark ? '#e0e0e0' : '#1a1a2e' }}>AI Quotation Comparison</Title>
+                          <Text type="secondary" style={{ fontSize: 12 }}>Upload 2-5 supplier quotation files and let AI suggest the best option</Text>
+                        </div>
+                        {quotCompareFiles.length > 0 && (
+                          <Button
+                            danger
+                            size="small"
+                            onClick={() => {
+                              setQuotCompareFiles([]);
+                              setQuotCompareResult(null);
+                              setQuotCompareId(null);
+                              setQuotCompareSelectedIndex(null);
+                            }}
+                          >
+                            Clear All
+                          </Button>
+                        )}
+                      </div>
+
+                      {/* Upload Area */}
+                      <Upload.Dragger
+                        multiple
+                        beforeUpload={(file) => {
+                          if (quotCompareFiles.length >= 5) {
+                            enqueueSnackbar('You can compare up to 5 quotation files at a time', { variant: 'warning' });
+                            return Upload.LIST_IGNORE;
+                          }
+                          setQuotCompareFiles(prev => [...prev, file]);
+                          setQuotCompareResult(null);
+                          setQuotCompareId(null);
+                          setQuotCompareSelectedIndex(null);
+                          return false;
+                        }}
+                        onRemove={(file) => {
+                          setQuotCompareFiles(prev => prev.filter(f => f.uid !== file.uid));
+                          setQuotCompareResult(null);
+                          setQuotCompareId(null);
+                          setQuotCompareSelectedIndex(null);
+                        }}
+                        fileList={quotCompareFiles}
+                        accept=".pdf,.jpg,.jpeg,.png,.webp"
+                        disabled={quotCompareLoading}
+                        style={{ borderRadius: 12, marginBottom: 16, background: isDark ? '#1a1a2a' : '#fafcff', borderColor: '#B11E6A66' }}
+                      >
+                        <div style={{ padding: '24px 16px', textAlign: 'center' }}>
+                          <UploadOutlined style={{ fontSize: 36, color: '#B11E6A', marginBottom: 10, display: 'block' }} />
+                          <Text strong style={{ fontSize: 14, color: isDark ? '#e0e0e0' : '#1a1a2e', display: 'block', marginBottom: 4 }}>
+                            Click or drag quotation files here
+                          </Text>
+                          <Text type="secondary" style={{ fontSize: 12 }}>
+                            Supports PDF, JPG, PNG, WEBP — upload 2 to 5 quotations to compare
+                          </Text>
+                        </div>
+                      </Upload.Dragger>
+
+                      {/* File count indicator */}
+                      {quotCompareFiles.length > 0 && (
+                        <div style={{ marginBottom: 14, padding: '10px 16px', borderRadius: 8, background: isDark ? '#1a1a2a' : '#f0f4ff', border: '1px solid #B11E6A33', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
+                          <Space>
+                            <FileTextOutlined style={{ color: '#B11E6A' }} />
+                            <Text style={{ fontSize: 13 }}>
+                              <span style={{ fontWeight: 700, color: '#B11E6A' }}>{quotCompareFiles.length}</span> quotation{quotCompareFiles.length > 1 ? 's' : ''} uploaded
+                              {quotCompareFiles.length < 2 && (
+                                <Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>(upload at least 2 to compare)</Text>
+                              )}
+                            </Text>
+                          </Space>
+                          <Button
+                            type="primary"
+                            icon={<RobotOutlined />}
+                            disabled={quotCompareFiles.length < 2}
+                            loading={quotCompareLoading}
+                            style={{ background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none', fontWeight: 600 }}
+                            onClick={async () => {
+                              setQuotCompareLoading(true);
+                              setQuotCompareResult(null);
+                              setQuotCompareId(null);
+                              setQuotCompareSelectedIndex(null);
+                              try {
+                                const formData = new FormData();
+                                quotCompareFiles.forEach((f) => formData.append('files', f, f.name));
+                                const res = await compareQuotations(formData).unwrap();
+                                setQuotCompareId(res.data.id);
+                                setQuotCompareResult(res.data);
+                                if (res.data.warning) enqueueSnackbar(res.data.warning, { variant: 'warning' });
+                                else enqueueSnackbar('AI comparison complete', { variant: 'success' });
+                              } catch (err) {
+                                const msg = err?.data?.error || err?.data || 'AI comparison failed.';
+                                enqueueSnackbar(typeof msg === 'string' ? msg : 'AI comparison failed.', { variant: 'error' });
+                              } finally {
+                                setQuotCompareLoading(false);
+                              }
+                            }}
+                          >
+                            {quotCompareLoading ? 'Analysing...' : 'Compare with AI'}
+                          </Button>
+                        </div>
+                      )}
+
+                      {/* AI Results */}
+                      {quotCompareResult && (
+                        <div>
+                          {/* Best Recommendation Banner */}
+                          <div style={{ marginBottom: 16, padding: '16px 20px', borderRadius: 12, background: 'linear-gradient(135deg,#B11E6A18,#D85C9E10)', border: '1.5px solid #B11E6A44' }}>
+                            <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+                              <div style={{ width: 40, height: 40, borderRadius: '50%', background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                                <RobotOutlined style={{ color: '#fff', fontSize: 18 }} />
+                              </div>
+                              <div>
+                                <Text strong style={{ fontSize: 14, color: '#B11E6A', display: 'block', marginBottom: 4 }}>
+                                  AI Recommendation
+                                </Text>
+                                <Text style={{ fontSize: 13, color: isDark ? '#e0e0e0' : '#333', lineHeight: 1.6 }}>
+                                  {quotCompareResult.summary || (
+                                    <>Based on price, delivery time, quality, and payment terms, <Text strong style={{ color: '#B11E6A' }}>{quotCompareResult.best.name}</Text> is the best quotation with an overall score of <Text strong style={{ color: '#B11E6A' }}>{quotCompareResult.best.score}/100</Text>.</>
+                                  )}
+                                </Text>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Comparison Table */}
+                          <Table
+                            size="small"
+                            rowKey="fileIndex"
+                            dataSource={quotCompareResult.suppliers}
+                            scroll={{ x: 'max-content' }}
+                            pagination={false}
+                            rowClassName={(r) => r.name === quotCompareResult.best.name ? 'ant-table-row-selected' : ''}
+                            columns={[
+                              {
+                                title: 'Quotation', dataIndex: 'name', width: 180,
+                                render: (v, r) => (
+                                  <Space>
+                                    <Text strong style={{ color: r.name === quotCompareResult.best.name ? '#B11E6A' : isDark ? '#e0e0e0' : '#1a1a2e', fontSize: 13 }}>{v}</Text>
+                                    {r.name === quotCompareResult.best.name && <Tag color="#B11E6A" style={{ borderRadius: 10, fontSize: 11 }}>Best</Tag>}
+                                  </Space>
+                                ),
+                              },
+                              {
+                                title: 'Price', dataIndex: 'price', width: 110,
+                                render: (v) => {
+                                  const min = Math.min(...quotCompareResult.suppliers.map(s => s.price));
+                                  return <Text strong style={{ color: v === min ? '#52c41a' : isDark ? '#e0e0e0' : '#333' }}>₹{(v || 0).toLocaleString()}</Text>;
+                                },
+                                sorter: (a, b) => a.price - b.price,
+                              },
+                              {
+                                title: 'Delivery', dataIndex: 'delivery', width: 100,
+                                render: (v) => <Text style={{ fontSize: 13 }}>{v}</Text>,
+                              },
+                              {
+                                title: 'Quality', dataIndex: 'quality', width: 100,
+                                render: (v) => <Tag color={v === 'Premium' ? 'gold' : v === 'Standard' ? 'blue' : 'default'} style={{ borderRadius: 10 }}>{v}</Tag>,
+                              },
+                              {
+                                title: 'Payment Terms', dataIndex: 'terms', width: 220,
+                                render: (v) => <Text style={{ fontSize: 12, color: isDark ? '#bbb' : '#555' }}>{v}</Text>,
+                              },
+                              {
+                                title: 'AI Score', dataIndex: 'score', width: 90,
+                                render: (v, r) => (
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                    <div style={{ flex: 1, height: 6, borderRadius: 3, background: isDark ? '#333' : '#f0f0f0', overflow: 'hidden' }}>
+                                      <div style={{ height: '100%', width: `${v}%`, borderRadius: 3, background: r.name === quotCompareResult.best.name ? 'linear-gradient(90deg,#B11E6A,#D85C9E)' : 'linear-gradient(90deg,#3730a3,#6366f1)' }} />
+                                    </div>
+                                    <Text strong style={{ fontSize: 12, color: r.name === quotCompareResult.best.name ? '#B11E6A' : isDark ? '#e0e0e0' : '#333', minWidth: 28 }}>{v}</Text>
+                                  </div>
+                                ),
+                                sorter: (a, b) => a.score - b.score,
+                                defaultSortOrder: 'descend',
+                              },
+                              {
+                                title: 'Action', key: 'action', width: 110, fixed: 'right',
+                                render: (_, r) => {
+                                  // Resolve position by object reference, not the render index — the
+                                  // Score column sorter reorders displayed rows, so a raw row index
+                                  // here would send the wrong item to the backend once sorted.
+                                  const i = quotCompareResult.suppliers.indexOf(r);
+                                  const isSelected = quotCompareSelectedIndex === i;
+                                  return (
+                                    <Button
+                                      size="small"
+                                      type={isSelected ? 'default' : 'primary'}
+                                      loading={quotSelecting && quotCompareSelectedIndex === null}
+                                      disabled={quotCompareSelectedIndex !== null}
+                                      style={isSelected ? {} : { background: '#B11E6A', border: 'none' }}
+                                      onClick={() => handleSelectQuotation(i)}
+                                    >
+                                      {isSelected ? '✓ Selected' : 'Select'}
+                                    </Button>
+                                  );
+                                },
+                              },
+                            ]}
+                          />
+
+                          {/* Product-wise Comparison — same product matched across quotations by AI
+                              (handles related/synonymous naming, e.g. "Soap" vs "Bar"), so the best
+                              price can be picked per product rather than only by whole-quotation total. */}
+                          {quotCompareResult.productComparison?.length > 0 && (
+                            <div style={{ marginTop: 24 }}>
+                              <Title level={5} style={{ margin: '0 0 4px', color: isDark ? '#e0e0e0' : '#1a1a2e' }}>
+                                <RobotOutlined style={{ marginRight: 6, color: '#B11E6A' }} />
+                                Product-wise Comparison
+                              </Title>
+                              <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 12 }}>
+                                Matching products across quotations analyzed by AI (recognizes related/similar product names) — lowest price per product highlighted in green.
+                              </Text>
+                              {quotCompareResult.productComparison.map((p, pi) => {
+                                const bestEntry = p.entries.find((e) => e.fileIndex === p.bestFileIndex);
+                                return (
+                                  <Card
+                                    key={pi}
+                                    size="small"
+                                    style={{ marginBottom: 12, borderRadius: 10, border: `1px solid ${isDark ? '#2a2a3a' : '#f0f0f0'}`, background: isDark ? '#1a1a2a' : '#fff' }}
+                                  >
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 8, marginBottom: 8 }}>
+                                      <div>
+                                        <Text strong style={{ fontSize: 13, color: isDark ? '#e0e0e0' : '#1a1a2e' }}>{p.productName}</Text>
+                                        {p.aliases?.length > 0 && (
+                                          <div style={{ marginTop: 4 }}>
+                                            <Space size={4} wrap>
+                                              {p.aliases.map((a, ai) => <Tag key={ai} style={{ fontSize: 10, borderRadius: 8 }}>{a}</Tag>)}
+                                            </Space>
+                                          </div>
+                                        )}
+                                      </div>
+                                      {bestEntry && (
+                                        <Tag color="#B11E6A" style={{ borderRadius: 10 }}>
+                                          Best: {bestEntry.name} · ₹{formatRate(Number(bestEntry.unitPrice) || 0).toLocaleString()}/unit
+                                        </Tag>
+                                      )}
+                                    </div>
+                                    <Table
+                                      size="small"
+                                      pagination={false}
+                                      rowKey={(r) => `${pi}-${r.fileIndex}`}
+                                      dataSource={p.entries}
+                                      scroll={{ x: 'max-content' }}
+                                      columns={[
+                                        { title: 'Quotation', dataIndex: 'name', width: 160, render: (v, r) => <Text strong style={{ color: r.fileIndex === p.bestFileIndex ? '#B11E6A' : undefined }}>{v}</Text> },
+                                        { title: 'Matched As', dataIndex: 'matchedName', width: 160, render: (v) => <Text type="secondary" style={{ fontSize: 12 }}>{v || '—'}</Text> },
+                                        { title: 'Qty', dataIndex: 'qty', width: 90, render: (v) => v ? Number(v).toLocaleString() : '—' },
+                                        {
+                                          title: 'Unit Price', dataIndex: 'unitPrice', width: 110,
+                                          render: (v, r) => <Text strong style={{ color: r.fileIndex === p.bestFileIndex ? '#52c41a' : (isDark ? '#e0e0e0' : '#333') }}>{v ? `₹${formatRate(Number(v)).toLocaleString()}` : '—'}</Text>,
+                                        },
+                                        { title: 'Total', dataIndex: 'totalPrice', width: 110, render: (v) => v ? `₹${Number(v).toLocaleString()}` : '—' },
+                                      ]}
+                                    />
+                                    {p.note && (
+                                      <Alert type="info" showIcon message={p.note} style={{ marginTop: 8, borderRadius: 8, fontSize: 12 }} />
+                                    )}
+                                  </Card>
+                                );
+                              })}
+                            </div>
+                          )}
+
+                          {/* Actions */}
+                          <div style={{ marginTop: 16, display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                            <Button
+                              type="primary"
+                              icon={<CheckCircleOutlined />}
+                              loading={quotSelecting}
+                              disabled={quotCompareSelectedIndex !== null}
+                              style={{ background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none', fontWeight: 600 }}
+                              onClick={() => handleSelectQuotation(quotCompareResult.bestIndex)}
+                            >
+                              {quotCompareSelectedIndex !== null ? 'Selection Confirmed' : `Select ${quotCompareResult.best.name} (AI's Pick)`}
+                            </Button>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Empty state */}
+                      {quotCompareFiles.length === 0 && (
+                        <div style={{ textAlign: 'center', padding: '40px 20px', color: isDark ? '#888' : '#aaa' }}>
+                          <RobotOutlined style={{ fontSize: 48, marginBottom: 12, display: 'block', opacity: 0.4 }} />
+                          <Text type="secondary" style={{ fontSize: 14 }}>Upload 2 or more quotation files to start AI comparison</Text>
+                        </div>
+                      )}
+
+                      {/* Selected document preview — opens automatically once a quotation is chosen */}
+                      <Modal
+                        open={quotPreviewOpen}
+                        onCancel={() => setQuotPreviewOpen(false)}
+                        title={<Space><CheckCircleOutlined style={{ color: '#52c41a' }} />Selected Quotation</Space>}
+                        width={680}
+                        footer={[
+                          <Button
+                            key="open"
+                            icon={<EyeOutlined />}
+                            onClick={() => window.open(quotSelectedDoc?.url, '_blank', 'noopener,noreferrer')}
+                          >
+                            Open Original
+                          </Button>,
+                          <Button
+                            key="close"
+                            type="primary"
+                            onClick={() => setQuotPreviewOpen(false)}
+                            style={{ background: '#B11E6A', border: 'none' }}
+                          >
+                            Done
+                          </Button>,
+                        ]}
+                      >
+                        {quotSelectedDoc && (
+                          <div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, marginBottom: 16 }}>
+                              <div>
+                                <Text strong style={{ fontSize: 16, color: '#B11E6A' }}>{quotSelectedDoc.name}</Text>
+                                <br />
+                                <Text type="secondary" style={{ fontSize: 12 }}>{quotSelectedDoc.originalName}</Text>
+                              </div>
+                              <Tag color="#B11E6A" style={{ borderRadius: 10, height: 'fit-content' }}>{quotSelectedDoc.score}/100</Tag>
+                            </div>
+
+                            <Descriptions size="small" column={2} bordered style={{ marginBottom: 16 }}>
+                              <Descriptions.Item label="Price">₹{(quotSelectedDoc.price || 0).toLocaleString()}</Descriptions.Item>
+                              <Descriptions.Item label="Delivery">{quotSelectedDoc.delivery}</Descriptions.Item>
+                              <Descriptions.Item label="Quality">{quotSelectedDoc.quality}</Descriptions.Item>
+                              <Descriptions.Item label="Payment Terms" span={2}>{quotSelectedDoc.terms}</Descriptions.Item>
+                            </Descriptions>
+
+                            <div style={{ border: `1px solid ${isDark ? '#2a2a3a' : '#f0f0f0'}`, borderRadius: 8, overflow: 'hidden', background: isDark ? '#111' : '#fafafa' }}>
+                              {quotSelectedDoc.mimetype?.startsWith('image/') ? (
+                                <img src={quotSelectedDoc.url} alt={quotSelectedDoc.originalName} style={{ width: '100%', display: 'block' }} />
+                              ) : quotSelectedDoc.mimetype === 'application/pdf' ? (
+                                <iframe title="Selected quotation document" src={quotSelectedDoc.url} style={{ width: '100%', height: 480, border: 'none' }} />
+                              ) : (
+                                <div style={{ padding: 40, textAlign: 'center' }}>
+                                  <FileTextOutlined style={{ fontSize: 32, color: '#B11E6A', marginBottom: 8, display: 'block' }} />
+                                  <Text type="secondary">Preview not available for this file type — use "Open Original" above.</Text>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        )}
+                      </Modal>
+                    </div>
+                  ),
+                },
+              ])}
+            />
+          </Card>
+        </Col>
+      </Row>
+
+      {/* ──────── Add Local Purchase Modal ──────── */}
+      <Modal
+        title={
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, paddingBottom: 4 }}>
+            <div style={{ width: 40, height: 40, borderRadius: 10, background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+              <ShoppingOutlined style={{ color: '#fff', fontSize: 18 }} />
+            </div>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 15 }}>Add Local Purchase</div>
+              <div style={{ fontSize: 11, color: '#888', fontWeight: 400 }}>Upload / Open Camera → AI fetches details → Choose payment type</div>
+            </div>
+          </div>
+        }
+        open={showAddLocalPurchaseModal}
+        onCancel={() => { setShowAddLocalPurchaseModal(false); localPurchaseForm.resetFields(); setLocalPurchaseInvoiceFile(null); setLocalPurchaseScannedDetails(null); setLocalPurchaseNewVendorDetected(false); setLocalPurchasePaymentType('credit'); setLocalPurchasePaidBy(''); setLocalPurchasePriceType('exclusive'); setLocalPurchaseTarget('inventory'); }}
+        footer={null}
+        width={580}
+        centered
+      >
+        <Form form={localPurchaseForm} layout="vertical" onFinish={handleAddLocalPurchase} style={{ marginTop: 8 }}>
+
+          {/* Stock Type — which pool these items land in */}
+          <Form.Item label="Stock Type" style={{ marginBottom: 16 }} tooltip="Stock Inventory adds these items to Inventory as usual. Material Stocks adds them to Inventory > Material Stocks (packing materials tracked by name + size) instead.">
+            <Select
+              value={localPurchaseTarget}
+              onChange={setLocalPurchaseTarget}
+              options={[{ value: 'inventory', label: 'Stock Inventory' }, { value: 'material_stock', label: 'Material Stocks' }]}
+            />
+          </Form.Item>
+
+          {/* Invoice Scan Section */}
+          <div style={{ marginBottom: 16, padding: '14px 16px', borderRadius: 12, border: '1.5px dashed #B11E6A66', background: isDark ? '#1a0f14' : '#fff8fb' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+              <div style={{ width: 32, height: 32, borderRadius: 8, background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                <RobotOutlined style={{ color: '#fff', fontSize: 15 }} />
+              </div>
+              <div>
+                <Text style={{ fontWeight: 700, color: '#B11E6A', display: 'block', fontSize: 13 }}>Scan Invoice with AI</Text>
+                <Text style={{ fontSize: 11, color: '#aaa' }}>Upload invoice — AI will extract vendor, items, and amount</Text>
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+              <Upload
+                maxCount={1}
+                beforeUpload={file => { setLocalPurchaseInvoiceFile(file); return false; }}
+                onRemove={() => setLocalPurchaseInvoiceFile(null)}
+                accept=".pdf,.jpg,.jpeg,.png"
+              >
+                <Button icon={<UploadOutlined />} style={{ borderRadius: 8, borderColor: '#B11E6A66', color: '#B11E6A' }}>Upload Invoice</Button>
+              </Upload>
+              <Button icon={<CameraOutlined />} onClick={() => openCameraCapture(setLocalPurchaseInvoiceFile)} style={{ borderRadius: 8, borderColor: '#B11E6A66', color: '#B11E6A' }}>Open Camera</Button>
+              <Button
+                icon={<ThunderboltOutlined />}
+                loading={localPurchaseScanLoading}
+                onClick={handleLocalPurchaseInvoiceScan}
+                style={{ borderRadius: 8, background: localPurchaseInvoiceFile ? 'linear-gradient(135deg,#B11E6A,#D85C9E)' : '#f0f0f0', border: 'none', color: localPurchaseInvoiceFile ? '#fff' : '#bbb', fontWeight: 700 }}
+              >
+                {localPurchaseScanLoading ? 'Scanning...' : 'Fetch with AI'}
+              </Button>
+            </div>
+            {localPurchaseInvoiceFile && (
+              <div style={{ marginTop: 6, fontSize: 11, color: '#B11E6A', display: 'flex', alignItems: 'center', gap: 4 }}>
+                <FileTextOutlined /><Text style={{ fontSize: 11, color: '#B11E6A' }}>{localPurchaseInvoiceFile.name}</Text>
+              </div>
+            )}
+          </div>
+
+          {/* Scanned Vendor Details */}
+          {localPurchaseScannedDetails && (
+            <div style={{ marginBottom: 16, padding: '12px 14px', borderRadius: 10, background: isDark ? '#0f1a0f' : '#f6fff8', border: '1px solid #52c41a33' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                <Space size={4}>
+                  <CheckCircleOutlined style={{ color: '#52c41a' }} />
+                  <Text style={{ fontWeight: 700, color: '#52c41a', fontSize: 13 }}>Vendor Detected</Text>
+                  {localPurchaseNewVendorDetected ? (
+                    <Tag color="orange" style={{ borderRadius: 8 }}>New Vendor</Tag>
+                  ) : (
+                    <Tag color="success" style={{ borderRadius: 8 }}>Existing Vendor</Tag>
+                  )}
+                </Space>
+              </div>
+              <Row gutter={8}>
+                {[
+                  { label: 'Invoice Date', val: localPurchaseScannedDetails.invoiceDate && dayjs(localPurchaseScannedDetails.invoiceDate).isValid() ? dayjs(localPurchaseScannedDetails.invoiceDate).format('DD MMM YYYY') : '—' },
+                  { label: 'Vendor Name', val: localPurchaseScannedDetails.vendorName },
+                  { label: 'Phone', val: localPurchaseScannedDetails.vendorPhone },
+                  { label: 'Address', val: localPurchaseScannedDetails.vendorAddress },
+                  { label: 'Total Amount', val: `₹${localPurchaseScannedDetails.totalAmount?.toLocaleString()}` },
+                  { label: 'GST Amount', val: `₹${(localPurchaseScannedDetails.gstAmount || 0).toLocaleString()}` },
+                  // CGST/SGST/IGST breakdown from the bill — only the components the bill
+                  // actually printed are shown (inter-state → IGST only; intra-state → CGST+SGST).
+                  ...((localPurchaseScannedDetails.igstAmount || 0) > 0
+                    ? [{ label: 'IGST (Inter-state)', val: `₹${Number(localPurchaseScannedDetails.igstAmount).toLocaleString()}` }]
+                    : []),
+                  ...((localPurchaseScannedDetails.cgstAmount || 0) > 0
+                    ? [{ label: 'CGST', val: `₹${Number(localPurchaseScannedDetails.cgstAmount).toLocaleString()}` }]
+                    : []),
+                  ...((localPurchaseScannedDetails.sgstAmount || 0) > 0
+                    ? [{ label: 'SGST', val: `₹${Number(localPurchaseScannedDetails.sgstAmount).toLocaleString()}` }]
+                    : []),
+                ].map((d, i) => (
+                  <Col xs={12} key={i} style={{ marginBottom: 4 }}>
+                    <Text style={{ fontSize: 10, color: '#888', display: 'block' }}>{d.label}</Text>
+                    <Text strong style={{ fontSize: 12 }}>{d.val}</Text>
+                  </Col>
+                ))}
+              </Row>
+              {localPurchaseScannedDetails.items?.length > 0 && (
+                <div style={{ marginTop: 8 }}>
+                  <Text style={{ fontSize: 11, color: '#888', display: 'block', marginBottom: 4 }}>Items Detected:</Text>
+                  {localPurchaseScannedDetails.items.map((item, i) => (
+                    <div key={i} style={{ fontSize: 11, padding: '2px 0' }}>
+                      <Text strong>{item.name}</Text><Text type="secondary"> — {item.qty} {item.unit} × ₹{item.amount?.toLocaleString()}</Text>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {localPurchaseNewVendorDetected && (
+                <div style={{ marginTop: 10, padding: '8px 12px', borderRadius: 8, background: isDark ? '#1a1500' : '#fffbe6', border: '1px solid #fa8c1644' }}>
+                  <Space>
+                    <WarningOutlined style={{ color: '#fa8c16' }} />
+                    <Text style={{ fontSize: 12, color: '#d46b08' }}>New vendor detected — add to vendors list?</Text>
+                  </Space>
+                  <Form.Item name="addToVendors" valuePropName="checked" style={{ margin: '8px 0 0' }}>
+                    <Checkbox>Yes, add "{localPurchaseScannedDetails.vendorName}" to Vendors List</Checkbox>
+                  </Form.Item>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Items Purchased — editable list, auto-filled from AI scan */}
+          <Text strong style={{ display: 'block', marginBottom: 8, fontSize: 13 }}>Items / Products Purchased</Text>
+          <Form.List name="items" initialValue={[{ itemName: '', qty: 1, unit: undefined, amount: 0, gstPercent: 0, itemCode: undefined, itemType: 'standard' }]}>
+            {(fields, { add, remove }) => (
+              <div style={{ marginBottom: 16 }}>
+                {fields.map(({ key, name, ...restField }) => {
+                  const isMaterialMode = localPurchaseTarget === 'material_stock';
+                  const typedName = String(watchedLPItems?.[name]?.itemName || '').trim().toLowerCase();
+                  const typedCode = String(watchedLPItems?.[name]?.itemCode || '').trim();
+                  const typedSize = String(watchedLPItems?.[name]?.size || '').trim().toLowerCase();
+                  // Material Stocks lines have no Bulk/Direct concept — always treat as 'standard'
+                  // for rendering (e.g. keeps the Unit field a free AutoComplete) regardless of
+                  // any stale itemType value left over from switching Stock Type back and forth.
+                  const rowItemType = isMaterialMode ? 'standard' : (watchedLPItems?.[name]?.itemType === 'bulk' ? 'bulk' : 'standard');
+                  // Exact (case-insensitive) name (+ size, in Material Stocks mode) match — when
+                  // this exists, the line will auto-merge into it even without picking a code.
+                  const exactMatch = typedName.length > 0
+                    ? (isMaterialMode
+                        ? materialStocksList.find((s) => (s.name || '').toLowerCase() === typedName && (s.size || '').trim().toLowerCase() === typedSize)
+                        : inventoryItems.find((i) => i.itemType === rowItemType && (i.name || '').toLowerCase() === typedName))
+                    : null;
+                  // Code dropdown — Material Stock codes in Material Stocks mode, else Inventory
+                  // item codes restricted to the same stock type (Direct/Bulk), same rule as the
+                  // collision hint (the backend rejects a cross-type merge).
+                  const codeOptions = isMaterialMode
+                    ? materialStocksList.filter((s) => s.code).map((s) => ({ value: s.code, label: `${s.code} — ${s.name}${s.size ? ` (${s.size})` : ''} — ${formatQty(s.stockCount)} in stock` }))
+                    : inventoryItems.filter((i) => i.itemType === rowItemType).map((i) => ({ value: i.code, label: `${i.code} — ${i.name} (${formatQty(i.current)} ${i.unit})` }));
+                  return (
+                    <div key={key} style={{ marginBottom: 8, padding: '8px 8px 2px', borderRadius: 8, border: `1px solid ${isDark ? '#2a2a3e' : '#f0f0f0'}` }}>
+                      <Row gutter={6} wrap={false} align="middle">
+                        <Col flex="auto" style={{ minWidth: 0 }}>
+                          <Form.Item {...restField} name={[name, 'itemName']} style={{ marginBottom: 6 }} rules={[{ required: true, message: 'Item name required' }]}>
+                            <Input placeholder="e.g. Packing Boxes" />
+                          </Form.Item>
+                        </Col>
+                        <Col flex="0 0 150px">
+                          {isMaterialMode ? (
+                            <Form.Item {...restField} name={[name, 'size']} style={{ marginBottom: 6 }} tooltip="Packing material size (e.g. 15ml, 30x20cm) — part of what identifies this material in Material Stocks.">
+                              <Input size="small" placeholder="Size (optional)" />
+                            </Form.Item>
+                          ) : (
+                            <Form.Item {...restField} name={[name, 'itemType']} initialValue="standard" style={{ marginBottom: 6 }} tooltip="Direct Stock lands in Stock Inventory as usual. Bulk Raw Material lands on Inventory's Bulk tab (Litres/Kg) and is packed into sellable stock later via Fill Stock.">
+                              <Select
+                                size="small"
+                                options={[{ value: 'standard', label: 'Direct Stock' }, { value: 'bulk', label: 'Bulk Raw Material' }]}
+                                onChange={(v) => {
+                                  const items = localPurchaseForm.getFieldValue('items') || [];
+                                  const row = items[name] || {};
+                                  items[name] = {
+                                    ...row,
+                                    itemType: v,
+                                    // Bulk is restricted to Litres/Kg (its Select only offers those) — fall back to
+                                    // Litres if the row didn't already hold one. Switching back to Direct Stock
+                                    // keeps whatever unit was set — Litres/Kg are valid Direct units too (e.g. oil
+                                    // sold by the packet still measured in Litres), so it's never force-reset to Pcs.
+                                    unit: v === 'bulk' && !['Litres', 'Kg'].includes(row.unit) ? 'Litres' : row.unit,
+                                  };
+                                  localPurchaseForm.setFieldsValue({ items });
+                                }}
+                              />
+                            </Form.Item>
+                          )}
+                        </Col>
+                        <Col flex="0 0 28px">
+                          {fields.length > 1 && (
+                            <Button danger type="text" size="small" icon={<CloseOutlined />} onClick={() => remove(name)} style={{ marginBottom: 6, padding: 0 }} />
+                          )}
+                        </Col>
+                      </Row>
+                      <Row gutter={6} wrap={false} align="middle">
+                        <Col flex="0 0 60px">
+                          <Form.Item {...restField} name={[name, 'qty']} style={{ marginBottom: 6 }}>
+                            <InputNumber min={0} placeholder="Qty" style={{ width: '100%' }} />
+                          </Form.Item>
+                        </Col>
+                        <Col flex="0 0 84px">
+                          <Form.Item {...restField} name={[name, 'unit']} style={{ marginBottom: 6 }} rules={[{ required: true, message: 'Unit required' }]}>
+                            {rowItemType === 'bulk' ? (
+                              <Select size="small" options={[{ value: 'Litres', label: 'Litres' }, { value: 'Kg', label: 'Kg' }]} placeholder="Unit" />
+                            ) : (
+                              <AutoComplete size="small" options={COMMON_UNIT_OPTIONS} filterOption={(input, opt) => opt.value.toLowerCase().startsWith(input.toLowerCase())} placeholder="Litres / Kg / Pcs…" />
+                            )}
+                          </Form.Item>
+                        </Col>
+                        <Col flex="0 0 84px">
+                          <Form.Item {...restField} name={[name, 'amount']} style={{ marginBottom: 6 }}>
+                            <InputNumber min={0} prefix="₹" placeholder="Amt" style={{ width: '100%' }} />
+                          </Form.Item>
+                        </Col>
+                        <Col flex="0 0 64px">
+                          <Form.Item {...restField} name={[name, 'gstPercent']} style={{ marginBottom: 6 }} tooltip="GST% for this line — used to work out the taxable (GST-exclusive) purchase price credited to the batch.">
+                            <InputNumber min={0} max={100} suffix="%" placeholder="GST" style={{ width: '100%' }} />
+                          </Form.Item>
+                        </Col>
+                        <Col flex="auto" style={{ minWidth: 0 }}>
+                          <Form.Item {...restField} name={[name, 'itemCode']} style={{ marginBottom: 6 }} tooltip={isMaterialMode ? 'Pick an existing Material Stock row to merge this purchase into it instead of creating a duplicate. Leave blank to add as new.' : 'Pick an existing item to merge this stock into it instead of creating a duplicate. Only items of the same stock type (Direct/Bulk) selected above are listed. Leave blank to add as new.'}>
+                            <Select
+                              showSearch
+                              allowClear
+                              placeholder={isMaterialMode ? 'Material Code (optional — merges into existing stock)' : 'Item Code (optional — merges into existing item)'}
+                              options={codeOptions}
+                              filterOption={(input, option) => (option?.label || '').toLowerCase().includes(input.toLowerCase())}
+                            />
+                          </Form.Item>
+                        </Col>
+                      </Row>
+                      {isMaterialMode && (
+                        <Row gutter={6} wrap={false} align="middle">
+                          <Col flex="auto" style={{ minWidth: 0 }}>
+                            <Form.Item {...restField} name={[name, 'hotelName']} style={{ marginBottom: 6 }} tooltip="Optional — scopes this stock to a specific hotel, same as Inventory's Add Material Stock form. Leave blank for generic/pooled stock.">
+                              <Input size="small" placeholder="Hotel Name (optional)" />
+                            </Form.Item>
+                          </Col>
+                        </Row>
+                      )}
+                      {typedName.length >= 2 && !typedCode && (
+                        exactMatch ? (
+                          <Text style={{ fontSize: 11, color: '#52c41a', display: 'block', marginTop: -4, marginBottom: 6 }}>
+                            <CheckCircleOutlined style={{ marginRight: 4 }} />Matches existing {isMaterialMode ? 'material stock' : 'item'} "{exactMatch.name}" ({exactMatch.code}) by name{isMaterialMode ? '+size' : ''} — stock will merge into it automatically.
+                          </Text>
+                        ) : (
+                          <Text style={{ fontSize: 11, color: '#fa8c16', display: 'block', marginTop: -4, marginBottom: 6 }}>
+                            <WarningOutlined style={{ marginRight: 4 }} />No exact match in {isMaterialMode ? 'Material Stocks' : 'Inventory'} for this name — pick the correct {isMaterialMode ? 'material' : 'item'} above via {isMaterialMode ? 'Material Code' : 'Item Code'}, or leave blank to add it as new.
+                          </Text>
+                        )
+                      )}
+                    </div>
+                  );
+                })}
+                <Button type="dashed" icon={<PlusOutlined />} onClick={() => add({ itemName: '', qty: 1, unit: undefined, amount: 0, gstPercent: 0, itemCode: undefined, itemType: 'standard' })} style={{ width: '100%', color: '#B11E6A', borderColor: '#B11E6A66' }}>
+                  Add Item
+                </Button>
+              </div>
+            )}
+          </Form.List>
+          <div style={{ marginBottom: 12 }}>
+            <Text style={{ fontSize: 12, marginRight: 10 }}>Amount above is:</Text>
+            <Radio.Group
+              size="small"
+              value={localPurchasePriceType}
+              onChange={(e) => setLocalPurchasePriceType(e.target.value)}
+              optionType="button"
+              buttonStyle="solid"
+            >
+              <Radio.Button value="exclusive">GST Exclusive</Radio.Button>
+              <Radio.Button value="inclusive">GST Inclusive</Radio.Button>
+            </Radio.Group>
+          </div>
+          <Row gutter={12}>
+            <Col span={12}>
+              <Form.Item label="Invoice Number" name="invoiceNo" rules={[{ required: true, message: 'Required' }]}>
+                <Input placeholder="INV-XXXX" />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item label="Vendor Name" name="vendorName" rules={[{ required: true, message: 'Required' }]}>
+                <Select
+                  placeholder="Select or type vendor"
+                  showSearch
+                  optionFilterProp="children"
+                  dropdownRender={menu => (
+                    <>
+                      {menu}
+                      <div style={{ padding: '8px 12px', borderTop: '1px solid #f0f0f0' }}>
+                        <Button type="link" icon={<PlusOutlined />} style={{ color: '#B11E6A', padding: 0, fontWeight: 600 }}
+                          onClick={() => { setInlineDropdownContext('local_purchase'); setShowAddVendorInlineModal(true); }}>
+                          Add New Vendor
+                        </Button>
+                      </div>
+                    </>
+                  )}
+                >
+                  {vendors.map(v => <Option key={v.id} value={v.name}>{v.name}</Option>)}
+                </Select>
+              </Form.Item>
+            </Col>
+          </Row>
+          <Row gutter={12}>
+            <Col span={12}>
+              <Form.Item label="Vendor Phone" name="vendorPhone" rules={[phoneValidator(false)]}>
+                <PhoneInput placeholder="Phone / WhatsApp" />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item label="Total Amount (₹)" name="totalAmount" rules={[{ required: true, message: 'Required' }]}>
+                <InputNumber prefix="₹" style={{ width: '100%' }} min={0} placeholder="0.00" />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Row gutter={12}>
+            <Col span={12}>
+              <Form.Item label="GST Amount (₹)" name="gstAmount">
+                <InputNumber prefix="₹" style={{ width: '100%' }} min={0} placeholder="0.00" />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item label="Invoice Date" name="invoiceDate" tooltip="Auto-filled from the scanned invoice — used as this stock's purchase date">
+                <DatePicker style={{ width: '100%', borderRadius: 8 }} format="DD-MM-YYYY" />
+              </Form.Item>
+            </Col>
+          </Row>
+          {/* CGST/SGST/IGST split — auto-filled from the scanned bill. An inter-state bill
+              prints IGST only; an intra-state bill prints CGST + SGST. Leave all three blank
+              for a bill with no breakdown — reports then fall back to an even CGST/SGST divide
+              of GST Amount, exactly as before. */}
+          <Row gutter={12}>
+            <Col span={8}>
+              <Form.Item label="CGST (₹)" name="cgstAmount" tooltip="Central GST — intra-state bills only. Auto-filled from the scan.">
+                <InputNumber prefix="₹" style={{ width: '100%' }} min={0} placeholder="0.00" />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item label="SGST (₹)" name="sgstAmount" tooltip="State GST — intra-state bills only. Auto-filled from the scan.">
+                <InputNumber prefix="₹" style={{ width: '100%' }} min={0} placeholder="0.00" />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item label="IGST (₹)" name="igstAmount" tooltip="Integrated GST — inter-state bills only. When set, this purchase's Input GST reports as IGST.">
+                <InputNumber prefix="₹" style={{ width: '100%' }} min={0} placeholder="0.00" />
+              </Form.Item>
+            </Col>
+          </Row>
+
+          {/* Payment Type */}
+          <Form.Item label="Payment Type" name="paymentType" initialValue="credit" rules={[{ required: true }]}>
+            <Select
+              onChange={val => setLocalPurchasePaymentType(val)}
+            >
+              <Option value="credit">
+                <Space><ClockCircleOutlined style={{ color: '#fa8c16' }} /><span>Credit (Pay Later)</span></Space>
+              </Option>
+              <Option value="instant">
+                <Space><ThunderboltOutlined style={{ color: '#52c41a' }} /><span>Instant (Pay Now)</span></Space>
+              </Option>
+            </Select>
+          </Form.Item>
+
+          {localPurchasePaymentType === 'credit' && (
+            <>
+              <Alert
+                message="Credit Payment — Pending"
+                description="Payment will be set as Pending. Financial team will be notified every 30 minutes until payment is processed."
+                type="warning"
+                showIcon
+                style={{ marginBottom: 16, borderRadius: 8 }}
+              />
+              <Form.Item
+                label="Pay-Later Due Date"
+                name="dueDate"
+                tooltip="Finance team will get an automatic WhatsApp reminder from this date, on the schedule configured in WhatsApp Integration → Event Mapping"
+              >
+                <DatePicker style={{ width: '100%', borderRadius: 8 }} />
+              </Form.Item>
+            </>
+          )}
+
+          {localPurchasePaymentType === 'instant' && (
+            <div style={{ padding: '14px 16px', borderRadius: 10, background: isDark ? '#0a1a10' : '#f6fff8', border: '1px solid #52c41a33', marginBottom: 16 }}>
+              <Text style={{ fontWeight: 700, color: '#52c41a', display: 'block', marginBottom: 14, fontSize: 13 }}>
+                <ThunderboltOutlined style={{ marginRight: 6 }} />Instant Payment Details
+              </Text>
+              {/* Paid By selection */}
+              <Form.Item label={<Text strong style={{ fontSize: 12 }}>Paid By</Text>} name="paidBy" rules={[{ required: true, message: 'Select who made the payment' }]} style={{ marginBottom: 12 }}>
+                <Select
+                  placeholder="Select who paid..."
+                  style={{ borderRadius: 8 }}
+                  onChange={val => setLocalPurchasePaidBy(val)}
+                >
+                  <Option value="purchase_person">Purchase Person</Option>
+                  <Option value="finance_team">Finance Team</Option>
+                </Select>
+              </Form.Item>
+
+              {localPurchasePaidBy === 'purchase_person' && (
+                <>
+                  <Alert
+                    type="info"
+                    showIcon
+                    style={{ marginBottom: 12, borderRadius: 8 }}
+                    message={<Text strong style={{ fontSize: 12 }}>Goes to Reimbursement Expense</Text>}
+                    description={<Text style={{ fontSize: 11 }}>This payment will be recorded as a Purchase Person expense and sent to the Reimbursement Expense section for approval and settlement.</Text>}
+                  />
+                  <Row gutter={12}>
+                    <Col span={12}>
+                      <Form.Item label="Purchase Person Name" name="purchasePersonName" rules={[{ required: true, message: 'Select or add purchase person' }]} style={{ marginBottom: 12 }}>
+                        <Select
+                          placeholder="Select or add purchase person"
+                          showSearch
+                          optionFilterProp="children"
+                          onChange={(val) => {
+                            const p = purchasePersons.find(pp => pp.name === val);
+                            if (p) localPurchaseForm.setFieldsValue({ purchasePersonPhone: p.phone || '', gPayNumber: p.gPayNumber || '' });
+                          }}
+                          dropdownRender={menu => (
+                            <>
+                              {menu}
+                              <div style={{ padding: '8px 12px', borderTop: '1px solid #f0f0f0' }}>
+                                <Button type="link" icon={<PlusOutlined />} style={{ color: '#B11E6A', padding: 0, fontWeight: 600 }}
+                                  onClick={() => setShowAddPurchasePersonInlineModal(true)}>
+                                  Add New Purchase Person
+                                </Button>
+                              </div>
+                            </>
+                          )}
+                        >
+                          {purchasePersons.map(p => <Option key={p.id} value={p.name}>{p.name}</Option>)}
+                        </Select>
+                      </Form.Item>
+                    </Col>
+                    <Col span={12}>
+                      <Form.Item label="Purchase Person Phone" name="purchasePersonPhone" rules={[phoneValidator(true)]} style={{ marginBottom: 12 }}>
+                        <PhoneInput placeholder="Phone number" />
+                      </Form.Item>
+                    </Col>
+                  </Row>
+                </>
+              )}
+              {localPurchasePaidBy === 'finance_team' && (
+                <Alert
+                  type="success"
+                  showIcon
+                  style={{ marginBottom: 12, borderRadius: 8 }}
+                  message={<Text strong style={{ fontSize: 12 }}>Goes to Finance Team</Text>}
+                  description={<Text style={{ fontSize: 11 }}>This payment will be recorded as a Finance Team expense and logged in the Finance section for tracking.</Text>}
+                />
+              )}
+
+              {localPurchasePaidBy !== 'finance_team' && (
+                <Form.Item label="GPay / UPI Number" name="gPayNumber" rules={[{ required: localPurchasePaidBy !== 'finance_team', message: 'Enter GPay number for instant payment' }]} style={{ marginBottom: 12 }}>
+                  <Input placeholder="GPay / UPI Number" prefix={<PhoneOutlined style={{ color: '#52c41a' }} />} />
+                </Form.Item>
+              )}
+
+              {/* Upload Payment Proof — shown for both paid-by options */}
+              {(localPurchasePaidBy === 'purchase_person' || localPurchasePaidBy === 'finance_team') && (
+                <Form.Item
+                  label={
+                    <Space size={4}>
+                      <UploadOutlined style={{ color: '#52c41a' }} />
+                      <Text strong style={{ fontSize: 12 }}>
+                        Upload Payment Proof {localPurchasePaidBy === 'purchase_person' ? '(Reimbursement)' : '(Finance Team)'}
+                      </Text>
+                    </Space>
+                  }
+                  name="paymentProofFile"
+                  style={{ marginBottom: 0 }}
+                >
+                  <Upload.Dragger maxCount={1} customRequest={makeUpload('purchase/payment-proofs')} accept=".jpg,.jpeg,.png,.pdf" style={{ borderRadius: 8 }}>
+                    <p className="ant-upload-drag-icon"><UploadOutlined style={{ color: '#52c41a', fontSize: 20 }} /></p>
+                    <p className="ant-upload-text" style={{ fontSize: 12 }}>
+                      {localPurchasePaidBy === 'purchase_person' ? 'Upload receipt / bill for reimbursement claim' : 'Upload GPay / UPI / bank payment screenshot'}
+                    </p>
+                    <p className="ant-upload-hint" style={{ fontSize: 10 }}>JPG, PNG, or PDF accepted</p>
+                  </Upload.Dragger>
+                </Form.Item>
+              )}
+            </div>
+          )}
+
+          <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+            <Button style={{ flex: 1 }} onClick={() => { setShowAddLocalPurchaseModal(false); localPurchaseForm.resetFields(); setLocalPurchaseInvoiceFile(null); setLocalPurchaseScannedDetails(null); setLocalPurchaseNewVendorDetected(false); setLocalPurchasePaymentType('credit'); setLocalPurchasePaidBy(''); setLocalPurchasePriceType('exclusive'); setLocalPurchaseTarget('inventory'); }}>
+              Cancel
+            </Button>
+            <Button
+              type="primary"
+              htmlType="submit"
+              style={{ flex: 2, height: 44, borderRadius: 10, background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none', fontWeight: 700 }}
+            >
+              Save Local Purchase
+            </Button>
+          </div>
+        </Form>
+      </Modal>
+
+      {/* ──────── Inline Add Supplier Modal ──────── */}
+      <Modal
+        title={<Space><PlusOutlined style={{ color: '#B11E6A' }} /><Text strong>Add New Supplier</Text></Space>}
+        open={showAddSupplierInlineModal}
+        onCancel={() => { setShowAddSupplierInlineModal(false); addSupplierInlineForm.resetFields(); }}
+        footer={null}
+        width={440}
+        centered
+      >
+        <Form form={addSupplierInlineForm} layout="vertical" style={{ marginTop: 12 }}>
+          <Row gutter={12}>
+            <Col span={12}>
+              <Form.Item label="Supplier Name" name="name" rules={[{ required: true, message: 'Required' }]}>
+                <Input placeholder="Company / Supplier name" />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item label="Phone / WhatsApp" name="phone" rules={[{ required: true, message: 'Required' }, phoneValidator(true)]}>
+                <PhoneInput placeholder="Phone / WhatsApp" />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Row gutter={12}>
+            <Col span={12}>
+              <Form.Item label="Email" name="email" rules={emailRules(false)}>
+                <Input placeholder="email@supplier.com" />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item label="City / Address" name="address">
+                <Input placeholder="City, State" />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item label="GST / Tax ID" name="tax">
+            <Input placeholder="GSTIN" />
+          </Form.Item>
+          <VendorBankFields form={addSupplierInlineForm} namePrefix="bankDetails" labelSize={14} />
+          <div style={{ display: 'flex', gap: 8 }}>
+            <Button style={{ flex: 1 }} onClick={() => { setShowAddSupplierInlineModal(false); addSupplierInlineForm.resetFields(); }}>Cancel</Button>
+            <Button type="primary" style={{ flex: 2, background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none', fontWeight: 700 }} onClick={handleAddSupplierInline}>
+              Add Supplier
+            </Button>
+          </div>
+        </Form>
+      </Modal>
+
+      {/* ──────── Inline Add Vendor Modal ──────── */}
+      <Modal
+        title={<Space><PlusOutlined style={{ color: '#1890ff' }} /><Text strong>Add New Vendor</Text></Space>}
+        open={showAddVendorInlineModal}
+        onCancel={() => { setShowAddVendorInlineModal(false); addVendorInlineForm.resetFields(); }}
+        footer={null}
+        width={440}
+        centered
+      >
+        <Form form={addVendorInlineForm} layout="vertical" style={{ marginTop: 12 }}>
+          <Row gutter={12}>
+            <Col span={12}>
+              <Form.Item label="Vendor / Hotel Name" name="name" rules={[{ required: true, message: 'Required' }]}>
+                <Input placeholder="Hotel / Vendor name" />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item label="Phone / WhatsApp" name="phone" rules={[{ required: true, message: 'Required' }, phoneValidator(true)]}>
+                <PhoneInput placeholder="Phone / WhatsApp" />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Row gutter={12}>
+            <Col span={12}>
+              <Form.Item label="Email" name="email" rules={emailRules(false)}>
+                <Input placeholder="email@vendor.com" />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item label="City / Address" name="address">
+                <Input placeholder="City, State" />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item label="GST / Tax ID" name="tax">
+            <Input placeholder="GSTIN" />
+          </Form.Item>
+          <VendorBankFields form={addVendorInlineForm} namePrefix="bankDetails" labelSize={14} />
+          <div style={{ display: 'flex', gap: 8 }}>
+            <Button style={{ flex: 1 }} onClick={() => { setShowAddVendorInlineModal(false); addVendorInlineForm.resetFields(); }}>Cancel</Button>
+            <Button type="primary" style={{ flex: 2, background: 'linear-gradient(135deg,#1890ff,#096dd9)', border: 'none', fontWeight: 700 }} onClick={handleAddVendorInline}>
+              Add Vendor
+            </Button>
+          </div>
+        </Form>
+      </Modal>
+
+      {/* ──────── Inline Add Purchase Person Modal ──────── */}
+      <Modal
+        title={<Space><PlusOutlined style={{ color: '#B11E6A' }} /><Text strong>Add New Purchase Person</Text></Space>}
+        open={showAddPurchasePersonInlineModal}
+        onCancel={() => { setShowAddPurchasePersonInlineModal(false); addPurchasePersonInlineForm.resetFields(); }}
+        footer={null}
+        width={400}
+        centered
+      >
+        <Form form={addPurchasePersonInlineForm} layout="vertical" style={{ marginTop: 12 }}>
+          <Form.Item label="Purchase Person Name" name="name" rules={[{ required: true, message: 'Required' }]}>
+            <Input placeholder="Full name" />
+          </Form.Item>
+          <Form.Item label="Phone Number" name="phone" rules={[{ required: true, message: 'Required' }, phoneValidator(true)]}>
+            <PhoneInput placeholder="Phone number" />
+          </Form.Item>
+          <Form.Item label="GPay / UPI Number" name="gPayNumber">
+            <Input placeholder="GPay / UPI number" prefix={<PhoneOutlined style={{ color: '#52c41a' }} />} />
+          </Form.Item>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <Button style={{ flex: 1 }} onClick={() => { setShowAddPurchasePersonInlineModal(false); addPurchasePersonInlineForm.resetFields(); }}>Cancel</Button>
+            <Button type="primary" style={{ flex: 2, background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none', fontWeight: 700 }} onClick={handleAddPurchasePersonInline}>
+              Add Purchase Person
+            </Button>
+          </div>
+        </Form>
+      </Modal>
+
+      {/* Ask Quotation Modal — WhatsApp only */}
+      <Modal
+        title={
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, paddingBottom: 4 }}>
+            <div style={{ width: 40, height: 40, borderRadius: 10, background: 'linear-gradient(135deg,#25D366,#128C7E)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+              <WhatsAppOutlined style={{ color: '#fff', fontSize: 20 }} />
+            </div>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 15, lineHeight: '20px' }}>Ask Quotation</div>
+              <div style={{ fontSize: 11, color: '#888', fontWeight: 400 }}>Send quotation request to supplier via WhatsApp</div>
+            </div>
+          </div>
+        }
+        open={showAddPurchaseModal}
+        onCancel={() => { setShowAddPurchaseModal(false); purchaseForm.resetFields(); setSelectedProduct(null); setSelectedSupplier(null); }}
+        footer={null}
+        width={520}
+        centered
+      >
+        <Form form={purchaseForm} layout="vertical" style={{ marginTop: 4 }}>
+
+          {/* Product & Supplier */}
+          <div style={{ background: isDark ? '#16192a' : '#fafafa', borderRadius: 10, padding: '14px 16px', marginBottom: 16, border: `1px solid ${isDark ? '#2a2d40' : '#f0f0f0'}` }}>
+            <Row gutter={12}>
+              <Col span={8}>
+                <Form.Item label="Product Code" name="product_code" style={{ marginBottom: 12 }}>
+                  <Input disabled style={{ borderRadius: 8, background: isDark ? '#1e2235' : '#fff', fontWeight: 700, color: '#B11E6A' }} />
+                </Form.Item>
+              </Col>
+              <Col span={16}>
+                <Form.Item label="Product" name="product" rules={[{ required: true }]} style={{ marginBottom: 12 }}>
+                  <Input disabled style={{ borderRadius: 8, background: isDark ? '#1e2235' : '#fff' }} />
+                </Form.Item>
+              </Col>
+              <Col span={24}>
+                <Form.Item label="Supplier" name="supplier" rules={[{ required: true, message: 'Select a supplier' }]} style={{ marginBottom: 0 }}>
+                  <Select
+                    placeholder="Select supplier"
+                    style={{ borderRadius: 8 }}
+                    onChange={(val) => {
+                      if (val === '__add_new__') {
+                        setInlineDropdownContext('quotation');
+                        setShowAddSupplierInlineModal(true);
+                        purchaseForm.setFieldValue('supplier', undefined);
+                        return;
+                      }
+                      setSelectedSupplier(suppliers.find(s => s.name === val) || null);
+                    }}
+                    dropdownRender={menu => (
+                      <>
+                        {menu}
+                        <div style={{ padding: '8px 12px', borderTop: '1px solid #f0f0f0' }}>
+                          <Button
+                            type="link"
+                            icon={<PlusOutlined />}
+                            style={{ color: '#B11E6A', padding: 0, fontWeight: 600 }}
+                            onClick={() => { setInlineDropdownContext('quotation'); setShowAddSupplierInlineModal(true); }}
+                          >
+                            Add New Supplier
+                          </Button>
+                        </div>
+                      </>
+                    )}
+                  >
+                    {suppliers.map(s => <Option key={s.id} value={s.name}>{s.name}</Option>)}
+                  </Select>
+                </Form.Item>
+              </Col>
+            </Row>
+          </div>
+
+          {/* Supplier Contact */}
+          {selectedSupplier && (
+            <div style={{ borderRadius: 10, overflow: 'hidden', marginBottom: 16, border: `1px solid #25D36633` }}>
+              <div style={{ background: 'linear-gradient(135deg,#25D36618,#128C7E10)', padding: '8px 14px', display: 'flex', alignItems: 'center', gap: 6 }}>
+                <WhatsAppOutlined style={{ color: '#25D366', fontSize: 13 }} />
+                <Text style={{ fontSize: 12, fontWeight: 600, color: '#25D366' }}>Supplier Contact</Text>
+              </div>
+              <div style={{ display: 'flex', padding: '10px 14px', gap: 0, background: isDark ? '#0a1a10' : '#f6fff8' }}>
+                {[
+                  { label: 'Phone / WhatsApp', value: selectedSupplier.phone },
+                  { label: 'Email', value: selectedSupplier.email },
+                  { label: 'Address', value: selectedSupplier.address },
+                ].map((item, i) => (
+                  <div key={i} style={{ flex: 1, borderRight: i < 2 ? `1px solid ${isDark ? '#1a3a20' : '#d9f7e3'}` : 'none', padding: '0 10px', paddingLeft: i === 0 ? 0 : 10 }}>
+                    <div style={{ fontSize: 11, color: '#888', marginBottom: 3 }}>{item.label}</div>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: textColor, wordBreak: 'break-word' }}>{item.value}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Stock Status */}
+          {selectedProduct && (
+            <div style={{ borderRadius: 10, overflow: 'hidden', marginBottom: 16, border: `1px solid ${selectedProduct.current <= selectedProduct.min ? '#ffe58f' : '#91d5ff'}` }}>
+              <div style={{ background: selectedProduct.current <= selectedProduct.min ? '#fffbe6' : '#e6f7ff', padding: '8px 14px', display: 'flex', alignItems: 'center', gap: 6 }}>
+                <InfoCircleOutlined style={{ color: selectedProduct.current <= selectedProduct.min ? '#d48806' : '#0050b3', fontSize: 13 }} />
+                <Text style={{ fontSize: 12, fontWeight: 600, color: selectedProduct.current <= selectedProduct.min ? '#ad6800' : '#003a8c' }}>Stock Status</Text>
+                <Tag color={selectedProduct.current <= selectedProduct.min ? 'warning' : 'processing'} style={{ marginLeft: 'auto', borderRadius: 10, fontSize: 11 }}>
+                  {selectedProduct.current <= selectedProduct.min ? 'Low Stock' : 'Healthy'}
+                </Tag>
+              </div>
+              <div style={{ display: 'flex', padding: '12px 14px', gap: 0 }}>
+                {[
+                  { label: 'Stock Count', value: formatQty(selectedProduct.current), color: selectedProduct.current <= selectedProduct.min ? '#ff4d4f' : '#52c41a' },
+                  { label: 'Product Qty', value: selectedProduct.unitValue ? `${formatQty(selectedProduct.unitValue)} ${selectedProduct.unit}` : (selectedProduct.unit || '-'), color: '#1890ff' },
+                  { label: 'Min. Required', value: formatQty(selectedProduct.min), color: '#fa8c16' },
+                  { label: 'Shortfall', value: selectedProduct.current < selectedProduct.min ? formatQty(selectedProduct.min - selectedProduct.current) : 'None', color: selectedProduct.current < selectedProduct.min ? '#ff4d4f' : '#52c41a' },
+                ].map((stat, i) => (
+                  <div key={i} style={{ flex: 1, textAlign: 'center', borderRight: i < 3 ? `1px solid ${isDark ? '#2a2d40' : '#f0f0f0'}` : 'none', padding: '0 8px' }}>
+                    <div style={{ fontSize: 11, color: '#888', marginBottom: 3 }}>{stat.label}</div>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: stat.color }}>{stat.value}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Quantity */}
+          <div style={{ background: isDark ? '#16192a' : '#fafafa', borderRadius: 10, padding: '14px 16px', marginBottom: 16, border: `1px solid ${isDark ? '#2a2d40' : '#f0f0f0'}` }}>
+            <Row gutter={12}>
+              <Col span={16}>
+                <Form.Item label="Quantity to Request" name="qty" rules={[{ required: true, message: 'Required' }]} style={{ marginBottom: 0 }}>
+                  <InputNumber style={{ width: '100%', borderRadius: 8 }} placeholder="0" min={1} />
+                </Form.Item>
+              </Col>
+              <Col span={8}>
+                <Form.Item label="Unit" name="unit" style={{ marginBottom: 0 }}>
+                  <Input disabled style={{ borderRadius: 8, textAlign: 'center' }} />
+                </Form.Item>
+              </Col>
+            </Row>
+          </div>
+
+          {/* Action Buttons */}
+          <div style={{ display: 'flex', gap: 8 }}>
+            <Button onClick={() => { setShowAddPurchaseModal(false); purchaseForm.resetFields(); setSelectedProduct(null); setSelectedSupplier(null); }} style={{ flex: 1, height: 44, borderRadius: 10 }}>Cancel</Button>
+            <Button
+              block
+              icon={<WhatsAppOutlined />}
+              loading={askQuotationSending}
+              onClick={handleAskQuotationSend}
+              style={{ flex: 2, height: 44, borderRadius: 10, background: 'linear-gradient(135deg,#25D366,#128C7E)', border: 'none', color: '#fff', fontWeight: 700, fontSize: 14 }}
+            >
+              Send via WhatsApp
+            </Button>
+          </div>
+        </Form>
+      </Modal>
+
+      {/* Raise Request Modal — upload quotation doc + AI + send to Financial */}
+      <Modal
+        title={
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, paddingBottom: 4 }}>
+            <div style={{ width: 40, height: 40, borderRadius: 10, background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+              <UploadOutlined style={{ color: '#fff', fontSize: 18 }} />
+            </div>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 15, lineHeight: '20px' }}>Raise Request</div>
+              <div style={{ fontSize: 11, color: '#888', fontWeight: 400 }}>Upload received quotation → AI extracts details → Send to Financial</div>
+            </div>
+          </div>
+        }
+        open={showRaiseRequestModal}
+        onCancel={() => { setShowRaiseRequestModal(false); raiseRequestForm.resetFields(); setRaiseRequestProduct(null); setRaiseRequestSupplier(null); setRaiseRequestFile(null); setRaiseRequestAmount(null); setRaiseRequestGstAmount(null); setRaiseRequestPaymentTerms(''); }}
+        footer={null}
+        width={560}
+        centered
+      >
+        <Form form={raiseRequestForm} layout="vertical" style={{ marginTop: 4 }}>
+
+          {/* Request Summary — item, quantity, and supplier were already captured when
+              "Ask Quotation" was sent for this row, so they're carried over here read-only
+              instead of asking again. */}
+          {raiseRequestProduct && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 14px', borderRadius: 10, background: isDark ? '#1a0f14' : '#fff8fb', border: '1px solid #B11E6A33', marginBottom: 16 }}>
+              <div style={{ width: 40, height: 40, borderRadius: 10, background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                <ShoppingOutlined style={{ color: '#fff', fontSize: 16 }} />
+              </div>
+              <div style={{ flex: 1 }}>
+                <Space size={8} align="center" style={{ marginBottom: 2 }}>
+                  {raiseRequestProduct.code && (
+                    <Tag style={{ background: '#B11E6A22', color: '#B11E6A', border: '1px solid #B11E6A44', borderRadius: 20, fontWeight: 700, fontSize: 11, margin: 0 }}>
+                      {raiseRequestProduct.code}
+                    </Tag>
+                  )}
+                  <Text strong style={{ color: textColor, fontSize: 14 }}>{raiseRequestProduct.name}</Text>
+                </Space>
+                <Space size={12} wrap style={{ marginTop: 2 }}>
+                  <Text style={{ fontSize: 11, color: '#888' }}>Qty: <Text strong style={{ color: '#B11E6A' }}>{raiseReqQtyWatch ?? '—'} {raiseReqUnitWatch || ''}</Text></Text>
+                  <Text style={{ fontSize: 11, color: '#888' }}>Supplier: <Text strong style={{ color: '#B11E6A' }}>{raiseRequestSupplier?.name || '—'}</Text></Text>
+                </Space>
+              </div>
+              <Form.Item name="product" hidden><Input /></Form.Item>
+              <Form.Item name="product_code" hidden><Input /></Form.Item>
+              <Form.Item name="unit" hidden><Input /></Form.Item>
+              <Form.Item name="qty" hidden rules={[{ required: true, message: 'Required' }]}><InputNumber /></Form.Item>
+            </div>
+          )}
+
+          {/* Upload Quotation File + AI Scan — quotation was already requested from the
+              table's "Ask Quotation" step, so raising the request here only needs the
+              received document (+ quoted amount) uploaded. */}
+          <div style={{ marginBottom: 16, padding: '14px 16px', borderRadius: 12, border: '1.5px dashed #B11E6A66', background: isDark ? '#1a0f14' : '#fff8fb' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+              <div style={{ width: 32, height: 32, borderRadius: 8, background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                <RobotOutlined style={{ color: '#fff', fontSize: 15 }} />
+              </div>
+              <div>
+                <Text style={{ fontWeight: 700, color: '#B11E6A', display: 'block', fontSize: 13 }}>Upload Received Quotation</Text>
+                <Text style={{ fontSize: 11, color: '#aaa' }}>Upload quotation file — AI will auto-fill quantity, amount & GST</Text>
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <Upload
+                  maxCount={1}
+                  beforeUpload={(file) => { setRaiseRequestFile(file); return false; }}
+                  onRemove={() => setRaiseRequestFile(null)}
+                  accept=".pdf,.jpg,.jpeg,.png"
+                  style={{ width: '100%' }}
+                >
+                  <Button icon={<UploadOutlined />} style={{ borderRadius: 8, borderColor: '#B11E6A66', color: '#B11E6A', width: '100%' }}>
+                    <span style={{ display: 'inline-block', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', verticalAlign: 'middle' }}>
+                      {raiseRequestFile ? raiseRequestFile.name : 'Upload Quotation File'}
+                    </span>
+                  </Button>
+                </Upload>
+              </div>
+              <Button
+                icon={<ThunderboltOutlined />}
+                loading={raiseRequestScanLoading}
+                onClick={handleRaiseRequestAIScan}
+                style={{ borderRadius: 8, background: raiseRequestFile ? 'linear-gradient(135deg,#B11E6A,#D85C9E)' : '#f0f0f0', border: 'none', color: raiseRequestFile ? '#fff' : '#bbb', fontWeight: 700, whiteSpace: 'nowrap', flexShrink: 0 }}
+              >
+                {raiseRequestScanLoading ? 'Scanning...' : 'Scan with AI'}
+              </Button>
+            </div>
+            {raiseRequestFile && (
+              <div style={{ marginTop: 6, fontSize: 11, color: '#B11E6A', display: 'flex', alignItems: 'center', gap: 4, minWidth: 0 }}>
+                <FileTextOutlined style={{ flexShrink: 0 }} /><Text style={{ fontSize: 11, color: '#B11E6A', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{raiseRequestFile.name}</Text>
+              </div>
+            )}
+            <div style={{ marginTop: 10, display: 'flex', gap: 10 }}>
+              <div style={{ flex: 1 }}>
+                <Text style={{ fontSize: 12, fontWeight: 600, color: textColor, display: 'block', marginBottom: 6 }}>
+                  Quoted Amount (₹) <Text type="danger">*</Text>
+                </Text>
+                <InputNumber
+                  style={{ width: '100%', borderRadius: 8 }}
+                  min={0}
+                  placeholder="Total amount quoted by supplier"
+                  value={raiseRequestAmount}
+                  onChange={setRaiseRequestAmount}
+                />
+              </div>
+              <div style={{ flex: 1 }}>
+                <Text style={{ fontSize: 12, fontWeight: 600, color: textColor, display: 'block', marginBottom: 6 }}>
+                  GST Amount (₹)
+                </Text>
+                <InputNumber
+                  style={{ width: '100%', borderRadius: 8 }}
+                  min={0}
+                  placeholder="GST/tax amount on the quotation"
+                  value={raiseRequestGstAmount}
+                  onChange={setRaiseRequestGstAmount}
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Payment Terms */}
+          <div style={{ background: isDark ? '#16192a' : '#fafafa', borderRadius: 10, padding: '14px 16px', marginBottom: 16, border: `1px solid ${isDark ? '#2a2d40' : '#f0f0f0'}` }}>
+            <Form.Item label="Payment Terms" name="payment_terms" rules={[{ required: true, message: 'Select payment terms' }]} style={{ marginBottom: 0 }}>
+              <Select placeholder="Select payment terms" onChange={(val) => setRaiseRequestPaymentTerms(val)}>
+                <Option value="100% Payment">100% Payment</Option>
+                <Option value="50% Advance, 50% on Dispatch">50% Advance, 50% on Dispatch</Option>
+                <Option value="50% Advance, 50% After Delivery (Max 15 days)">50% Advance, 50% After Delivery (Max 15 days)</Option>
+              </Select>
+            </Form.Item>
+            {(raiseRequestPaymentTerms === '50% Advance, 50% on Dispatch' || raiseRequestPaymentTerms === '50% Advance, 50% After Delivery (Max 15 days)') && (
+              <Form.Item
+                label={<span style={{ color: '#B11E6A', fontWeight: 600 }}>Second Payment Reminder Date</span>}
+                name="payment_reminder_date"
+                rules={[{ required: true, message: 'Select reminder date for 2nd payment' }]}
+                style={{ marginTop: 12, marginBottom: 0 }}
+              >
+                <DatePicker style={{ width: '100%', borderRadius: 8 }} placeholder="Pick reminder date for 2nd payment" disabledDate={(d) => d && d.isBefore(dayjs(), 'day')} />
+              </Form.Item>
+            )}
+          </div>
+
+          {/* Previous complaints banner for selected supplier */}
+          {raiseRequestSupplier && (() => {
+            const complaints = [];
+            const open = complaints.filter(c => c.status === 'Open');
+            if (!open.length) return null;
+            return (
+              <Alert
+                style={{ marginBottom: 14, borderRadius: 10 }}
+                type="warning"
+                showIcon
+                icon={<ExclamationCircleOutlined />}
+                message={<Text strong style={{ fontSize: 12 }}>Pending Complaints — {raiseRequestSupplier.name}</Text>}
+                description={
+                  <div style={{ marginTop: 4 }}>
+                    {open.map(c => (
+                      <div key={c.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 6, marginBottom: 3 }}>
+                        <Tag color={c.severity === 'high' ? 'error' : c.severity === 'medium' ? 'warning' : 'default'} style={{ fontSize: 10, margin: 0, flexShrink: 0 }}>{c.severity.toUpperCase()}</Tag>
+                        <Text style={{ fontSize: 11 }}>{c.issue} <Text type="secondary" style={{ fontSize: 10 }}>({c.date})</Text></Text>
+                      </div>
+                    ))}
+                  </div>
+                }
+              />
+            );
+          })()}
+
+          {/* Complaint / Issue Notes */}
+          <div style={{ background: isDark ? '#16192a' : '#fafafa', borderRadius: 10, padding: '14px 16px', marginBottom: 16, border: `1px solid ${isDark ? '#2a2d40' : '#f0f0f0'}` }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+              <ExclamationCircleOutlined style={{ color: '#fa8c16', fontSize: 13 }} />
+              <Text style={{ fontSize: 12, fontWeight: 600, color: textColor }}>Complaint / Issue Notes</Text>
+              <Tag color="default" style={{ fontSize: 10, marginLeft: 'auto' }}>Optional</Tag>
+            </div>
+            <Form.Item name="complaint_notes" style={{ marginBottom: 0 }}>
+              <Input.TextArea
+                rows={2}
+                placeholder="Log any complaints or issues from previous orders with this supplier (e.g. late delivery, quality issues, wrong quantity)..."
+                style={{ borderRadius: 8, fontSize: 12 }}
+              />
+            </Form.Item>
+          </div>
+
+          {/* Action Buttons */}
+          <div style={{ display: 'flex', gap: 8 }}>
+            <Button
+              onClick={() => { setShowRaiseRequestModal(false); raiseRequestForm.resetFields(); setRaiseRequestProduct(null); setRaiseRequestSupplier(null); setRaiseRequestFile(null); setRaiseRequestAmount(null); setRaiseRequestPaymentTerms(''); }}
+              style={{ flex: 1, height: 44, borderRadius: 10 }}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="primary"
+              disabled={!raiseRequestFile || raiseRequestAmount == null}
+              onClick={handleRaiseRequestSubmit}
+              style={{ flex: 2, height: 44, borderRadius: 10, background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none', fontWeight: 700, fontSize: 14 }}
+            >
+              Raise Request to Financial
+            </Button>
+          </div>
+        </Form>
+      </Modal>
+
+      {/* Re-Request Quotation Modal — Finance rejected this request; Purchase uploads a
+          revised quotation + amount, which sends it back to Finance as Pending. */}
+      <Modal
+        title={
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, paddingBottom: 4 }}>
+            <div style={{ width: 40, height: 40, borderRadius: 10, background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+              <UploadOutlined style={{ color: '#fff', fontSize: 18 }} />
+            </div>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 15, lineHeight: '20px' }}>Re-Request Quotation</div>
+              <div style={{ fontSize: 11, color: '#888', fontWeight: 400 }}>Upload a revised quotation → sends it back to Finance for review</div>
+            </div>
+          </div>
+        }
+        open={showRerequestModal}
+        onCancel={() => { setShowRerequestModal(false); setRerequestTarget(null); setRerequestFile(null); setRerequestAmount(null); setRerequestGstAmount(null); setRerequestGstSplit(null); }}
+        footer={null}
+        width={460}
+        centered
+      >
+        {rerequestTarget && (
+          <>
+            {rerequestTarget.financeNote && (
+              <Alert
+                type="error"
+                showIcon
+                message="Rejection Reason"
+                description={rerequestTarget.financeNote}
+                style={{ borderRadius: 8, marginBottom: 14 }}
+              />
+            )}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 14px', borderRadius: 10, background: isDark ? '#1a0f14' : '#fff8fb', border: '1px solid #B11E6A33', marginBottom: 16 }}>
+              <div style={{ flex: 1 }}>
+                <Text strong style={{ color: textColor, fontSize: 14 }}>{rerequestTarget.item}</Text>
+                <div style={{ marginTop: 2 }}>
+                  <Text style={{ fontSize: 11, color: '#888' }}>Qty: <Text strong style={{ color: '#B11E6A' }}>{rerequestTarget.qty} {rerequestTarget.unit}</Text></Text>
+                  <Text style={{ fontSize: 11, color: '#888', marginLeft: 12 }}>Supplier: <Text strong style={{ color: '#B11E6A' }}>{rerequestTarget.supplier}</Text></Text>
+                </div>
+              </div>
+            </div>
+
+            <div style={{ marginBottom: 16 }}>
+              <Text style={{ fontSize: 12, fontWeight: 600, color: textColor, display: 'block', marginBottom: 6 }}>
+                Revised Quotation File <Text type="danger">*</Text>
+              </Text>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <Upload
+                    maxCount={1}
+                    beforeUpload={(file) => { setRerequestFile(file); return false; }}
+                    onRemove={() => setRerequestFile(null)}
+                    accept=".pdf,.jpg,.jpeg,.png"
+                    style={{ width: '100%' }}
+                  >
+                    <Button icon={<UploadOutlined />} style={{ borderRadius: 8, borderColor: '#B11E6A66', color: '#B11E6A', width: '100%' }}>
+                      <span style={{ display: 'inline-block', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', verticalAlign: 'middle' }}>
+                        {rerequestFile ? rerequestFile.name : 'Upload Quotation File'}
+                      </span>
+                    </Button>
+                  </Upload>
+                </div>
+                <Button
+                  icon={<ThunderboltOutlined />}
+                  loading={rerequestScanLoading}
+                  onClick={handleRerequestAIScan}
+                  style={{ borderRadius: 8, background: rerequestFile ? 'linear-gradient(135deg,#B11E6A,#D85C9E)' : '#f0f0f0', border: 'none', color: rerequestFile ? '#fff' : '#bbb', fontWeight: 700, whiteSpace: 'nowrap', flexShrink: 0 }}
+                >
+                  {rerequestScanLoading ? 'Scanning...' : 'Scan with AI'}
+                </Button>
+              </div>
+            </div>
+
+            <div style={{ marginBottom: 20, display: 'flex', gap: 10 }}>
+              <div style={{ flex: 1 }}>
+                <Text style={{ fontSize: 12, fontWeight: 600, color: textColor, display: 'block', marginBottom: 6 }}>
+                  Quoted Amount (₹) <Text type="danger">*</Text>
+                </Text>
+                <InputNumber
+                  style={{ width: '100%', borderRadius: 8 }}
+                  min={0}
+                  placeholder="Total amount quoted by supplier"
+                  value={rerequestAmount}
+                  onChange={setRerequestAmount}
+                />
+              </div>
+              <div style={{ flex: 1 }}>
+                <Text style={{ fontSize: 12, fontWeight: 600, color: textColor, display: 'block', marginBottom: 6 }}>
+                  GST Amount (₹)
+                </Text>
+                <InputNumber
+                  style={{ width: '100%', borderRadius: 8 }}
+                  min={0}
+                  placeholder="GST/tax amount"
+                  value={rerequestGstAmount}
+                  onChange={setRerequestGstAmount}
+                />
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', gap: 8 }}>
+              <Button
+                onClick={() => { setShowRerequestModal(false); setRerequestTarget(null); setRerequestFile(null); setRerequestAmount(null); setRerequestGstAmount(null); setRerequestGstSplit(null); }}
+                style={{ flex: 1, height: 44, borderRadius: 10 }}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="primary"
+                loading={rerequestSubmitting}
+                disabled={!rerequestFile || rerequestAmount == null}
+                onClick={handleRerequestSubmit}
+                style={{ flex: 2, height: 44, borderRadius: 10, background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none', fontWeight: 700, fontSize: 14 }}
+              >
+                Send to Financial
+              </Button>
+            </div>
+          </>
+        )}
+      </Modal>
+
+      {/* Update Order Details Modal — edit an already-Approved request's qty/unit/
+          payment terms/amount and resend it to Finance as Pending for re-approval. */}
+      <Modal
+        title={
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, paddingBottom: 4 }}>
+            <div style={{ width: 40, height: 40, borderRadius: 10, background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+              <EditOutlined style={{ color: '#fff', fontSize: 18 }} />
+            </div>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 15, lineHeight: '20px' }}>Update Order Details</div>
+              <div style={{ fontSize: 11, color: '#888', fontWeight: 400 }}>Saving sends this request back to Finance for approval</div>
+            </div>
+          </div>
+        }
+        open={showUpdateDetailsModal}
+        onCancel={() => { setShowUpdateDetailsModal(false); setUpdateDetailsTarget(null); updateDetailsForm.resetFields(); }}
+        footer={null}
+        width={460}
+        centered
+        destroyOnClose
+      >
+        {updateDetailsTarget && (
+          <Form form={updateDetailsForm} layout="vertical" style={{ marginTop: 8 }}>
+            <Alert
+              type="info"
+              showIcon
+              message="This request was already approved. Updating and sending it will require Finance to approve it again before an order can proceed."
+              style={{ borderRadius: 8, marginBottom: 16, fontSize: 12 }}
+            />
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 14px', borderRadius: 10, background: isDark ? '#1a0f14' : '#fff8fb', border: '1px solid #B11E6A33', marginBottom: 16 }}>
+              <div style={{ flex: 1 }}>
+                <Text strong style={{ color: textColor, fontSize: 14 }}>{updateDetailsTarget.item}</Text>
+                <div style={{ marginTop: 2 }}>
+                  <Text style={{ fontSize: 11, color: '#888' }}>Supplier: <Text strong style={{ color: '#B11E6A' }}>{updateDetailsTarget.supplier}</Text></Text>
+                </div>
+              </div>
+            </div>
+            <Row gutter={12}>
+              <Col span={12}>
+                <Form.Item label="Quantity" name="qty" rules={[{ required: true, message: 'Required' }]}>
+                  <InputNumber min={1} style={{ width: '100%' }} />
+                </Form.Item>
+              </Col>
+              <Col span={12}>
+                <Form.Item label="Unit" name="unit" rules={[{ required: true, message: 'Required' }]}>
+                  <Input />
+                </Form.Item>
+              </Col>
+              {updateDetailsTarget.requestType !== 'bulk' && (
+                <Col span={24}>
+                  <Form.Item label="Payment Terms" name="payment_terms" rules={[{ required: true, message: 'Required' }]}>
+                    <Select>
+                      <Option value="100% Payment">100% Payment</Option>
+                      <Option value="50% Advance, 50% on Dispatch">50% Advance, 50% on Dispatch</Option>
+                      <Option value="50% Advance, 50% After Delivery (Max 15 days)">50% Advance, 50% After Delivery</Option>
+                      <Option value="Credit 30 Days">Credit 30 Days</Option>
+                    </Select>
+                  </Form.Item>
+                </Col>
+              )}
+              <Col span={24}>
+                <Form.Item label="Quoted Amount (₹)" name="amount">
+                  <InputNumber min={0} style={{ width: '100%' }} placeholder="Total amount quoted by supplier" />
+                </Form.Item>
+              </Col>
+            </Row>
+            <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+              <Button
+                onClick={() => { setShowUpdateDetailsModal(false); setUpdateDetailsTarget(null); updateDetailsForm.resetFields(); }}
+                style={{ flex: 1, height: 44, borderRadius: 10 }}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="primary"
+                loading={updateDetailsSubmitting}
+                onClick={handleUpdateDetailsSubmit}
+                style={{ flex: 2, height: 44, borderRadius: 10, background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none', fontWeight: 700, fontSize: 14 }}
+              >
+                Update & Send for Approval
+              </Button>
+            </div>
+          </Form>
+        )}
+      </Modal>
+
+      {/* Update Order Details Modal — bulk batch variant. Every product raised
+          together shows up as one row (qty/unit/amount) in a single modal instead
+          of a separate modal per product; payment terms aren't editable here since
+          they're fixed for the whole batch. */}
+      <Modal
+        title={
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, paddingBottom: 4 }}>
+            <div style={{ width: 40, height: 40, borderRadius: 10, background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+              <EditOutlined style={{ color: '#fff', fontSize: 18 }} />
+            </div>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 15, lineHeight: '20px' }}>Update Batch Order Details</div>
+              <div style={{ fontSize: 11, color: '#888', fontWeight: 400 }}>Saving sends the changed products back to Finance for approval</div>
+            </div>
+          </div>
+        }
+        open={showBatchUpdateDetailsModal}
+        onCancel={() => { setShowBatchUpdateDetailsModal(false); setBatchUpdateDetailsTarget(null); batchUpdateDetailsForm.resetFields(); }}
+        footer={null}
+        width={620}
+        centered
+        destroyOnClose
+      >
+        {batchUpdateDetailsTarget && (
+          <Form form={batchUpdateDetailsForm} layout="vertical" style={{ marginTop: 8 }}>
+            <Alert
+              type="info"
+              showIcon
+              message="These requests were already approved. Updating and sending them will require Finance to approve again before the order can proceed."
+              style={{ borderRadius: 8, marginBottom: 14, fontSize: 12 }}
+            />
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px', borderRadius: 10, background: isDark ? '#1a0f14' : '#fff8fb', border: '1px solid #B11E6A33', marginBottom: 14 }}>
+              <Text style={{ fontSize: 11, color: '#888' }}>Supplier: <Text strong style={{ color: '#B11E6A' }}>{batchUpdateDetailsTarget.supplier}</Text></Text>
+            </div>
+            <Form.Item label="Payment Terms (applies to the whole batch)" name="payment_terms" rules={[{ required: true, message: 'Required' }]}>
+              <Select>
+                <Option value="100% Payment">100% Payment</Option>
+                <Option value="50% Advance, 50% on Dispatch">50% Advance, 50% on Dispatch</Option>
+                <Option value="50% Advance, 50% After Delivery (Max 15 days)">50% Advance, 50% After Delivery</Option>
+                <Option value="Credit 30 Days">Credit 30 Days</Option>
+              </Select>
+            </Form.Item>
+            <Form.Item label="Quoted Amount (₹) — applies to the whole batch" name="amount">
+              <InputNumber min={0} style={{ width: '100%' }} placeholder="Total amount quoted by supplier" />
+            </Form.Item>
+            <div style={{ display: 'flex', gap: 8, padding: '0 4px 6px' }}>
+              <div style={{ flex: 2 }}><Text style={{ fontSize: 11, fontWeight: 700, color: '#888' }}>Product</Text></div>
+              <div style={{ flex: 1 }}><Text style={{ fontSize: 11, fontWeight: 700, color: '#888' }}>Quantity</Text></div>
+              <div style={{ flex: 1 }}><Text style={{ fontSize: 11, fontWeight: 700, color: '#888' }}>Unit</Text></div>
+            </div>
+            <Form.List name="products">
+              {(fields) => (
+                <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                  {fields.map((field) => {
+                    const product = batchUpdateDetailsTarget.children?.[field.name];
+                    return (
+                      <div key={field.key} style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '8px 10px', borderRadius: 8, background: isDark ? '#20232f' : '#fafafa', border: `1px solid ${isDark ? '#2a2d40' : '#f0f0f0'}` }}>
+                        <div style={{ flex: 2 }}>
+                          <Text strong style={{ fontSize: 13 }}>{product?.item}</Text>
+                        </div>
+                        <Form.Item name={[field.name, 'key']} hidden><Input /></Form.Item>
+                        <Form.Item name={[field.name, 'qty']} style={{ flex: 1, marginBottom: 0 }} rules={[{ required: true, message: 'Required' }]}>
+                          <InputNumber min={1} style={{ width: '100%' }} />
+                        </Form.Item>
+                        <Form.Item name={[field.name, 'unit']} style={{ flex: 1, marginBottom: 0 }} rules={[{ required: true, message: 'Required' }]}>
+                          <Input />
+                        </Form.Item>
+                      </div>
+                    );
+                  })}
+                </Space>
+              )}
+            </Form.List>
+            <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
+              <Button
+                onClick={() => { setShowBatchUpdateDetailsModal(false); setBatchUpdateDetailsTarget(null); batchUpdateDetailsForm.resetFields(); }}
+                style={{ flex: 1, height: 44, borderRadius: 10 }}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="primary"
+                loading={batchUpdateDetailsSubmitting}
+                onClick={handleBatchUpdateDetailsSubmit}
+                style={{ flex: 2, height: 44, borderRadius: 10, background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none', fontWeight: 700, fontSize: 14 }}
+              >
+                Update & Send for Approval
+              </Button>
+            </div>
+          </Form>
+        )}
+      </Modal>
+
+      {/* Add Supplier Modal */}
+      <Modal
+        title={<Text strong style={{ fontSize: 16 }}>Add New Supplier</Text>}
+        open={showAddSupplierModal}
+        onCancel={() => { setShowAddSupplierModal(false); supplierForm.resetFields(); setSupplierScannedFile(null); }}
+        footer={null}
+        width={540}
+        centered
+      >
+        {/* AI Scan Invoice Section */}
+        <div style={{ marginTop: 16, marginBottom: 20, padding: '14px 16px', borderRadius: 12, border: '1.5px dashed #B11E6A66', background: isDark ? '#1a0f14' : '#fff8fb' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+            <div style={{ width: 32, height: 32, borderRadius: 8, background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <RobotOutlined style={{ color: '#fff', fontSize: 15 }} />
+            </div>
+            <div>
+              <Text style={{ fontWeight: 700, color: '#B11E6A', display: 'block', fontSize: 13 }}>Scan Invoice / Document with AI</Text>
+              <Text style={{ fontSize: 11, color: '#aaa' }}>Upload a file or tap Open Camera — AI will auto-fill the fields below</Text>
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            <Upload
+              maxCount={1}
+              beforeUpload={(file) => { setSupplierScannedFile(file); return false; }}
+              onRemove={() => setSupplierScannedFile(null)}
+              accept=".pdf,.jpg,.jpeg,.png"
+              style={{ flex: 1 }}
+            >
+              <Button icon={<UploadOutlined />} style={{ borderRadius: 8, borderColor: '#B11E6A66', color: '#B11E6A', width: '100%' }}>Upload</Button>
+            </Upload>
+            <Button icon={<CameraOutlined />} onClick={() => openCameraCapture(setSupplierScannedFile)} style={{ borderRadius: 8, borderColor: '#B11E6A66', color: '#B11E6A', whiteSpace: 'nowrap' }}>Open Camera</Button>
+            <Button
+              icon={<ThunderboltOutlined />}
+              loading={supplierScanLoading}
+              onClick={handleSupplierAIScan}
+              style={{ borderRadius: 8, background: supplierScannedFile ? 'linear-gradient(135deg,#B11E6A,#D85C9E)' : '#f0f0f0', border: 'none', color: supplierScannedFile ? '#fff' : '#bbb', fontWeight: 700, whiteSpace: 'nowrap' }}
+            >
+              {supplierScanLoading ? 'Scanning...' : 'Scan with AI'}
+            </Button>
+          </div>
+          {supplierScannedFile && (
+            <div style={{ marginTop: 6, fontSize: 11, color: '#B11E6A', display: 'flex', alignItems: 'center', gap: 4 }}>
+              <FileTextOutlined /><Text style={{ fontSize: 11, color: '#B11E6A' }}>{supplierScannedFile.name}</Text>
+            </div>
+          )}
+        </div>
+
+        <Form form={supplierForm} layout="vertical" onFinish={handleSaveSupplier}>
+          <Row gutter={10}>
+            <Col span={14}>
+              <Form.Item label={<Text style={{ fontSize: 13 }}>Name <span style={{ color: '#ff4d4f' }}>*</span></Text>} name="sup_name" rules={[{ required: true }]} style={{ marginBottom: 12 }}>
+                <Input placeholder="Supplier name" style={{ borderRadius: 8, height: 40 }} />
+              </Form.Item>
+            </Col>
+            <Col span={10}>
+              <Form.Item label={<Text style={{ fontSize: 13 }}>Phone</Text>} name="sup_phone" style={{ marginBottom: 12 }} rules={[phoneValidator(false)]}>
+                <PhoneInput placeholder="Phone number" />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Row gutter={10}>
+            <Col span={14}>
+              <Form.Item label={<Text style={{ fontSize: 13 }}>Email</Text>} name="sup_email" style={{ marginBottom: 12 }} rules={emailRules(false)}>
+                <Input placeholder="email@example.com" style={{ borderRadius: 8, height: 40 }} />
+              </Form.Item>
+            </Col>
+            <Col span={10}>
+              <Form.Item label={<Text style={{ fontSize: 13 }}>Tax ID (GST/PAN)</Text>} name="sup_tax" style={{ marginBottom: 12 }}>
+                <Input placeholder="GST / PAN" style={{ borderRadius: 8, height: 40 }} />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item label={<Text style={{ fontSize: 13 }}>Address</Text>} name="sup_address" style={{ marginBottom: 12 }}>
+            <Input placeholder="City, State" style={{ borderRadius: 8, height: 40 }} />
+          </Form.Item>
+          <Divider style={{ margin: '4px 0 12px' }} orientationMargin={0} orientation="left"><Text style={{ fontSize: 12, color: '#aaa' }}>Bank Details</Text></Divider>
+          <VendorBankFields form={supplierForm} namePrefix="bankDetails" />
+          <Form.Item label={<Text style={{ fontSize: 13 }}>Notes</Text>} name="sup_notes" style={{ marginBottom: 12 }}>
+            <Input.TextArea rows={2} placeholder="Any additional info..." style={{ borderRadius: 8 }} />
+          </Form.Item>
+          <div style={{ display: 'flex', gap: 8, marginTop: 20 }}>
+            <Button onClick={() => setShowAddSupplierModal(false)} style={{ flex: 1, height: 40, borderRadius: 8 }}>Cancel</Button>
+            <Button type="primary" htmlType="submit" style={{ flex: 2, height: 40, borderRadius: 8, background: '#B11E6A', border: 'none', fontWeight: 700 }}>Save Supplier</Button>
+          </div>
+        </Form>
+      </Modal>
+
+      {/* Shared Camera Capture Modal */}
+      <Modal
+        title={
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <div style={{ width: 36, height: 36, borderRadius: 8, background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+              <CameraOutlined style={{ color: '#fff', fontSize: 17 }} />
+            </div>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 15 }}>Capture Document</div>
+              <div style={{ fontSize: 11, color: '#888', fontWeight: 400 }}>Point camera at the document and tap Capture</div>
+            </div>
+          </div>
+        }
+        open={showCameraModal}
+        onCancel={closeCameraCapture}
+        footer={null}
+        width={480}
+        centered
+        destroyOnClose
+        afterOpenChange={(open) => {
+          if (open && cameraStream && cameraVideoRef.current) {
+            cameraVideoRef.current.srcObject = cameraStream;
+            cameraVideoRef.current.play().catch(() => {});
+          }
+        }}
+      >
+        <div style={{ background: '#000', borderRadius: 12, overflow: 'hidden', marginBottom: 16, position: 'relative', minHeight: 300, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <video
+            ref={cameraVideoRef}
+            autoPlay
+            playsInline
+            muted
+            style={{ width: '100%', display: 'block', maxHeight: 380, objectFit: 'cover' }}
+          />
+          <div style={{ position: 'absolute', top: 10, right: 10, background: 'rgba(0,0,0,0.55)', borderRadius: 20, padding: '3px 10px', display: 'flex', alignItems: 'center', gap: 5 }}>
+            <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#ff4d4f', display: 'inline-block', animation: 'pulse 1.2s infinite' }} />
+            <Text style={{ color: '#fff', fontSize: 11 }}>Live</Text>
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <Button onClick={closeCameraCapture} style={{ flex: 1, height: 42, borderRadius: 10 }}>Cancel</Button>
+          <Button
+            type="primary"
+            icon={<CameraOutlined />}
+            onClick={capturePhoto}
+            style={{ flex: 2, height: 42, borderRadius: 10, background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none', fontWeight: 700, fontSize: 14 }}
+          >
+            Capture Photo
+          </Button>
+        </div>
+      </Modal>
+
+      {/* Place Order Modal */}
+      <Modal
+        title={
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, paddingBottom: 4 }}>
+            <div style={{ width: 40, height: 40, borderRadius: 10, background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+              <ShoppingOutlined style={{ color: '#fff', fontSize: 20 }} />
+            </div>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 15, lineHeight: '20px' }}>Place Order</div>
+              <div style={{ fontSize: 11, color: '#888', fontWeight: 400 }}>Review order & supplier details, then send order via WhatsApp</div>
+            </div>
+          </div>
+        }
+        open={showPlaceOrderModal}
+        onCancel={closePlaceOrderModal}
+        footer={null}
+        width={540}
+        centered
+      >
+        {selectedPlaceOrderReq && (() => {
+          const sup = suppliers.find(s => s.name === selectedPlaceOrderReq.supplier);
+          const complaints = [];
+          const openComplaints = complaints.filter(c => c.status === 'Open');
+
+          if (showPlaceOrderSuccess) {
+            return (
+              <div style={{ marginTop: 8 }}>
+                <div style={{ textAlign: 'center', padding: '16px 0 8px' }}>
+                  <div style={{ width: 60, height: 60, borderRadius: '50%', background: 'linear-gradient(135deg,#25D366,#128C7E)', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 12px' }}>
+                    <CheckCircleOutlined style={{ color: '#fff', fontSize: 28 }} />
+                  </div>
+                  <Text strong style={{ fontSize: 16, display: 'block', marginBottom: 4 }}>Order Sent Successfully!</Text>
+                  <Text type="secondary" style={{ fontSize: 12 }}>Order placed with <Text strong style={{ color: '#B11E6A' }}>{selectedPlaceOrderReq.supplier}</Text> via WhatsApp.</Text>
+                </div>
+                <Divider style={{ margin: '16px 0' }} />
+                {/* LR Copy Reminder */}
+                <div style={{ padding: '14px 16px', borderRadius: 10, background: isDark ? '#1a1408' : '#fffbe6', border: `1px solid ${lrCopyReminderChecked ? '#faad14' : '#ffe58f'}`, marginBottom: 16 }}>
+                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+                    <BellOutlined style={{ color: '#fa8c16', fontSize: 18, marginTop: 2, flexShrink: 0 }} />
+                    <div style={{ flex: 1 }}>
+                      <Text strong style={{ display: 'block', color: '#ad6800', marginBottom: 4, fontSize: 13 }}>LR Copy Reminder</Text>
+                      <Text style={{ fontSize: 12, color: '#614700', display: 'block', marginBottom: 10 }}>
+                        Enable 30-minute reminders to follow up and collect the LR (Lorry Receipt) copy from the purchase team.
+                      </Text>
+                      <Checkbox
+                        checked={lrCopyReminderChecked}
+                        onChange={e => toggleLrCopyReminder(e.target.checked)}
+                        style={{ fontWeight: 600, color: '#ad6800' }}
+                      >
+                        Remind me every 30 min to get LR copy
+                      </Checkbox>
+                      {lrCopyReminderChecked && (
+                        <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 6, padding: '6px 10px', borderRadius: 6, background: '#fa8c1620' }}>
+                          <ClockCircleOutlined style={{ color: '#fa8c16', fontSize: 12 }} />
+                          <Text style={{ fontSize: 11, color: '#ad6800' }}>
+                            Reminder is active{lrCopyReminderCount > 0 ? ` — fired ${lrCopyReminderCount} time${lrCopyReminderCount > 1 ? 's' : ''}` : ' — first alert in 30 min'}
+                          </Text>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+                <Button
+                  block
+                  type="primary"
+                  style={{ height: 44, borderRadius: 10, background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none', fontWeight: 700, fontSize: 14 }}
+                  onClick={closePlaceOrderModal}
+                >
+                  Done
+                </Button>
+              </div>
+            );
+          }
+
+          return (
+            <div style={{ marginTop: 8 }}>
+              {/* Previous complaints banner */}
+              {openComplaints.length > 0 && (
+                <Alert
+                  style={{ marginBottom: 14, borderRadius: 10 }}
+                  type="warning"
+                  showIcon
+                  icon={<ExclamationCircleOutlined />}
+                  message={<Text strong style={{ fontSize: 13 }}>Pending Complaints for {selectedPlaceOrderReq.supplier}</Text>}
+                  description={
+                    <div style={{ marginTop: 4 }}>
+                      <Text style={{ fontSize: 12, color: '#614700', display: 'block', marginBottom: 6 }}>
+                        There are <Text strong>{openComplaints.length}</Text> unresolved issue(s) from previous orders. Review before placing a new order:
+                      </Text>
+                      {openComplaints.map(c => (
+                        <div key={c.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 6, marginBottom: 4 }}>
+                          <Tag color={c.severity === 'high' ? 'error' : c.severity === 'medium' ? 'warning' : 'default'} style={{ fontSize: 10, margin: 0, flexShrink: 0 }}>
+                            {c.severity.toUpperCase()}
+                          </Tag>
+                          <Text style={{ fontSize: 11 }}>{c.issue} <Text type="secondary" style={{ fontSize: 10 }}>({c.date})</Text></Text>
+                        </div>
+                      ))}
+                    </div>
+                  }
+                />
+              )}
+              {/* Order Details */}
+              <div style={{ padding: '12px 16px', background: isDark ? '#0d2010' : '#f6ffed', border: '1px solid #b7eb8f', borderRadius: 10, marginBottom: 16 }}>
+                <Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 8 }}>ORDER DETAILS</Text>
+                <Row gutter={[12, 8]}>
+                  <Col span={12}>
+                    <Text type="secondary" style={{ fontSize: 11 }}>ITEM</Text>
+                    <div><Text strong>{selectedPlaceOrderReq.item}</Text></div>
+                  </Col>
+                  <Col span={12}>
+                    <Text type="secondary" style={{ fontSize: 11 }}>SUPPLIER</Text>
+                    <div><Text strong style={{ color: '#B11E6A' }}>{selectedPlaceOrderReq.supplier}</Text></div>
+                  </Col>
+                  <Col span={12}>
+                    <Text type="secondary" style={{ fontSize: 11 }}>QUANTITY</Text>
+                    <div><Text strong>{selectedPlaceOrderReq.qty} {selectedPlaceOrderReq.unit}</Text></div>
+                  </Col>
+                  <Col span={12}>
+                    <Text type="secondary" style={{ fontSize: 11 }}>PAYMENT TERMS</Text>
+                    <div><Text strong style={{ fontSize: 11 }}>{selectedPlaceOrderReq.payment_terms}</Text></div>
+                  </Col>
+                  <Col span={12}>
+                    <Text type="secondary" style={{ fontSize: 11 }}>REQUEST DATE</Text>
+                    <div><Text strong>{selectedPlaceOrderReq.date}</Text></div>
+                  </Col>
+                </Row>
+              </div>
+
+              {/* 50% Payment date picker */}
+              {selectedPlaceOrderReq.payment_terms?.includes('50%') && (
+                <div style={{ padding: '12px 16px', background: isDark ? '#1a0f14' : '#fff8fb', border: '1px solid #B11E6A33', borderRadius: 10, marginBottom: 16 }}>
+                  <Text style={{ fontSize: 11, color: '#B11E6A', fontWeight: 600, display: 'block', marginBottom: 8 }}>
+                    SECOND PAYMENT REMINDER DATE
+                  </Text>
+                  <DatePicker
+                    style={{ width: '100%', borderRadius: 8 }}
+                    value={placeOrderFiftyDate}
+                    onChange={setPlaceOrderFiftyDate}
+                    placeholder="Select reminder date for 2nd payment"
+                    disabledDate={d => d && d.isBefore(dayjs(), 'day')}
+                  />
+                </div>
+              )}
+
+              {/* Supplier / Vendor Details */}
+              {sup && (
+                <div style={{ padding: '12px 16px', background: isDark ? '#120b0e' : '#fff8fb', border: '1px solid #B11E6A33', borderRadius: 10, marginBottom: 16 }}>
+                  <Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 8 }}>SUPPLIER / VENDOR DETAILS</Text>
+                  <Row gutter={[12, 8]}>
+                    <Col span={12}>
+                      <Text type="secondary" style={{ fontSize: 11 }}>PHONE / WHATSAPP</Text>
+                      <div>
+                        <WhatsAppOutlined style={{ color: '#25D366', fontSize: 12, marginRight: 4 }} />
+                        <Text strong style={{ fontSize: 12 }}>{sup.phone}</Text>
+                      </div>
+                    </Col>
+                    <Col span={12}>
+                      <Text type="secondary" style={{ fontSize: 11 }}>EMAIL</Text>
+                      <div><Text style={{ fontSize: 12, color: '#B11E6A' }}>{sup.email}</Text></div>
+                    </Col>
+                    <Col span={24}>
+                      <Text type="secondary" style={{ fontSize: 11 }}>ADDRESS</Text>
+                      <div><Text style={{ fontSize: 12 }}>{sup.address}</Text></div>
+                    </Col>
+                    {formatBankDetails(sup.bank) && (
+                      <Col span={24}>
+                        <Text type="secondary" style={{ fontSize: 11 }}>BANK DETAILS</Text>
+                        <div style={{ padding: '6px 10px', background: isDark ? '#1a1a2e' : '#fafafa', borderRadius: 6, border: `1px solid ${isDark ? '#2a2d40' : '#e8e8e8'}`, marginTop: 4 }}>
+                          <Text style={{ fontSize: 12, fontWeight: 600 }}>{formatBankDetails(sup.bank)}</Text>
+                        </div>
+                      </Col>
+                    )}
+                  </Row>
+                </div>
+              )}
+
+              {/* Send via WhatsApp */}
+              <div style={{ display: 'flex', gap: 8 }}>
+                <Button onClick={closePlaceOrderModal} style={{ flex: 1, height: 44, borderRadius: 10 }}>
+                  Cancel
+                </Button>
+                <Button
+                  icon={<WhatsAppOutlined />}
+                  style={{ flex: 2, height: 44, borderRadius: 10, background: 'linear-gradient(135deg,#25D366,#128C7E)', border: 'none', color: '#fff', fontWeight: 700, fontSize: 14 }}
+                  onClick={() => {
+                    const reminderLine = placeOrderFiftyDate ? `\n*2nd Payment Due:* ${placeOrderFiftyDate.format('DD-MM-YYYY')}` : '';
+                    const msg = `*Purchase Order*\n\n*Item:* ${selectedPlaceOrderReq.item}\n*Quantity:* ${selectedPlaceOrderReq.qty} ${selectedPlaceOrderReq.unit}\n*Payment Terms:* ${selectedPlaceOrderReq.payment_terms}${reminderLine}\n*Date:* ${selectedPlaceOrderReq.date}\n\nKindly confirm the order and advise on delivery timeline.`;
+                    const phone = sup ? sup.phone.replace(/\D/g, '') : '';
+                    window.open(`https://wa.me/${phone}?text=${encodeURIComponent(msg)}`, '_blank');
+                    setShowPlaceOrderSuccess(true);
+                  }}
+                >
+                  Send Order via WhatsApp
+                </Button>
+              </div>
+            </div>
+          );
+        })()}
+      </Modal>
+
+      {/* ── Bulk Purchase Request Modal ── */}
+      <Modal
+        title={
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, paddingBottom: 4 }}>
+            <div style={{ width: 40, height: 40, borderRadius: 10, background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+              <ShoppingOutlined style={{ color: '#fff', fontSize: 20 }} />
+            </div>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 15, lineHeight: '20px' }}>Bulk Purchase Request</div>
+              <div style={{ fontSize: 11, color: '#888', fontWeight: 400 }}>Select supplier → pick low-stock products → raise multiple requests at once</div>
+            </div>
+          </div>
+        }
+        open={showBulkPurchaseModal}
+        onCancel={() => { setShowBulkPurchaseModal(false); setBulkSupplierName(''); setBulkItems([]); setBulkPayTerms(''); setBulkReminderDate(null); setBulkQuotationAsked(false); }}
+        footer={null}
+        width={640}
+        centered
+      >
+        <div style={{ marginTop: 4 }}>
+          {/* Step 1: Supplier Selection */}
+          <div style={{ background: isDark ? '#16192a' : '#fafafa', borderRadius: 10, padding: '14px 16px', marginBottom: 16, border: `1px solid ${isDark ? '#2a2d40' : '#f0f0f0'}` }}>
+            <Text style={{ fontSize: 12, fontWeight: 700, color: '#B11E6A', display: 'block', marginBottom: 8 }}>
+              Step 1 — Select Supplier
+            </Text>
+            <Select
+              placeholder="Select supplier name..."
+              style={{ width: '100%', borderRadius: 8 }}
+              value={bulkSupplierName || undefined}
+              onChange={val => {
+                if (val === '__add_new__') {
+                  setInlineDropdownContext('bulk');
+                  setShowAddSupplierInlineModal(true);
+                  return;
+                }
+                handleBulkSupplierSelect(val);
+              }}
+              showSearch
+              optionFilterProp="children"
+              dropdownRender={menu => (
+                <>
+                  {menu}
+                  <div style={{ padding: '8px 12px', borderTop: '1px solid #f0f0f0' }}>
+                    <Button type="link" icon={<PlusOutlined />} style={{ color: '#B11E6A', padding: 0, fontWeight: 600 }}
+                      onClick={() => { setInlineDropdownContext('bulk'); setShowAddSupplierInlineModal(true); }}>
+                      Add New Supplier
+                    </Button>
+                  </div>
+                </>
+              )}
+            >
+              {suppliers.map(s => <Option key={s.id} value={s.name}>{s.name}</Option>)}
+            </Select>
+            {bulkSupplierName && (() => {
+              const sup = suppliers.find(s => s.name === bulkSupplierName);
+              if (!sup) return null;
+              return (
+                <div style={{ marginTop: 10, display: 'flex', gap: 0 }}>
+                  {[{ label: 'Phone', value: sup.phone }, { label: 'Email', value: sup.email }, { label: 'Address', value: sup.address }].map((item, i) => (
+                    <div key={i} style={{ flex: 1, borderRight: i < 2 ? `1px solid ${isDark ? '#2a2d40' : '#f0f0f0'}` : 'none', padding: '0 10px', paddingLeft: i === 0 ? 0 : 10 }}>
+                      <div style={{ fontSize: 10, color: '#888', marginBottom: 2 }}>{item.label}</div>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: textColor, wordBreak: 'break-word' }}>{item.value}</div>
+                    </div>
+                  ))}
+                </div>
+              );
+            })()}
+          </div>
+
+          {/* Step 2: Product Selection (only shown after supplier is selected) */}
+          {bulkItems.length > 0 && (
+            <div style={{ marginBottom: 16 }}>
+              <Text style={{ fontSize: 12, fontWeight: 700, color: '#B11E6A', display: 'block', marginBottom: 10 }}>
+                Step 2 — Select Products & Quantities
+                <Text type="secondary" style={{ fontSize: 11, fontWeight: 400, marginLeft: 8 }}>
+                  (Showing low-stock items — supplier's products pre-selected)
+                </Text>
+              </Text>
+              <div style={{ maxHeight: 280, overflowY: 'auto', border: `1px solid ${isDark ? '#2a2d40' : '#f0f0f0'}`, borderRadius: 10 }}>
+                {bulkItems.map((item, idx) => (
+                  <div
+                    key={item.invKey}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 10,
+                      padding: '10px 14px',
+                      borderBottom: idx < bulkItems.length - 1 ? `1px solid ${isDark ? '#2a2d40' : '#f5f5f5'}` : 'none',
+                      background: item.selected ? (isDark ? '#1a0f14' : '#fff8fb') : (isDark ? '#16192a' : '#fafafa'),
+                      cursor: 'pointer',
+                      transition: 'background 0.15s',
+                    }}
+                    onClick={() => {
+                      setBulkItems(prev => prev.map((bi, i) => i === idx ? { ...bi, selected: !bi.selected } : bi));
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={item.selected}
+                      onChange={() => {}}
+                      style={{ cursor: 'pointer', accentColor: '#B11E6A', width: 16, height: 16 }}
+                    />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                        <Text strong style={{ fontSize: 13 }}>{item.name}</Text>
+                        <Tag color={item.status === 'Out' ? 'error' : 'warning'} style={{ fontSize: 10, borderRadius: 8, margin: 0 }}>{item.status}</Tag>
+                        {item.fromSupplier && <Tag color="purple" style={{ fontSize: 10, borderRadius: 8, margin: 0 }}>This Supplier</Tag>}
+                      </div>
+                      <Text type="secondary" style={{ fontSize: 11 }}>Stock: {formatQty(item.currentStock)} / Min: {formatQty(item.minStock)} {item.unit}</Text>
+                    </div>
+                    <div onClick={e => e.stopPropagation()}>
+                      <InputNumber
+                        size="small"
+                        min={1}
+                        placeholder="Enter qty"
+                        value={item.qty}
+                        disabled={!item.selected}
+                        status={item.selected && !(Number(item.qty) > 0) ? 'error' : undefined}
+                        onChange={v => setBulkItems(prev => prev.map((bi, i) => i === idx ? { ...bi, qty: v } : bi))}
+                        addonAfter={<Text style={{ fontSize: 11 }}>{item.unit}</Text>}
+                        style={{ width: 130 }}
+                      />
+                      {item.selected && !(Number(item.qty) > 0) && (
+                        <Text style={{ fontSize: 10, color: '#ff4d4f', display: 'block', textAlign: 'right', marginTop: 2 }}>Required</Text>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
+                <Text type="secondary" style={{ fontSize: 11 }}>
+                  {bulkItems.filter(i => i.selected).length} of {bulkItems.length} products selected
+                </Text>
+                <Button
+                  size="small"
+                  type="link"
+                  style={{ padding: 0, fontSize: 11, color: '#B11E6A' }}
+                  onClick={() => setBulkItems(prev => prev.map(i => ({ ...i, selected: true })))}
+                >Select All</Button>
+                <Button
+                  size="small"
+                  type="link"
+                  style={{ padding: 0, fontSize: 11, color: '#888' }}
+                  onClick={() => setBulkItems(prev => prev.map(i => ({ ...i, selected: false })))}
+                >Clear</Button>
+              </div>
+            </div>
+          )}
+
+          {/* Step 3: Payment Terms */}
+          {bulkItems.length > 0 && (
+            <div style={{ background: isDark ? '#16192a' : '#fafafa', borderRadius: 10, padding: '14px 16px', marginBottom: 16, border: `1px solid ${isDark ? '#2a2d40' : '#f0f0f0'}` }}>
+              <Text style={{ fontSize: 12, fontWeight: 700, color: '#B11E6A', display: 'block', marginBottom: 8 }}>Step 3 — Payment Terms</Text>
+              <Select
+                placeholder="Select payment terms..."
+                style={{ width: '100%' }}
+                value={bulkPayTerms || undefined}
+                onChange={val => { setBulkPayTerms(val); if (val === '100% Payment') setBulkReminderDate(null); }}
+              >
+                <Option value="100% Payment">100% Payment</Option>
+                <Option value="50% Advance, 50% on Dispatch">50% Advance, 50% on Dispatch</Option>
+                <Option value="50% Advance, 50% After Delivery (Max 15 days)">50% Advance, 50% After Delivery (Max 15 days)</Option>
+              </Select>
+              {bulkReminderRequired && (
+                <div style={{ marginTop: 10 }}>
+                  <Text style={{ fontSize: 11, fontWeight: 600, display: 'block', marginBottom: 4 }}>Payment Reminder Date</Text>
+                  <DatePicker
+                    style={{ width: '100%', borderRadius: 8 }}
+                    value={bulkReminderDate}
+                    onChange={setBulkReminderDate}
+                    disabledDate={d => d && d.isBefore(dayjs().startOf('day'))}
+                    placeholder="Select reminder date"
+                  />
+                  <Text type="secondary" style={{ fontSize: 10, display: 'block', marginTop: 4 }}>
+                    Financial team will get an automatic WhatsApp reminder from this date, on the schedule configured in WhatsApp Integration → Event Mapping.
+                  </Text>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Summary */}
+          {bulkItems.filter(i => i.selected).length > 0 && (
+            <div style={{ padding: '12px 14px', background: isDark ? '#0d1a1a' : '#f0fff4', border: '1px solid #52c41a44', borderRadius: 10, marginBottom: 16 }}>
+              <Text style={{ fontSize: 12, fontWeight: 600, color: '#389e0d' }}>
+                {bulkItems.filter(i => i.selected).length} purchase request(s) will be raised for {bulkSupplierName}:
+              </Text>
+              <div style={{ marginTop: 6 }}>
+                {bulkItems.filter(i => i.selected).map(i => (
+                  <div key={i.invKey} style={{ display: 'flex', justifyContent: 'space-between', padding: '2px 0' }}>
+                    <Text style={{ fontSize: 12 }}>{i.name}</Text>
+                    <Text style={{ fontSize: 12, color: '#B11E6A', fontWeight: 600 }}>{i.qty} {i.unit}</Text>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Step 4: Action Flow — Ask Quotation → Raise Request */}
+          {bulkItems.filter(i => i.selected).length > 0 && bulkPayTerms && (
+            <div style={{ background: isDark ? '#16192a' : '#fafafa', borderRadius: 10, padding: '14px 16px', marginBottom: 16, border: `1px solid ${isDark ? '#2a2d40' : '#f0f0f0'}` }}>
+              <Text style={{ fontSize: 12, fontWeight: 700, color: '#B11E6A', display: 'block', marginBottom: 10 }}>Step 4 — Action</Text>
+              {!bulkQuotationAsked ? (
+                <div>
+                  <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 10 }}>
+                    First, send a WhatsApp quotation request to the supplier. Once you receive the quotation, upload it and raise the formal request to Finance.
+                  </Text>
+                  <Button
+                    icon={<WhatsAppOutlined />}
+                    onClick={handleBulkAskQuotation}
+                    loading={bulkAskingQuotation}
+                    disabled={!bulkQtyValid || !bulkReminderValid}
+                    style={{ width: '100%', height: 40, borderColor: '#25D366', color: '#25D366', fontWeight: 600, borderRadius: 8, fontSize: 13 }}
+                  >
+                    Ask Quotation via WhatsApp
+                  </Button>
+                </div>
+              ) : (
+                <div>
+                  <Alert
+                    type="success"
+                    message="Quotation request sent via WhatsApp"
+                    description='Raise the request now. Once the supplier replies, upload the quotation document and enter the quoted amount from the "Bulk Purchase Requests" table below.'
+                    showIcon
+                    style={{ marginBottom: 12, borderRadius: 8 }}
+                  />
+                  <Button
+                    size="small"
+                    icon={<WhatsAppOutlined />}
+                    onClick={handleBulkAskQuotation}
+                    loading={bulkAskingQuotation}
+                    disabled={!bulkQtyValid || !bulkReminderValid}
+                    style={{ borderColor: '#25D366', color: '#25D366', fontSize: 11 }}
+                  >
+                    Re-ask / Follow-up
+                  </Button>
+                </div>
+              )}
+            </div>
+          )}
+
+          <div style={{ display: 'flex', gap: 8 }}>
+            <Button
+              onClick={() => { setShowBulkPurchaseModal(false); setBulkSupplierName(''); setBulkItems([]); setBulkPayTerms(''); setBulkReminderDate(null); setBulkQuotationAsked(false); }}
+              style={{ flex: 1, height: 44, borderRadius: 10 }}
+            >Cancel</Button>
+            <Button
+              type="primary"
+              disabled={!bulkQuotationAsked || bulkItems.filter(i => i.selected).length === 0 || !bulkPayTerms || !bulkQtyValid || !bulkReminderValid}
+              onClick={handleBulkRaiseRequest}
+              style={{ flex: 2, height: 44, borderRadius: 10, background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none', fontWeight: 700, fontSize: 14 }}
+            >
+              Raise {bulkItems.filter(i => i.selected).length || ''} Request(s) to Financial
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* LR Upload Modal */}
+      <Modal
+        title={<Space><TruckOutlined style={{ color: '#1890ff' }} /><Text strong style={{ fontSize: 15 }}>Upload LR Copy</Text></Space>}
+        open={showLRUploadModal}
+        onCancel={() => { setShowLRUploadModal(false); setLrUploadTarget(null); lrUploadForm.resetFields(); }}
+        footer={null}
+        width={460}
+        centered
+        destroyOnClose
+      >
+        {lrUploadTarget && (
+          <Form form={lrUploadForm} layout="vertical" style={{ marginTop: 8 }}
+            onFinish={async (vals) => {
+              const deliveryDate = vals.delivery_date ? vals.delivery_date.format('YYYY-MM-DD') : '';
+              const fileItem = vals.lr_file?.fileList?.[0];
+              if (fileItem && fileItem.status === 'uploading') {
+                enqueueSnackbar('LR document is still uploading — please wait for it to finish before saving.', { variant: 'warning' });
+                return;
+              }
+              if (fileItem && fileItem.status === 'error') {
+                enqueueSnackbar('LR document failed to upload — remove it and try again, or save without it.', { variant: 'error' });
+                return;
+              }
+              const fileUrl = fileItem?.url || null;
+              const fileName = fileItem?.name || '';
+              if (!fileUrl && lrCopyReminderPending(lrUploadTarget.order)) {
+                enqueueSnackbar('Finance set an LR copy reminder for this order — attach the LR copy to save.', { variant: 'warning' });
+                return;
+              }
+              try {
+                // Persists the LR + Expected Delivery Date on the PurchaseOrder and
+                // upserts the matching Dispatch "Pick Up Order" entry — this is what
+                // makes it show up in Dispatch's pickup tabs.
+                await uploadPurchaseLR({
+                  id: lrUploadTarget.order.key,
+                  lrNumber: vals.lr_number,
+                  expectedDeliveryDate: deliveryDate,
+                  paymentStatus: vals.paid_status,
+                  billTotalAmount: vals.bill_total_amount ?? 0,
+                  // GST portion of the LR/transport bill + its CGST/SGST vs IGST split.
+                  lrGstAmount: vals.lr_gst_amount ?? 0,
+                  lrCgstAmount: vals.lr_cgst_amount ?? 0,
+                  lrSgstAmount: vals.lr_sgst_amount ?? 0,
+                  lrIgstAmount: vals.lr_igst_amount ?? 0,
+                  ...(fileUrl ? { proofUrl: fileUrl } : {}),
+                }).unwrap();
+              } catch (err) {
+                enqueueSnackbar(err?.data?.message || 'Failed to save LR copy', { variant: 'error' });
+                return;
+              }
+              const entry = { lrNumber: vals.lr_number, deliveryDate, fileName, paidStatus: vals.paid_status, billTotalAmount: vals.bill_total_amount ?? 0 };
+              setLrData(prev => ({ ...prev, [lrUploadTarget.order.key]: entry }));
+              if (vals.paid_status === 'Not Paid') {
+                enqueueSnackbar(
+                  `Finance Alert — Payment Pending: LR uploaded for ${lrUploadTarget.order.item}. Payment is Not Paid. Finance team will be notified on receiving date (${deliveryDate}).`,
+                  { variant: 'warning', autoHideDuration: 8000 },
+                );
+              } else {
+                enqueueSnackbar('LR copy uploaded. Payment marked as Paid.', { variant: 'success' });
+              }
+              setShowLRUploadModal(false);
+              setLrUploadTarget(null);
+              lrUploadForm.resetFields();
+            }}
+          >
+            <div style={{ marginBottom: 14, padding: '10px 14px', background: isDark ? '#16192a' : '#e6f7ff', borderRadius: 8, border: '1px solid #91d5ff' }}>
+              <Text type="secondary" style={{ fontSize: 11 }}>ORDER</Text>
+              <div><Text strong style={{ fontSize: 14 }}>{lrUploadTarget.order.item}</Text></div>
+              <Text type="secondary" style={{ fontSize: 11 }}>Supplier: <Text strong style={{ color: '#B11E6A' }}>{lrUploadTarget.order.supplier}</Text> · Bill: {lrUploadTarget.order.bill_no}</Text>
+            </div>
+            <Row gutter={12}>
+              <Col span={12}>
+                <Form.Item label="LR Number" name="lr_number" rules={[{ required: true, message: 'Enter LR number' }]}>
+                  <Input placeholder="e.g. LR-20240501-001" />
+                </Form.Item>
+              </Col>
+              <Col span={12}>
+                <Form.Item label="Expected Delivery Date" name="delivery_date" rules={[{ required: true, message: 'Select date' }]}>
+                  <DatePicker style={{ width: '100%' }} disabledDate={d => d && d.isBefore(dayjs(), 'day')} />
+                </Form.Item>
+              </Col>
+            </Row>
+            <Form.Item label="Payment Status" name="paid_status" rules={[{ required: true, message: 'Select status' }]}>
+              <Select placeholder="Mark as Paid or Not Paid">
+                <Option value="Paid">Paid</Option>
+                <Option value="Not Paid">Not Paid — Finance will be notified on delivery date</Option>
+              </Select>
+            </Form.Item>
+            {lrCopyReminderPending(lrUploadTarget.order) && (
+              <Alert
+                type="warning"
+                showIcon
+                style={{ marginBottom: 12, borderRadius: 8 }}
+                message={`Finance set an LR copy reminder for ${dayjs(lrUploadTarget.order.lrReminderDate).format('DD MMM YYYY')} — attach the LR copy below to stop the reminder alert.`}
+              />
+            )}
+            <Form.Item
+              label="Upload LR Copy"
+              name="lr_file"
+              rules={lrCopyReminderPending(lrUploadTarget.order) ? [{
+                validator: (_, v) => (v?.fileList?.length ? Promise.resolve() : Promise.reject(new Error('Attach the LR copy (Finance reminder pending)'))),
+              }] : []}
+            >
+              <Upload.Dragger maxCount={1} customRequest={makeUpload('purchase/lr')} style={{ background: isDark ? '#1a1a2e' : '#fafafa', borderRadius: 8 }}>
+                <p className="ant-upload-drag-icon"><FileTextOutlined style={{ color: '#1890ff' }} /></p>
+                <p className="ant-upload-text">Click or drag LR document to upload</p>
+                <p className="ant-upload-hint">PDF or Image of Lorry Receipt / Bilty</p>
+              </Upload.Dragger>
+            </Form.Item>
+            <Button
+              icon={<ThunderboltOutlined />}
+              loading={lrScanLoading}
+              disabled={lrFileUploading || !lrFileWatch?.fileList?.[0]?.url}
+              onClick={async () => {
+                const scannedFile = lrFileWatch?.fileList?.[0];
+                if (!scannedFile?.url) {
+                  enqueueSnackbar('Upload the LR document first.', { variant: 'warning' });
+                  return;
+                }
+                setLrScanLoading(true);
+                try {
+                  const res = await scanPurchaseLR({
+                    id: lrUploadTarget.order.key,
+                    fileUrl: scannedFile.url,
+                    mimetype: scannedFile.type || scannedFile.originFileObj?.type,
+                    originalName: scannedFile.name,
+                  }).unwrap();
+                  const parsed = res?.data || {};
+                  const num = (v) => Number(String(v ?? '').replace(/[^0-9.]/g, '')) || 0;
+                  const lrGst = num(parsed.gstAmount);
+                  const lrCgst = num(parsed.cgstAmount);
+                  const lrSgst = num(parsed.sgstAmount);
+                  const lrIgst = num(parsed.igstAmount);
+                  lrUploadForm.setFieldsValue({
+                    lr_number: parsed.lrNumber || lrUploadForm.getFieldValue('lr_number'),
+                    bill_total_amount: parsed.billTotalAmount || lrUploadForm.getFieldValue('bill_total_amount'),
+                    ...(parsed.estimatedDelivery ? { delivery_date: dayjs(parsed.estimatedDelivery) } : {}),
+                    // Fill whichever GST components the LR printed — inter-state transport bills
+                    // carry IGST only, intra-state carry CGST+SGST. Blank LR → fields stay 0.
+                    ...(lrGst ? { lr_gst_amount: lrGst } : {}),
+                    ...(lrCgst ? { lr_cgst_amount: lrCgst } : {}),
+                    ...(lrSgst ? { lr_sgst_amount: lrSgst } : {}),
+                    ...(lrIgst ? { lr_igst_amount: lrIgst } : {}),
+                  });
+                  enqueueSnackbar(
+                    `AI extracted the LR details — review the Bill Total Amount before saving.${lrIgst > 0 ? ' Inter-state (IGST) transport bill.' : ''}`,
+                    { variant: 'success' },
+                  );
+                } catch (err) {
+                  enqueueSnackbar(err?.data?.message || 'AI extraction failed. Enter the details manually.', { variant: 'error' });
+                } finally {
+                  setLrScanLoading(false);
+                }
+              }}
+              style={{ width: '100%', marginBottom: 14, borderRadius: 8, background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none', color: '#fff', fontWeight: 700 }}
+            >
+              {lrScanLoading ? 'Scanning…' : 'Scan with AI — Auto-fill Bill Total Amount'}
+            </Button>
+            <Form.Item
+              label="Bill Total Amount (₹)"
+              name="bill_total_amount"
+              tooltip="The LR/transport bill's total amount as printed on the LR copy — this is what's payable to the transporter, not the order's goods value."
+              rules={[{ required: true, message: 'Enter the Bill Total Amount from the LR copy' }]}
+            >
+              <InputNumber prefix="₹" style={{ width: '100%', borderRadius: 8 }} min={0} placeholder="Scan the LR copy above or enter manually" />
+            </Form.Item>
+            {/* GST portion of the transport bill — auto-filled from the scan. Inter-state
+                transport prints IGST only; intra-state prints CGST + SGST. Leave blank for an
+                LR with no GST line. Informational (freight charge, not goods Input GST). */}
+            <Row gutter={12}>
+              <Col span={12}>
+                <Form.Item label="GST Amount (₹)" name="lr_gst_amount" tooltip="Total GST on the LR/transport bill, as printed. Auto-filled from the scan.">
+                  <InputNumber prefix="₹" style={{ width: '100%', borderRadius: 8 }} min={0} placeholder="0.00" />
+                </Form.Item>
+              </Col>
+              <Col span={12}>
+                <Form.Item label="IGST (₹)" name="lr_igst_amount" tooltip="Integrated GST — inter-state transport only. Auto-filled from the scan.">
+                  <InputNumber prefix="₹" style={{ width: '100%', borderRadius: 8 }} min={0} placeholder="0.00" />
+                </Form.Item>
+              </Col>
+            </Row>
+            <Row gutter={12}>
+              <Col span={12}>
+                <Form.Item label="CGST (₹)" name="lr_cgst_amount" tooltip="Central GST — intra-state transport only. Auto-filled from the scan.">
+                  <InputNumber prefix="₹" style={{ width: '100%', borderRadius: 8 }} min={0} placeholder="0.00" />
+                </Form.Item>
+              </Col>
+              <Col span={12}>
+                <Form.Item label="SGST (₹)" name="lr_sgst_amount" tooltip="State GST — intra-state transport only. Auto-filled from the scan.">
+                  <InputNumber prefix="₹" style={{ width: '100%', borderRadius: 8 }} min={0} placeholder="0.00" />
+                </Form.Item>
+              </Col>
+            </Row>
+            <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+              <Button style={{ flex: 1, height: 40, borderRadius: 8 }} onClick={() => { setShowLRUploadModal(false); lrUploadForm.resetFields(); }}>Cancel</Button>
+              <Button type="primary" htmlType="submit" icon={<UploadOutlined />}
+                loading={lrFileUploading} disabled={lrFileUploading}
+                style={{ flex: 2, height: 40, borderRadius: 8, background: '#1890ff', border: 'none', fontWeight: 700 }}>
+                {lrFileUploading ? 'Uploading…' : 'Save LR Copy'}
+              </Button>
+            </div>
+          </Form>
+        )}
+      </Modal>
+
+      {/* Edit Quotation & Resend Modal */}
+      <Modal
+        title={
+          <Space>
+            <EditOutlined style={{ color: '#722ed1' }} />
+            <Text strong style={{ fontSize: 15 }}>Edit Quotation & Resend</Text>
+          </Space>
+        }
+        open={showEditQuotationModal}
+        onCancel={() => { setShowEditQuotationModal(false); setEditQuotationTarget(null); editReqForm.resetFields(); }}
+        footer={null}
+        width={480}
+        centered
+        destroyOnClose
+      >
+        {editQuotationTarget && (
+          <Form form={editReqForm} layout="vertical" style={{ marginTop: 8 }}>
+            <div style={{ marginBottom: 14, padding: '10px 14px', background: isDark ? '#16192a' : '#f9f0ff', borderRadius: 8, border: '1px solid #d3adf7' }}>
+              <Text type="secondary" style={{ fontSize: 11 }}>ITEM</Text>
+              <div><Text strong style={{ fontSize: 14 }}>{editQuotationTarget.item}</Text></div>
+              <Text type="secondary" style={{ fontSize: 11, marginTop: 4, display: 'block' }}>Supplier: <Text strong style={{ color: '#B11E6A' }}>{editQuotationTarget.supplier}</Text></Text>
+            </div>
+            <Row gutter={12}>
+              <Col span={12}>
+                <Form.Item label="Quantity" name="qty" rules={[{ required: true }]}>
+                  <InputNumber min={1} style={{ width: '100%' }} addonAfter={editQuotationTarget.unit} />
+                </Form.Item>
+              </Col>
+              <Col span={12}>
+                <Form.Item label="Payment Terms" name="payment_terms" rules={[{ required: true }]}>
+                  <Select>
+                    <Option value="100% Payment">100% Payment</Option>
+                    <Option value="50% Advance, 50% on Dispatch">50% Advance, 50% on Dispatch</Option>
+                    <Option value="50% Advance, 50% After Delivery (Max 15 days)">50% Advance, 50% After Delivery</Option>
+                    <Option value="Credit 30 Days">Credit 30 Days</Option>
+                  </Select>
+                </Form.Item>
+              </Col>
+            </Row>
+            {(editQuotationTarget.notes || []).length > 0 && (
+              <div style={{ marginBottom: 14, padding: '8px 12px', background: isDark ? '#1e2235' : '#f0f4ff', borderRadius: 8, border: '1px solid #d6e4ff' }}>
+                <Text style={{ fontSize: 11, color: '#722ed1', fontWeight: 600 }}>Latest Note:</Text>
+                <Text style={{ fontSize: 12, display: 'block' }}>{(editQuotationTarget.notes || []).at(-1)?.text}</Text>
+              </div>
+            )}
+            <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+              <Button style={{ flex: 1, height: 40, borderRadius: 8 }} onClick={() => { setShowEditQuotationModal(false); editReqForm.resetFields(); }}>Cancel</Button>
+              <Button style={{ flex: 1, height: 40, borderRadius: 8, borderColor: '#722ed1', color: '#722ed1' }}
+                onClick={() => {
+                  editReqForm.validateFields().then(vals => {
+                    dispatch(updateQuotationDetails({ key: editQuotationTarget.key, qty: vals.qty, payment_terms: vals.payment_terms }));
+                    enqueueSnackbar('Quotation details updated.', { variant: 'success' });
+                    setShowEditQuotationModal(false);
+                    editReqForm.resetFields();
+                  });
+                }}>Save Only</Button>
+              <Button type="primary" style={{ flex: 2, height: 40, borderRadius: 8, background: '#25D366', border: 'none', fontWeight: 700 }}
+                icon={<WhatsAppOutlined />}
+                onClick={() => {
+                  editReqForm.validateFields().then(vals => {
+                    dispatch(updateQuotationDetails({ key: editQuotationTarget.key, qty: vals.qty, payment_terms: vals.payment_terms }));
+                    const sup = suppliers.find(s => s.name === editQuotationTarget.supplier);
+                    const phone = sup ? sup.phone.replace(/\D/g, '') : '';
+                    const latestNote = (editQuotationTarget.notes || []).at(-1);
+                    const msg = `*Updated Quotation Request*\n\n*Item:* ${editQuotationTarget.item}\n*Quantity:* ${vals.qty} ${editQuotationTarget.unit}\n*Payment Terms:* ${vals.payment_terms}${latestNote ? `\n\nNote: ${latestNote.text}` : ''}\n\nKindly provide an updated quotation at the earliest.`;
+                    window.open(`https://wa.me/${phone}?text=${encodeURIComponent(msg)}`, '_blank');
+                    enqueueSnackbar('Updated quotation sent via WhatsApp!', { variant: 'success' });
+                    setShowEditQuotationModal(false);
+                    editReqForm.resetFields();
+                  });
+                }}>Save & Send via WhatsApp</Button>
+            </div>
+          </Form>
+        )}
+      </Modal>
+
+      {/* Payment Document View Modal */}
+      <Modal
+        title={
+          <Space>
+            <FileTextOutlined style={{ color: '#52c41a' }} />
+            <Text strong style={{ fontSize: 16 }}>Payment Document</Text>
+          </Space>
+        }
+        open={!!viewApprovalDoc}
+        onCancel={() => setViewApprovalDoc(null)}
+        footer={[
+          <Button key="close" onClick={() => setViewApprovalDoc(null)}>Close</Button>
+        ]}
+        width={520}
+        centered
+      >
+        {viewApprovalDoc && (() => {
+          const quotationFiles = viewApprovalDoc.quotationFiles || [];
+          const paymentHistory = viewApprovalDoc.paymentHistory || [];
+          // Legacy fallback: orders paid before paymentHistory existed only have a bare proof URL.
+          const legacyProof = paymentHistory.length === 0 && viewApprovalDoc.payment_doc ? [{ amount: null, proofUrl: viewApprovalDoc.payment_doc, paidBy: null, paidDate: null }] : [];
+          const payments = paymentHistory.length > 0 ? paymentHistory : legacyProof;
+          return (
+          <div style={{ marginTop: 8 }}>
+            <div style={{ background: isDark ? '#16192a' : '#fafafa', borderRadius: 10, padding: '12px 16px', marginBottom: 16, border: `1px solid ${isDark ? '#2a2d40' : '#f0f0f0'}` }}>
+              <Text type="secondary" style={{ fontSize: 11 }}>Request</Text>
+              <Text strong style={{ display: 'block', marginTop: 2 }}>{viewApprovalDoc.item}</Text>
+              <Text style={{ fontSize: 12, color: '#B11E6A' }}>Supplier: {viewApprovalDoc.supplier} · Qty: {viewApprovalDoc.qty} {viewApprovalDoc.unit}</Text>
+            </div>
+
+            <Text style={{ fontSize: 12, fontWeight: 600, color: '#722ed1', display: 'block', marginBottom: 8 }}>
+              <FileTextOutlined style={{ marginRight: 4 }} />Quotation Files {quotationFiles.length > 0 ? `(${quotationFiles.length})` : ''}
+            </Text>
+            {quotationFiles.length === 0 ? (
+              <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 16 }}>No quotation files uploaded.</Text>
+            ) : (
+              <div style={{ marginBottom: 16 }}>
+                {quotationFiles.slice().reverse().map((f, i) => (
+                  <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', borderRadius: 8, background: isDark ? '#1a1730' : '#f9f0ff', border: `1px solid ${isDark ? '#3a2d5c' : '#efdbff'}`, marginBottom: 6 }}>
+                    <FileTextOutlined style={{ color: '#722ed1' }} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <Text style={{ fontSize: 12, color: '#722ed1', display: 'block' }}>{f.uploadedAt ? new Date(f.uploadedAt).toLocaleString() : `File ${i + 1}`}</Text>
+                    </div>
+                    <Button size="small" icon={<EyeOutlined />} onClick={() => window.open(f.url, '_blank')} style={{ color: '#722ed1', borderColor: '#722ed1' }}>View</Button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <Text style={{ fontSize: 12, fontWeight: 600, color: '#52c41a', display: 'block', marginBottom: 8 }}>
+              <DollarCircleOutlined style={{ marginRight: 4 }} />Payment Proofs {payments.length > 0 ? `(${payments.length})` : ''}
+            </Text>
+            {payments.length === 0 ? (
+              <Text type="secondary" style={{ fontSize: 12 }}>No payment document attached.</Text>
+            ) : (
+              payments.slice().reverse().map((p, i) => (
+                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 12px', borderRadius: 10, background: 'linear-gradient(135deg,#52c41a12,#52c41a08)', border: '1.5px solid #52c41a44', marginBottom: 8 }}>
+                  <div style={{ width: 36, height: 36, borderRadius: 8, background: 'linear-gradient(135deg,#52c41a,#73d13d)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                    <FileTextOutlined style={{ color: '#fff', fontSize: 16 }} />
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    {p.amount != null && <Text strong style={{ color: '#52c41a', fontSize: 13, display: 'block' }}>₹{p.amount.toLocaleString()}{p.paidBy ? ` — ${p.paidBy}` : ''}</Text>}
+                    <Text type="secondary" style={{ fontSize: 11 }}>{p.paidDate ? new Date(p.paidDate).toLocaleString() : 'Uploaded as payment proof'}</Text>
+                  </div>
+                  {p.proofUrl && (
+                    <Button size="small" icon={<DownloadOutlined />} onClick={() => window.open(p.proofUrl, '_blank')} style={{ color: '#52c41a', borderColor: '#52c41a' }}>View</Button>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
+          );
+        })()}
+      </Modal>
+
+      {/* ── LR Copy View Modal ── */}
+      <Modal
+        title={<Space><FileTextOutlined style={{ color: '#1890ff' }} /><Text strong>LR Copy</Text></Space>}
+        open={!!viewLRCopyModal}
+        onCancel={() => setViewLRCopyModal(null)}
+        footer={[<Button key="close" onClick={() => setViewLRCopyModal(null)}>Close</Button>]}
+        width={460}
+        centered
+      >
+        {viewLRCopyModal && (
+          <div style={{ marginTop: 8 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '14px 16px', borderRadius: 10, background: 'linear-gradient(135deg,#1890ff12,#1890ff08)', border: '1.5px solid #1890ff33', marginBottom: 16 }}>
+              <div style={{ width: 44, height: 44, borderRadius: 10, background: 'linear-gradient(135deg,#1890ff,#40a9ff)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                <FileTextOutlined style={{ color: '#fff', fontSize: 20 }} />
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <Text strong style={{ color: '#1890ff', fontSize: 13, display: 'block' }}>LR Document</Text>
+                <Text type="secondary" style={{ fontSize: 11 }}>LR {viewLRCopyModal.lrNumber} · {viewLRCopyModal.transportCompany}</Text>
+              </div>
+              <Space>
+                <Button size="small" icon={<EyeOutlined />} style={{ color: '#1890ff', borderColor: '#1890ff' }}
+                  onClick={() => viewFile(viewLRCopyModal.lrCopyFile)}>View</Button>
+                <Button size="small" icon={<DownloadOutlined />} style={{ color: '#1890ff', borderColor: '#1890ff' }}
+                  onClick={() => downloadFile(viewLRCopyModal.lrCopyFile, `LR-${viewLRCopyModal.lrNumber || 'copy'}`)}>Download</Button>
+              </Space>
+            </div>
+            <Descriptions bordered size="small" column={2}>
+              <Descriptions.Item label="LR Number"><Text strong style={{ color: '#1890ff' }}>{viewLRCopyModal.lrNumber}</Text></Descriptions.Item>
+              <Descriptions.Item label="Lorry No"><Text strong>{viewLRCopyModal.lorryNo}</Text></Descriptions.Item>
+              <Descriptions.Item label="Transport Co." span={2}>{viewLRCopyModal.transportCompany}</Descriptions.Item>
+              <Descriptions.Item label="Supplier">{viewLRCopyModal.supplier}</Descriptions.Item>
+              <Descriptions.Item label="Expected Delivery">{viewLRCopyModal.expectedDelivery}</Descriptions.Item>
+            </Descriptions>
+          </div>
+        )}
+      </Modal>
+
+      {/* ── Taken Modal ── */}
+      <Modal
+        title={<Space><CarOutlined style={{ color: '#B11E6A' }} /><Text strong>Mark as Taken — Upload Proof</Text></Space>}
+        open={showTakenModal}
+        onCancel={() => { setShowTakenModal(false); setTakenTarget(null); takenForm.resetFields(); }}
+        footer={null}
+        width={480}
+        centered
+      >
+        {takenTarget && (
+          <Form form={takenForm} layout="vertical" onFinish={(vals) => {
+            const proofFile = vals.pickup_proof?.fileList?.[0]?.name || (takenTarget.takenProof || null);
+            setDispatchTrackingOrders(prev => prev.map(o => o.key === takenTarget.key ? {
+              ...o, takenStatus: 'taken', takenProof: proofFile, gPayNumber: vals.gpay_number || null
+            } : o));
+            // Notify dispatch & financial pages via localStorage
+            const pickupList = JSON.parse(localStorage.getItem('hng_pickup_expenses') || '[]');
+            const exists = pickupList.find(x => x.orderId === takenTarget.orderId);
+            if (!exists) {
+              pickupList.push({
+                key: takenTarget.key, orderId: takenTarget.orderId, date: new Date().toISOString().slice(0, 10),
+                supplier: takenTarget.supplier, item: takenTarget.item, amount: takenTarget.amount,
+                pickupEmpId: takenTarget.pickupEmpId, pickupEmpName: takenTarget.pickupEmpName,
+                category: 'PICKUP', gPayNumber: vals.gpay_number || null, proof: proofFile,
+                paymentStatus: 'Unpaid',
+              });
+              localStorage.setItem('hng_pickup_expenses', JSON.stringify(pickupList));
+            }
+            enqueueSnackbar('Marked as Taken successfully!', { variant: 'success' });
+            setShowTakenModal(false);
+            setTakenTarget(null);
+            takenForm.resetFields();
+          }}>
+            <div style={{ background: isDark ? '#1a1a2e' : '#fafcff', borderRadius: 10, padding: '12px 14px', marginBottom: 16, border: `1px solid ${isDark ? '#2a2d40' : '#e8f4ff'}` }}>
+              <Text strong style={{ display: 'block', marginBottom: 4 }}>{takenTarget.item}</Text>
+              <Text style={{ color: '#B11E6A' }}>{takenTarget.supplier}</Text>
+              <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>Order: {takenTarget.orderId} · LR: {takenTarget.lrNumber}</Text>
+              <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>Pickup: {takenTarget.pickupEmpName} ({takenTarget.pickupEmpId})</Text>
+            </div>
+            <Form.Item label="Pickup Person Payment — Upload Proof" name="pickup_proof">
+              <Upload maxCount={1} customRequest={makeUpload('purchase/pickup-proofs')} accept=".pdf,.jpg,.jpeg,.png">
+                <Button icon={<UploadOutlined />} style={{ borderColor: '#B11E6A', color: '#B11E6A' }}>Upload Proof (PDF / Image)</Button>
+              </Upload>
+            </Form.Item>
+            {takenTarget.takenProof && (
+              <div style={{ marginBottom: 12, padding: '8px 12px', background: '#52c41a10', border: '1px solid #52c41a33', borderRadius: 8 }}>
+                <CheckCircleOutlined style={{ color: '#52c41a', marginRight: 6 }} />
+                <Text style={{ fontSize: 12, color: '#52c41a' }}>Already uploaded: {takenTarget.takenProof}</Text>
+              </div>
+            )}
+            <Form.Item label="G Pay Number" name="gpay_number" rules={[{ required: true, message: 'Enter G Pay number' }]}>
+              <Input prefix={<PhoneOutlined />} placeholder="Enter G Pay number for payment" style={{ borderRadius: 8 }} maxLength={15} />
+            </Form.Item>
+            <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+              <Button block onClick={() => { setShowTakenModal(false); takenForm.resetFields(); }}>Cancel</Button>
+              <Button block type="primary" htmlType="submit" style={{ background: '#B11E6A', border: 'none' }}>Confirm Taken</Button>
+            </div>
+          </Form>
+        )}
+      </Modal>
+
+      {/* ── Received Order Modal ── */}
+      <Modal
+        title={<Space><CheckCircleOutlined style={{ color: '#52c41a' }} /><Text strong>Received Order — Invoice Verification</Text></Space>}
+        open={showReceivedModal}
+        onCancel={() => { setShowReceivedModal(false); setReceivedTarget(null); }}
+        footer={null}
+        width={760}
+        centered
+        style={{ top: 20 }}
+      >
+        {receivedTarget && (
+          <div>
+            {/* Order info */}
+            <div style={{ background: isDark ? '#1a1a2e' : '#fafcff', borderRadius: 10, padding: '10px 14px', marginBottom: 16, border: `1px solid ${isDark ? '#2a2d40' : '#e8f4ff'}` }}>
+              <Space wrap>
+                <Text strong style={{ color: '#B11E6A' }}>{receivedTarget.orderId}</Text>
+                <Text strong>{receivedTarget.item}</Text>
+                <Text type="secondary">{receivedTarget.supplier}</Text>
+                <Text type="secondary">LR: {receivedTarget.lrNumber} · {receivedTarget.lorryNo}</Text>
+              </Space>
+            </div>
+
+            {/* Unresolved "attach to upcoming order" shortfall from this same vendor */}
+            {dispatchTrackingOrders.filter(o => o.vendorId === receivedTarget.vendorId && o.missedBy === 'vendor' && o.vendorMissedAction === 'attach_upcoming' && !o.missingResolved && o.key !== receivedTarget.key).length > 0 && (
+              <Alert
+                type="info"
+                showIcon
+                icon={<ExclamationCircleOutlined />}
+                style={{ marginBottom: 12, borderRadius: 8 }}
+                message={
+                  <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                    <Text strong style={{ fontSize: 13 }}>Previous Order Missing by {receivedTarget.supplier}</Text>
+                    {dispatchTrackingOrders.filter(o => o.vendorId === receivedTarget.vendorId && o.missedBy === 'vendor' && o.vendorMissedAction === 'attach_upcoming' && !o.missingResolved && o.key !== receivedTarget.key).map(o => (
+                      <div key={o.key} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, width: '100%' }}>
+                        <Text style={{ fontSize: 12 }}>· {o.orderId} — {o.item}: {(o.missingItems || []).map(m => `${m.name} short by ${m.missing}`).join(', ')}</Text>
+                        <Button
+                          size="small"
+                          onClick={async () => {
+                            try {
+                              await resolveMissingOrderMutation(o.key).unwrap();
+                              enqueueSnackbar('Marked as checked/updated.', { variant: 'success' });
+                            } catch (err) {
+                              enqueueSnackbar(err?.data?.message || err?.data || 'Failed to update', { variant: 'error' });
+                            }
+                          }}
+                        >
+                          Mark Checked / Updated
+                        </Button>
+                      </div>
+                    ))}
+                  </Space>
+                }
+              />
+            )}
+
+            {/* Invoice upload + scan */}
+            <div style={{ background: isDark ? '#161622' : '#f8f9ff', borderRadius: 10, padding: '12px 14px', marginBottom: 16, border: `1px dashed ${isDark ? '#3a3a5a' : '#d6e4ff'}` }}>
+              <Text strong style={{ display: 'block', marginBottom: 8, fontSize: 13 }}>Invoice Upload & Camera</Text>
+              <Space wrap>
+                <Upload maxCount={1} beforeUpload={(file) => { setReceivedInvoiceFile(file); return false; }} accept=".pdf,.jpg,.jpeg,.png">
+                  <Button icon={<UploadOutlined />} style={{ borderColor: '#1890ff', color: '#1890ff' }}>Upload Invoice</Button>
+                </Upload>
+                <Button icon={<CameraOutlined />} style={{ borderColor: '#722ed1', color: '#722ed1' }} onClick={() => openCameraCapture(setReceivedInvoiceFile)} >
+                  Open Camera
+                </Button>
+                <Button
+                  type="primary"
+                  icon={invoiceScanLoading ? <SyncOutlined spin /> : <ThunderboltOutlined />}
+                  loading={invoiceScanLoading}
+                  onClick={handleInvoiceScan}
+                  style={{ background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none' }}
+                >
+                  {invoiceScanned ? 'Re-Scan Invoice' : 'AI Scan & Fetch Products'}
+                </Button>
+                {receivedInvoiceFile && <Text type="secondary" style={{ fontSize: 12 }}>{receivedInvoiceFile.name}</Text>}
+              </Space>
+              {invoiceScanned && invoiceProducts.length > 0 && (
+                <div style={{ marginTop: 10 }}>
+                  <Text style={{ fontSize: 12, marginRight: 10 }}>Purchase Price is:</Text>
+                  <Radio.Group
+                    size="small"
+                    value={receivePriceType}
+                    onChange={(e) => setReceivePriceType(e.target.value)}
+                    optionType="button"
+                    buttonStyle="solid"
+                  >
+                    <Radio.Button value="exclusive">GST Exclusive</Radio.Button>
+                    <Radio.Button value="inclusive">GST Inclusive</Radio.Button>
+                  </Radio.Group>
+                  <Text type="secondary" style={{ fontSize: 11, marginLeft: 10 }}>
+                    {receivePriceType === 'inclusive' ? 'Tax is backed out before the batch cost is saved.' : 'Price is saved as-is (before GST).'}
+                  </Text>
+                </div>
+              )}
+            </div>
+
+            {/* Scanned invoice details — the header fields AI actually read off the uploaded
+                document (invoice no / vendor / GST / address / amount), for Purchase to check
+                against the PO before confirming, not just the qty table below. */}
+            {invoiceScanned && scannedInvoiceDetails && (
+              <div style={{ marginBottom: 16, padding: '12px 14px', borderRadius: 10, background: isDark ? '#0f1a0f' : '#f6fff8', border: '1px solid #52c41a33' }}>
+                <Space size={4} style={{ marginBottom: 8 }}>
+                  <RobotOutlined style={{ color: '#52c41a' }} />
+                  <Text style={{ fontWeight: 700, color: '#52c41a', fontSize: 13 }}>AI-Scanned Invoice Details</Text>
+                </Space>
+                <Row gutter={[8, 8]}>
+                  {[
+                    { label: 'Invoice No', val: scannedInvoiceDetails.invoiceNo || '-' },
+                    { label: 'Vendor Name', val: scannedInvoiceDetails.vendorName || '-' },
+                    { label: 'GST Number', val: scannedInvoiceDetails.vendorGST || '-' },
+                    { label: 'Vendor Phone', val: scannedInvoiceDetails.vendorPhone || '-' },
+                    { label: 'Vendor Address', val: scannedInvoiceDetails.vendorAddress || '-', xs: 24 },
+                    // Amount fields are editable — the AI's read is only a starting point. A manual
+                    // correction here is exactly what gets saved: handleConfirmReceived posts these
+                    // straight from scannedInvoiceDetails, and the CGST/SGST/IGST breakdown feeds
+                    // this order's Input GST in the GST Report. Shown as inputs (not hidden zero
+                    // rows) so a breakdown the AI missed can still be filled in.
+                    { label: 'Amount (Taxable)', editKey: 'amount' },
+                    { label: 'CGST', editKey: 'cgstAmount' },
+                    { label: 'SGST', editKey: 'sgstAmount' },
+                    { label: 'IGST', editKey: 'igstAmount' },
+                    { label: 'GST Amount (Total)', editKey: 'gstAmount' },
+                    { label: 'Total Amount', editKey: 'totalAmount' },
+                  ].map((d, i) => (
+                    <Col xs={d.xs || 12} sm={d.xs || 8} key={i}>
+                      <Text style={{ fontSize: 10, color: '#888', display: 'block' }}>{d.label}</Text>
+                      {d.editKey ? (
+                        <InputNumber
+                          size="small"
+                          min={0}
+                          prefix="₹"
+                          value={scannedInvoiceDetails[d.editKey] ?? null}
+                          onChange={(v) => setScannedInvoiceDetails((prev) => ({ ...prev, [d.editKey]: v }))}
+                          style={{ width: '100%' }}
+                        />
+                      ) : (
+                        <Text strong style={{ fontSize: 12 }}>{d.val}</Text>
+                      )}
+                    </Col>
+                  ))}
+                </Row>
+                {scannedInvoiceDetails.scopedToOrder && extraInvoiceProducts.some((e) => !linkedExtraKeys.has(e.key)) && (
+                  <div style={{ marginTop: 10, padding: '8px 12px', borderRadius: 8, background: isDark ? '#1a1500' : '#fffbe6', border: '1px solid #fa8c1644' }}>
+                    <Space>
+                      <ExclamationCircleOutlined style={{ color: '#fa8c16' }} />
+                      <Text style={{ fontSize: 12, color: '#d46b08' }}>
+                        This invoice also lists product(s) not on this PO (see "Extra items" below) — the figures above are scoped to just this order's own products, verified by name. Invoice's full printed total: ₹{Number(scannedInvoiceDetails.invoiceGrandTotal || 0).toLocaleString()}.
+                      </Text>
+                    </Space>
+                  </div>
+                )}
+                {effectiveQtyVerification && (
+                  <div style={{
+                    marginTop: 10, padding: '8px 12px', borderRadius: 8,
+                    background: effectiveQtyVerification.missingItemsCount > 0 ? (isDark ? '#1a1500' : '#fffbe6') : (isDark ? '#0f1a0f' : '#f6fff8'),
+                    border: `1px solid ${effectiveQtyVerification.missingItemsCount > 0 ? '#fa8c1644' : '#52c41a33'}`,
+                  }}>
+                    <Text style={{ fontSize: 12, fontWeight: 700, display: 'block', marginBottom: 4 }}>Ordered vs Invoice Qty — by Product Name</Text>
+                    <Space size={16} wrap>
+                      <Text style={{ fontSize: 12 }}>Ordered Qty (Total): <Text strong>{effectiveQtyVerification.totalOrderedQty}</Text></Text>
+                      <Text style={{ fontSize: 12 }}>Invoice Qty (Total): <Text strong>{effectiveQtyVerification.totalInvoiceQty}</Text></Text>
+                      <Text style={{ fontSize: 12 }}>Missing Qty (Total): <Text strong style={{ color: effectiveQtyVerification.missingQtyTotal > 0 ? '#fa541c' : '#52c41a' }}>{effectiveQtyVerification.missingQtyTotal}</Text></Text>
+                      <Text style={{ fontSize: 12, color: effectiveQtyVerification.missingItemsCount > 0 ? '#d46b08' : '#52c41a' }}>
+                        {effectiveQtyVerification.missingItemsCount > 0
+                          ? `${effectiveQtyVerification.missingItemsCount} item(s) short vs invoice (out of ${invoiceProducts.length})`
+                          : 'All item quantities match the invoice'}
+                      </Text>
+                    </Space>
+                  </div>
+                )}
+                {scannedInvoiceDetails.vendorMismatch && (
+                  <div style={{ marginTop: 10, padding: '8px 12px', borderRadius: 8, background: isDark ? '#1a1500' : '#fffbe6', border: '1px solid #fa8c1644' }}>
+                    <Space>
+                      <WarningOutlined style={{ color: '#fa8c16' }} />
+                      <Text style={{ fontSize: 12, color: '#d46b08' }}>
+                        Invoice vendor "{scannedInvoiceDetails.vendorName}" doesn't match this PO's vendor "{scannedInvoiceDetails.poVendorName}" — double-check before confirming.
+                      </Text>
+                    </Space>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Products table */}
+            {invoiceScanned && invoiceProducts.length > 0 && (
+              <div style={{ marginBottom: 16 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+                  <Text strong style={{ fontSize: 13 }}>Products from Invoice — {invoiceProducts.length} item(s)</Text>
+                  <Text style={{ fontSize: 12, color: getMissingItems().length > 0 ? '#fa8c16' : '#52c41a' }}>
+                    {getMissingItems().length > 0 ? `${getMissingItems().length} item(s) with shortfall` : 'All items fully received'}
+                  </Text>
+                </div>
+                <Table
+                  size="small"
+                  dataSource={effectiveInvoiceProducts}
+                  rowKey="key"
+                  pagination={false}
+                  columns={[
+                    { title: 'Product', dataIndex: 'name', render: v => <Text strong style={{ fontSize: 12 }}>{v}</Text> },
+                    { title: 'HSN', dataIndex: 'hsn', width: 70, render: v => <Text type="secondary" style={{ fontSize: 11 }}>{v}</Text> },
+                    { title: 'GST', dataIndex: 'gst', width: 60, render: v => <Tag color="blue" style={{ fontSize: 10, padding: '0 4px' }}>{v}</Tag> },
+                    {
+                      title: 'Purchase Price', key: 'purchase_price', width: 130,
+                      render: (_, r) => {
+                        const price = productPrices[r.key] || 0;
+                        const basePrice = receivePriceType === 'inclusive' && r.gstPercent > 0
+                          ? price / (1 + r.gstPercent / 100)
+                          : price;
+                        return (
+                          <div>
+                            <InputNumber
+                              size="small"
+                              min={0}
+                              prefix="₹"
+                              value={price}
+                              onChange={v => setProductPrices(prev => ({ ...prev, [r.key]: v || 0 }))}
+                              style={{ width: 100 }}
+                            />
+                            {receivePriceType === 'inclusive' && r.gstPercent > 0 && price > 0 && (
+                              <Text type="secondary" style={{ fontSize: 10, display: 'block' }}>≈ ₹{basePrice.toFixed(2)} excl. GST</Text>
+                            )}
+                          </div>
+                        );
+                      }
+                    },
+                    { title: 'Ordered', dataIndex: 'originalQty', width: 80, render: (v, r) => <Text>{v} {r.unit}</Text> },
+                    {
+                      title: 'Invoice Qty', key: 'invoice_qty', width: 110,
+                      render: (_, r) => {
+                        const invQty = r.invoiceQty ?? 0;
+                        const diff = invQty - r.originalQty;
+                        return (
+                          <>
+                            <Space size={4}>
+                              <Text>{invQty} {r.unit}</Text>
+                              {r.matched === false && (
+                                <Tag color="red" style={{ fontSize: 9, padding: '0 4px', margin: 0 }}>Not on invoice</Tag>
+                              )}
+                              {r.matched !== false && diff < 0 && (
+                                <Tag color="warning" style={{ fontSize: 9, padding: '0 4px', margin: 0 }}>Missing {-diff}</Tag>
+                              )}
+                              {r.matched !== false && diff > 0 && (
+                                <Tag color="blue" style={{ fontSize: 9, padding: '0 4px', margin: 0 }}>Extra {diff}</Tag>
+                              )}
+                            </Space>
+                            {r.linkedExtras && (
+                              <Text style={{ fontSize: 10, color: '#52c41a', display: 'block', marginTop: 2 }}>
+                                Invoiced as {r.linkedExtras.map((e) => `"${e.itemName}"`).join(', ')}
+                              </Text>
+                            )}
+                          </>
+                        );
+                      }
+                    },
+                    {
+                      title: 'Received Qty', key: 'received_qty', width: 130,
+                      render: (_, r) => (
+                        <Space size={4}>
+                          <Button
+                            size="small" icon={<MinusOutlined />}
+                            style={{ width: 24, height: 24, padding: 0, minWidth: 24, borderRadius: 4, borderColor: (productQtys[r.key] || 0) <= 0 ? '#d9d9d9' : '#ff4d4f', color: (productQtys[r.key] || 0) <= 0 ? '#d9d9d9' : '#ff4d4f' }}
+                            disabled={(productQtys[r.key] || 0) <= 0}
+                            onClick={() => setProductQtys(prev => ({ ...prev, [r.key]: Math.max(0, (prev[r.key] || r.originalQty) - 1) }))}
+                          />
+                          <InputNumber
+                            size="small"
+                            min={0} max={r.originalQty}
+                            value={productQtys[r.key] ?? r.originalQty}
+                            onChange={v => setProductQtys(prev => ({ ...prev, [r.key]: v || 0 }))}
+                            style={{ width: 60, textAlign: 'center' }}
+                          />
+                          <Button
+                            size="small" icon={<PlusOutlined />}
+                            style={{ width: 24, height: 24, padding: 0, minWidth: 24, borderRadius: 4, borderColor: (productQtys[r.key] || 0) >= r.originalQty ? '#d9d9d9' : '#52c41a', color: (productQtys[r.key] || 0) >= r.originalQty ? '#d9d9d9' : '#52c41a' }}
+                            disabled={(productQtys[r.key] || 0) >= r.originalQty}
+                            onClick={() => setProductQtys(prev => ({ ...prev, [r.key]: Math.min(r.originalQty, (prev[r.key] || r.originalQty) + 1) }))}
+                          />
+                        </Space>
+                      )
+                    },
+                    {
+                      title: 'Status / Notes', key: 'notes', width: 180,
+                      render: (_, r) => {
+                        const received = productQtys[r.key] ?? r.originalQty;
+                        const isFull = received >= r.originalQty;
+                        return (
+                          <Space direction="vertical" size={3} style={{ width: '100%' }}>
+                            <Tag color={isFull ? 'success' : 'warning'} style={{ borderRadius: 8, fontSize: 10 }}>
+                              {isFull ? 'Full' : `Missing ${r.originalQty - received}`}
+                            </Tag>
+                            {!isFull && (
+                              <Input
+                                size="small"
+                                placeholder="Reason for shortfall..."
+                                value={productNotes[r.key] || ''}
+                                onChange={e => setProductNotes(prev => ({ ...prev, [r.key]: e.target.value }))}
+                                style={{ fontSize: 11, borderRadius: 6 }}
+                              />
+                            )}
+                          </Space>
+                        );
+                      }
+                    },
+                  ]}
+                />
+
+                {/* Total summary */}
+                <div style={{ marginTop: 10, padding: '8px 12px', background: isDark ? '#1e2235' : '#f0f7ff', borderRadius: 8, border: `1px solid ${isDark ? '#2a3040' : '#bae0ff'}`, display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+                  <Text style={{ fontSize: 12 }}>Total Items: <Text strong>{invoiceProducts.length}</Text></Text>
+                  <Text style={{ fontSize: 12 }}>Total Qty Ordered: <Text strong>{invoiceProducts.reduce((s, p) => s + p.originalQty, 0)}</Text></Text>
+                  <Text style={{ fontSize: 12 }}>Total Received: <Text strong style={{ color: '#52c41a' }}>{invoiceProducts.reduce((s, p) => s + (productQtys[p.key] ?? p.originalQty), 0)}</Text></Text>
+                  {getMissingItems().length > 0 && <Text style={{ fontSize: 12 }}>Missing: <Text strong style={{ color: '#fa8c16' }}>{getMissingItems().reduce((s, m) => s + m.missingQty, 0)}</Text></Text>}
+                </div>
+              </div>
+            )}
+
+            {/* Extra items — on the invoice but not part of this PO. Each row optionally
+                merges into an existing Inventory item via Item Code (auto-filled when the
+                item's name matched exactly); left blank, confirming creates a new item so the
+                delivered goods still reach Stock Inventory instead of being silently dropped. */}
+            {invoiceScanned && extraInvoiceProducts.length > 0 && (
+              <div style={{ marginBottom: 16 }}>
+                <Alert
+                  type="warning"
+                  showIcon
+                  style={{ marginBottom: 8, borderRadius: 8 }}
+                  message={`${extraInvoiceProducts.length} item(s) found on the invoice that weren't part of this order`}
+                  description="Uncheck any that shouldn't be added to stock. For the rest, pick an Item Code to merge into an existing product — leave blank to add it as a brand-new Inventory item."
+                />
+                <Table
+                  size="small"
+                  dataSource={extraInvoiceProducts}
+                  rowKey="key"
+                  pagination={false}
+                  columns={[
+                    {
+                      title: 'Add to Stock', key: 'included', width: 90,
+                      render: (_, r) => (
+                        <Switch size="small" checked={!!extraProductIncluded[r.key]} onChange={(v) => relinkExtraInvoiceLine(r, extraProductCodes[r.key] || '', v)} />
+                      )
+                    },
+                    { title: 'Product (from invoice)', dataIndex: 'itemName', render: v => <Text strong style={{ fontSize: 12 }}>{v}</Text> },
+                    { title: 'Qty', dataIndex: 'qty', width: 70, render: (v, r) => <Text>{v} {r.unit}</Text> },
+                    { title: 'Price', dataIndex: 'price', width: 80, render: v => <Text>₹{formatRate(v || 0)}</Text> },
+                    {
+                      title: 'Item Code (optional — merges into existing item)', key: 'itemCode', width: 260,
+                      render: (_, r) => {
+                        const disabled = !extraProductIncluded[r.key];
+                        return (
+                          <div>
+                            <Select
+                              size="small"
+                              allowClear
+                              showSearch
+                              disabled={disabled}
+                              value={extraProductCodes[r.key] || undefined}
+                              placeholder="Leave blank to add as new item"
+                              style={{ width: '100%' }}
+                              options={inventoryItems.map((i) => ({ value: i.code, label: `${i.code} — ${i.name} (${formatQty(i.current)} ${i.unit})` }))}
+                              filterOption={(input, option) => (option?.label || '').toLowerCase().includes(input.toLowerCase())}
+                              onChange={(v) => relinkExtraInvoiceLine(r, v || '', !!extraProductIncluded[r.key])}
+                            />
+                            {linkedExtraKeys.has(r.key) ? (
+                              <Text style={{ fontSize: 10, color: '#52c41a', display: 'block', marginTop: 2 }}>
+                                Same item as ordered "{effectiveInvoiceProducts.find((p) => p.linkedExtras?.includes(r))?.name}" — counted as received on that line above.
+                              </Text>
+                            ) : r.matchedItemCode ? (
+                              <Text style={{ fontSize: 10, color: '#52c41a', display: 'block', marginTop: 2 }}>
+                                Matches existing item "{r.matchedItemName}" by name.
+                              </Text>
+                            ) : (
+                              <Text style={{ fontSize: 10, color: '#fa8c16', display: 'block', marginTop: 2 }}>
+                                No exact name match in Inventory — pick the correct item above, or leave blank to add new.
+                              </Text>
+                            )}
+                          </div>
+                        );
+                      }
+                    },
+                  ]}
+                />
+              </div>
+            )}
+
+            {/* Missing items summary */}
+            {invoiceScanned && getMissingItems().length > 0 && (
+              <div style={{ marginBottom: 16 }}>
+                <Text strong style={{ display: 'block', marginBottom: 8, color: '#fa8c16', fontSize: 13 }}>
+                  <ExclamationCircleOutlined style={{ marginRight: 6 }} />Missing Items Summary
+                </Text>
+                <Table
+                  size="small"
+                  dataSource={getMissingItems()}
+                  rowKey="key"
+                  pagination={false}
+                  style={{ borderRadius: 8, overflow: 'hidden', border: '1px solid #fa8c1633' }}
+                  columns={[
+                    { title: 'Item', dataIndex: 'name', render: v => <Text strong style={{ fontSize: 12 }}>{v}</Text> },
+                    { title: 'HSN', dataIndex: 'hsn', width: 70, render: v => <Text type="secondary" style={{ fontSize: 11 }}>{v}</Text> },
+                    { title: 'Ordered', dataIndex: 'originalQty' },
+                    { title: 'Received', dataIndex: 'receivedQty', render: v => <Text style={{ color: '#52c41a' }}>{v}</Text> },
+                    { title: 'Missing', dataIndex: 'missingQty', render: v => <Text strong style={{ color: '#ff4d4f' }}>{v}</Text> },
+                    {
+                      title: 'Reason', key: 'reason',
+                      render: (_, r) => <Text type="secondary" style={{ fontSize: 11 }}>{productNotes[r.key] || '-'}</Text>
+                    },
+                  ]}
+                />
+
+                {/* Partial received section */}
+                <div style={{ marginTop: 10, padding: '12px 14px', background: isDark ? '#1e1a10' : '#fffbe6', borderRadius: 8, border: '1px solid #fa8c1633' }}>
+                  <Checkbox
+                    checked={partialReceived}
+                    onChange={e => { setPartialReceived(e.target.checked); if (!e.target.checked) { setMissedBy(null); setVendorMissedAction(null); } }}
+                    style={{ fontWeight: 600, marginBottom: partialReceived ? 10 : 0 }}
+                  >
+                    Partially Received
+                  </Checkbox>
+                  {partialReceived && (
+                    <div style={{ marginTop: 10 }}>
+                      <div style={{ marginBottom: 8 }}>
+                        <Text style={{ fontSize: 12, marginRight: 8 }}>Missed by:</Text>
+                        <Select size="small" placeholder="Select cause" value={missedBy} onChange={v => { setMissedBy(v); setVendorMissedAction(null); }} style={{ width: 140 }}>
+                          <Option value="vendor">Vendor</Option>
+                          <Option value="lorry">Lorry</Option>
+                        </Select>
+                      </div>
+                      {missedBy === 'vendor' && (
+                        <div style={{ padding: '10px 12px', background: isDark ? '#1e2235' : '#f0f4ff', borderRadius: 8, border: `1px solid ${isDark ? '#2a3040' : '#d6e4ff'}` }}>
+                          <Text style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>Vendor Responsibility — Choose action for missing items:</Text>
+                          <Select
+                            size="small"
+                            placeholder="Select vendor action"
+                            value={vendorMissedAction}
+                            onChange={setVendorMissedAction}
+                            style={{ width: '100%', marginBottom: 6 }}
+                          >
+                            <Option value="new_order">Send Immediately as a New Order</Option>
+                            <Option value="attach_upcoming">Attach with Upcoming Order</Option>
+                          </Select>
+                          {vendorMissedAction && (
+                            <Alert
+                              type="info"
+                              showIcon
+                              style={{ borderRadius: 6, fontSize: 11 }}
+                              message={vendorMissedAction === 'new_order'
+                                ? `Dispatch team will be reminded to raise a new order for missing items from ${receivedTarget.supplier}.`
+                                : `Missing items will be attached to the next order from ${receivedTarget.supplier}. Dispatch team will be notified.`}
+                            />
+                          )}
+                        </div>
+                      )}
+                      {missedBy === 'lorry' && (
+                        <div style={{ padding: '10px 12px', background: isDark ? '#1a1022' : '#f9f0ff', borderRadius: 8, border: `1px solid ${isDark ? '#3a1a5a' : '#d3adf7'}` }}>
+                          <Space>
+                            <SyncOutlined style={{ color: '#722ed1' }} />
+                            <Text style={{ fontSize: 12 }}>Lorry Responsibility — The order will be <Text strong style={{ color: '#722ed1' }}>reopened and restarted</Text> from the order stage. The same delivery process will continue for the partial order.</Text>
+                          </Space>
+                          <div style={{ marginTop: 6, padding: '6px 10px', background: '#722ed120', borderRadius: 6 }}>
+                            <Text style={{ fontSize: 11, color: '#722ed1' }}>Status will be set to: <Text strong>Partial Delivery — Restarted</Text></Text>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Confirm button */}
+            {invoiceScanned && (
+              <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                <Button block onClick={() => { setShowReceivedModal(false); setReceivedTarget(null); }}>Cancel</Button>
+                <Button
+                  block type="primary"
+                  loading={receivedConfirmLoading}
+                  style={{ background: getMissingItems().length > 0 ? '#fa8c16' : '#52c41a', border: 'none' }}
+                  onClick={handleConfirmReceived}
+                >
+                  {getMissingItems().length > 0 ? 'Confirm Partial Receipt' : 'Confirm Full Receipt'}
+                </Button>
+              </div>
+            )}
+            {!invoiceScanned && (
+              <div style={{ textAlign: 'center', padding: '16px 0', color: isDark ? '#aaa' : '#888', fontSize: 13 }}>
+                <QrcodeOutlined style={{ fontSize: 32, display: 'block', marginBottom: 8, color: '#B11E6A55' }} />
+                Upload invoice or use AI Scan to fetch product details
+              </div>
+            )}
+          </div>
+        )}
+      </Modal>
+    </div>
+  );
+}

@@ -1,0 +1,40 @@
+const express = require('express');
+const router = express.Router();
+const ctrl = require('./dispatch.controller');
+const { protect } = require('../../middleware/auth');
+const upload = require('../../config/multer');
+
+router.use(protect);
+
+router.get('/', ctrl.getDispatches);
+router.get('/today', ctrl.getTodaysDispatches);
+router.get('/pending', ctrl.getPendingDispatches);
+router.get('/stats', ctrl.getDispatchStats);
+router.get('/transports', ctrl.getTransports);
+router.patch('/transports/:id/status', ctrl.updateTransportStatus);
+router.get('/transport-names', ctrl.getTransportNames);
+router.get('/pickups', ctrl.getPickupOrders);
+router.get('/pickups/today', ctrl.getTodaysPickupOrders);
+router.post('/pickups', ctrl.createPickupOrder);
+router.patch('/pickups/:id', ctrl.updatePickupOrder);
+router.post('/', ctrl.createDispatch);
+router.get('/:id', ctrl.getDispatch);
+router.patch('/:id/draft', ctrl.saveAsDraft);
+router.post('/:id/upload-invoice', upload.single('invoice'), ctrl.uploadInvoice);
+router.post('/:id/verify-invoice', ctrl.verifyInvoice);
+router.post('/:id/box-photos', upload.array('photos', 10), ctrl.uploadBoxPhotos);
+router.post('/:id/box-photos/scan', ctrl.scanBoxPhotos);
+router.post('/:id/box-photos/remove', ctrl.removeBoxPhoto);
+router.patch('/:id/box-photo-url', ctrl.addBoxPhotoUrl);
+router.post('/:id/confirm', upload.single('invoice'), ctrl.confirmDispatch);
+router.patch('/:id/lr', upload.single('lr'), ctrl.uploadLR);
+router.post('/:id/scan-lr', ctrl.scanLorryReceipt);
+router.patch('/:id/transport-mismatch', ctrl.reportTransportMismatch);
+router.patch('/:id/lr-mismatch-request', ctrl.requestLrMismatchApproval);
+router.patch('/:id/invoice-mismatch-request', ctrl.requestInvoiceMismatchApproval);
+router.patch('/:id/approval-request', ctrl.requestDispatchApproval);
+router.patch('/:id/items/:itemId/verify', upload.single('photo'), ctrl.verifyItem);
+router.post('/:id/items/:itemId/box-photos', upload.array('photos', 5), ctrl.uploadItemBoxPhotos);
+router.post('/:id/kits/:kitDispatchId/box-photos', upload.array('photos', 1), ctrl.uploadKitBoxPhotos);
+
+module.exports = router;

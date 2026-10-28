@@ -1,0 +1,2151 @@
+import { createApi } from '@reduxjs/toolkit/query/react';
+import api, { scheduleTokenRefresh, clearScheduledRefresh } from '../../api/axios';
+import { setUser, refreshUser, logout as logoutAction } from '../slices/authSlice';
+
+// `timeout` lets an individual endpoint override axios's default 30s client-side
+// timeout — needed for AI endpoints (quotation comparison, invoice/LR scanning) whose
+// own backend-side OpenAI call is deliberately given far longer than 30s to finish.
+const axiosBaseQuery = () => async ({ url, method = 'get', data, params, timeout }) => {
+  try {
+    const result = await api({ url, method, data, params, ...(timeout ? { timeout } : {}) });
+    return { data: result.data };
+  } catch (err) {
+    return {
+      error: {
+        status: err.response?.status,
+        data: err.response?.data?.error || err.message,
+      },
+    };
+  }
+};
+
+export const apiSlice = createApi({
+  reducerPath: 'api',
+  baseQuery: axiosBaseQuery(),
+  // Refetch on tab refocus / network reconnect so a Manager/Head who already has a
+  // list open (e.g. Sales/Operations/Tasks/Dispatch) picks up changes an Executive
+  // made in a different session — RTK Query's cache invalidation only propagates
+  // within the same browser tab, so without this, cross-session updates only show
+  // up once the cache entry naturally expires (60s) and the query remounts.
+  refetchOnFocus: true,
+  refetchOnReconnect: true,
+  tagTypes: [
+    'Auth', 'Staff', 'Claims',
+    'Vendors', 'Purchase', 'PurchaseOrders', 'LocalPurchases', 'PurchaseHistory', 'PurchasePersons',
+    'Dispatch', 'Inventory', 'StockApprovals', 'StockHistory',
+    'Financial', 'ExpensePayments', 'PickupExpenses', 'LocalPurchaseExpenses', 'LrPayments',
+    'Sales', 'Leads', 'Quotations', 'Negotiations', 'Orders', 'Complaints',
+    'Billing', 'BillingParties', 'Invoices',
+    'Reports', 'Notifications', 'Settings', 'Users', 'DeletedRecords',
+    'Parties', 'PartyLedger', 'Expenses', 'Tasks', 'Operations', 'Stickers',
+    'Dashboard', 'Kits', 'Options',
+    'Reminders', 'Transport', 'Pickups', 'HotelDesigns', 'SuggestedTasks', 'TaskInsight',
+    'WhatsApp', 'WhatsAppTemplates', 'WhatsAppEvents', 'WhatsAppMappings',
+    'GstConfig', 'TaskTimeConfig',
+    'MaterialStocks', 'PackagingInvoices',
+    'AlertConfigs', 'ActiveAlerts', 'SnoozedAlerts', 'NotificationSoundConfig',
+    'AiConfig', 'QuotationComparisons',
+    'HiddenQueueRows',
+    'Hrms', 'HrmsGeo',
+    'AssigneeTasks',
+  ],
+  endpoints: (builder) => ({
+
+    // ── Auth ────────────────────────────────────────────────────────────────
+    login: builder.mutation({
+      query: (credentials) => ({ url: '/auth/login', method: 'post', data: credentials }),
+      async onQueryStarted(_, { dispatch, queryFulfilled }) {
+        try {
+          const { data } = await queryFulfilled;
+          dispatch(setUser({
+            user: data.data?.user,
+            token: data.token,
+            refreshToken: data.refreshToken,
+          }));
+          scheduleTokenRefresh(data.token);
+        } catch {}
+      },
+    }),
+    logout: builder.mutation({
+      query: () => ({ url: '/auth/logout', method: 'post' }),
+      async onQueryStarted(_, { dispatch, queryFulfilled }) {
+        await queryFulfilled.catch(() => {});
+        clearScheduledRefresh();
+        dispatch(logoutAction());
+        dispatch(apiSlice.util.resetApiState());
+      },
+    }),
+    getMe: builder.query({
+      query: () => ({ url: '/auth/me' }),
+      providesTags: ['Auth'],
+      // Keep the logged-in user's permissions/tabAccess in sync with the server
+      // (e.g. after an admin edits their access) without requiring a re-login.
+      async onQueryStarted(_, { dispatch, queryFulfilled }) {
+        try {
+          const { data } = await queryFulfilled;
+          if (data?.data?.user) dispatch(refreshUser({ user: data.data.user }));
+        } catch {}
+      },
+    }),
+    changePassword: builder.mutation({
+      query: (data) => ({ url: '/auth/change-password', method: 'patch', data }),
+      // Backend rotates the refresh token on password change (same as login) —
+      // without capturing it here, localStorage keeps the pre-rotation token and
+      // the next refresh (past the short grace window) gets hard-rejected,
+      // force-logging the user out for no apparent reason.
+      async onQueryStarted(_, { dispatch, queryFulfilled }) {
+        try {
+          const { data } = await queryFulfilled;
+          dispatch(setUser({
+            user: data.data?.user,
+            token: data.token,
+            refreshToken: data.refreshToken,
+          }));
+          scheduleTokenRefresh(data.token);
+        } catch {}
+      },
+    }),
+
+    // ── Dashboard ───────────────────────────────────────────────────────────
+    getKPIs: builder.query({
+      query: (filter = 'This Month') => ({ url: '/dashboard/kpis', params: { filter } }),
+      providesTags: ['Dashboard'],
+    }),
+    getRecentOrders: builder.query({
+      query: () => ({ url: '/dashboard/recent-orders' }),
+      providesTags: ['Dashboard'],
+    }),
+    getLowStock: builder.query({
+      query: () => ({ url: '/dashboard/low-stock' }),
+      providesTags: ['Dashboard', 'Inventory'],
+    }),
+    getRevenueTrend: builder.query({
+      query: () => ({ url: '/dashboard/revenue-trend' }),
+      providesTags: ['Dashboard'],
+    }),
+    getOrderStatus: builder.query({
+      query: () => ({ url: '/dashboard/order-status' }),
+      providesTags: ['Dashboard'],
+    }),
+    getTopProducts: builder.query({
+      query: () => ({ url: '/dashboard/top-products' }),
+      providesTags: ['Dashboard'],
+    }),
+    getTaskStatus: builder.query({
+      query: () => ({ url: '/dashboard/task-status' }),
+      providesTags: ['Dashboard'],
+    }),
+
+    // ── Staff ───────────────────────────────────────────────────────────────
+    getStaff: builder.query({
+      query: (params) => ({ url: '/staff', params }),
+      providesTags: ['Staff'],
+    }),
+    getStaffMember: builder.query({
+      query: (id) => ({ url: `/staff/${id}` }),
+      providesTags: (result, error, id) => [{ type: 'Staff', id }],
+    }),
+    createStaff: builder.mutation({
+      query: (data) => ({ url: '/staff', method: 'post', data }),
+      invalidatesTags: ['Staff'],
+    }),
+    updateStaff: builder.mutation({
+      query: ({ id, ...data }) => ({ url: `/staff/${id}`, method: 'put', data }),
+      invalidatesTags: ['Staff'],
+    }),
+    deleteStaff: builder.mutation({
+      query: (id) => ({ url: `/staff/${id}`, method: 'delete' }),
+      invalidatesTags: ['Staff', 'DeletedRecords'],
+    }),
+    updateCredentials: builder.mutation({
+      query: ({ id, ...data }) => ({ url: `/staff/${id}/credentials`, method: 'patch', data }),
+    }),
+    toggleLogin: builder.mutation({
+      query: ({ id, loginEnabled }) => ({ url: `/staff/${id}/toggle-login`, method: 'patch', data: { loginEnabled } }),
+      invalidatesTags: ['Staff'],
+    }),
+    getClaims: builder.query({
+      query: (params) => ({ url: '/staff/claims', params }),
+      providesTags: ['Claims'],
+    }),
+    createClaim: builder.mutation({
+      query: (data) => ({ url: '/staff/claims', method: 'post', data }),
+      invalidatesTags: ['Claims'],
+    }),
+    updateClaimStatus: builder.mutation({
+      query: ({ id, ...data }) => ({ url: `/staff/claims/${id}/status`, method: 'patch', data }),
+      invalidatesTags: ['Claims'],
+    }),
+
+    // ── HRMS (EktaHR, read-only via the backend's /hrms proxy) ──────────────
+    // `staffId` is the EktaHR MongoDB _id from the staff list, not the Employee ID.
+    getHrStaffList: builder.query({
+      query: (params) => ({ url: '/hrms/admin/staff', params }),
+      providesTags: ['Hrms'],
+    }),
+    getHrStaff: builder.query({
+      query: (staffId) => ({ url: `/hrms/admin/staff/${staffId}` }),
+      providesTags: ['Hrms'],
+    }),
+    // Lookups that turn the staff record's template / branch ids into names.
+    getHrStaffSetup: builder.query({
+      query: () => ({ url: '/hrms/admin/staff/setup' }),
+      providesTags: ['Hrms'],
+    }),
+    getHrBranches: builder.query({
+      query: () => ({ url: '/hrms/admin/settings/attendance/branches' }),
+      providesTags: ['Hrms'],
+    }),
+    getHrActiveShift: builder.query({
+      query: (staffId) => ({ url: `/hrms/admin/settings/shift-roster/active/${staffId}` }),
+      providesTags: ['Hrms'],
+    }),
+    getHrShiftSchedule: builder.query({
+      query: ({ staffId, year, month }) => ({ url: `/hrms/admin/settings/shift-roster/schedule/${staffId}`, params: { year, month } }),
+      providesTags: ['Hrms'],
+    }),
+    getHrAttendance: builder.query({
+      query: ({ staffId, year, month }) => ({ url: `/hrms/admin/staff/attendance/staff/${staffId}`, params: { year, month } }),
+      providesTags: ['Hrms'],
+    }),
+    // Attendance day-detail popups — fetched only when a day's chip is clicked.
+    getHrAttendanceFine: builder.query({
+      query: ({ staffId, date }) => ({ url: '/hrms/admin/staff/attendance/fine', params: { staffId, date } }),
+      providesTags: ['Hrms'],
+    }),
+    getHrAttendanceOvertime: builder.query({
+      query: ({ staffId, date }) => ({ url: '/hrms/admin/staff/attendance/overtime', params: { staffId, date } }),
+      providesTags: ['Hrms'],
+    }),
+    getHrLeaveBalances: builder.query({
+      query: (staffId) => ({ url: `/hrms/admin/settings/attendance/leave-templates/staff-balances/${staffId}` }),
+      providesTags: ['Hrms'],
+    }),
+    getHrSalaryStructure: builder.query({
+      query: (staffId) => ({ url: `/hrms/admin/staff/salary-structures/staff/${staffId}` }),
+      providesTags: ['Hrms'],
+    }),
+    // `month` is "Month YYYY", e.g. "October 2026".
+    getHrSalaryOverview: builder.query({
+      query: ({ staffId, month }) => ({ url: `/hrms/admin/staff/overview/detail/${staffId}`, params: { month } }),
+      providesTags: ['Hrms'],
+    }),
+    // `type` is leave | permission | punch | fine | expense | payslip.
+    // punch / fine take a single `date` (YYYY-MM-DD); the others take
+    // staffId, status, search, startDate, endDate.
+    getHrApprovals: builder.query({
+      query: ({ type, ...params }) => ({ url: `/hrms/admin/approvals/${type}`, params }),
+      providesTags: ['Hrms'],
+    }),
+    getHrStaffDocuments: builder.query({
+      query: (staffId) => ({ url: `/hrms/admin/staff/${staffId}/documents` }),
+      providesTags: ['Hrms'],
+    }),
+    // Staff sub-module pages. `date` is YYYY-MM-DD; payroll/incentive `month`
+    // is "Month YYYY" (EktaHR rejects/empties "2026-10").
+    getHrAllStaffAttendance: builder.query({
+      query: (date) => ({ url: '/hrms/admin/staff/attendance/all-staff', params: { date } }),
+      providesTags: ['Hrms'],
+    }),
+    getHrOvertimeList: builder.query({
+      query: (params) => ({ url: '/hrms/admin/staff/overtime/list', params }),
+      providesTags: ['Hrms'],
+    }),
+    getHrPayroll: builder.query({
+      query: (month) => ({ url: '/hrms/admin/staff/payroll', params: { month } }),
+      providesTags: ['Hrms'],
+    }),
+    getHrIncentives: builder.query({
+      query: (month) => ({ url: '/hrms/admin/staff/incentive', params: { month } }),
+      providesTags: ['Hrms'],
+    }),
+
+    // ── HRMS Geo (EktaHR, read-only via /hrms proxy) ────────────────────────
+    // Dates are YYYY-MM-DD; timeline `from`/`to` are ISO datetimes.
+    getGeoDashboard: builder.query({
+      query: () => ({ url: '/hrms/admin/hrms-geo/tracking/dashboard' }),
+      providesTags: ['HrmsGeo'],
+    }),
+    getGeoLive: builder.query({
+      query: () => ({ url: '/hrms/admin/hrms-geo/tracking/live' }),
+      providesTags: ['HrmsGeo'],
+    }),
+    getGeoCustomers: builder.query({
+      query: () => ({ url: '/hrms/admin/hrms-geo/customer' }),
+      providesTags: ['HrmsGeo'],
+    }),
+    getGeoCustomer: builder.query({
+      query: (id) => ({ url: `/hrms/admin/hrms-geo/customer/${id}` }),
+      providesTags: ['HrmsGeo'],
+    }),
+    getGeoEmployeeAccess: builder.query({
+      query: () => ({ url: '/hrms/admin/hrms-geo/settings/employee-access' }),
+      providesTags: ['HrmsGeo'],
+    }),
+    getGeoTravelAllowances: builder.query({
+      query: (params) => ({ url: '/hrms/admin/hrms-geo/travel-allowance', params }),
+      providesTags: ['HrmsGeo'],
+    }),
+    getGeoTaskTravelAllowance: builder.query({
+      query: ({ staffId, date }) => ({ url: '/hrms/admin/hrms-geo/task/travel-allowance', params: { staffId, date } }),
+      providesTags: ['HrmsGeo'],
+    }),
+    getGeoTasks: builder.query({
+      query: () => ({ url: '/hrms/admin/hrms-geo/task' }),
+      providesTags: ['HrmsGeo'],
+    }),
+    getGeoTrackingSummary: builder.query({
+      query: () => ({ url: '/hrms/admin/hrms-geo/tracking/summary' }),
+      providesTags: ['HrmsGeo'],
+    }),
+    getGeoTimeline: builder.query({
+      query: ({ staffId, date }) => ({ url: `/hrms/admin/hrms-geo/tracking/timeline/${staffId}`, params: { date } }),
+      providesTags: ['HrmsGeo'],
+    }),
+    getGeoTimelineLocations: builder.query({
+      query: ({ staffId, from, to }) => ({ url: `/hrms/admin/hrms-geo/tracking/timeline/${staffId}/locations`, params: { from, to } }),
+      providesTags: ['HrmsGeo'],
+    }),
+    getGeoTrackingDetails: builder.query({
+      query: ({ staffId, startDate, endDate }) => ({ url: `/hrms/admin/hrms-geo/tracking/${staffId}`, params: { startDate, endDate } }),
+      providesTags: ['HrmsGeo'],
+    }),
+
+    // ── Vendors ─────────────────────────────────────────────────────────────
+    getVendors: builder.query({
+      query: (params) => ({ url: '/vendors', params }),
+      providesTags: ['Vendors'],
+    }),
+    getVendor: builder.query({
+      query: (id) => ({ url: `/vendors/${id}` }),
+      providesTags: (result, error, id) => [{ type: 'Vendors', id }],
+    }),
+    createVendor: builder.mutation({
+      query: (data) => ({ url: '/vendors', method: 'post', data }),
+      invalidatesTags: ['Vendors'],
+    }),
+    updateVendor: builder.mutation({
+      query: ({ id, ...data }) => ({ url: `/vendors/${id}`, method: 'put', data }),
+      invalidatesTags: ['Vendors'],
+    }),
+    deleteVendor: builder.mutation({
+      query: (id) => ({ url: `/vendors/${id}`, method: 'delete' }),
+      invalidatesTags: ['Vendors', 'DeletedRecords'],
+    }),
+    getVendorHistory: builder.query({
+      query: (id) => ({ url: `/vendors/${id}/history` }),
+      providesTags: (result, error, id) => [{ type: 'Vendors', id }],
+    }),
+    getVendorLedger: builder.query({
+      query: (id) => ({ url: `/vendors/${id}/ledger` }),
+      providesTags: (result, error, id) => [{ type: 'Vendors', id }],
+    }),
+    updateVendorStatus: builder.mutation({
+      query: ({ id, status }) => ({ url: `/vendors/${id}/status`, method: 'patch', data: { status } }),
+      invalidatesTags: ['Vendors'],
+    }),
+    generateAiSummary: builder.mutation({
+      query: (id) => ({ url: `/vendors/${id}/ai-summary`, method: 'post' }),
+      invalidatesTags: (result, error, id) => [{ type: 'Vendors', id }],
+    }),
+    scanVendorDocument: builder.mutation({
+      // Backend gives the OpenAI call up to 180s for large scanned documents —
+      // override axios's 30s default so a slow-but-successful scan doesn't get
+      // killed client-side first.
+      query: (formData) => ({ url: '/vendors/scan-document', method: 'post', data: formData, timeout: 200000 }),
+    }),
+    scanVendorBill: builder.mutation({
+      // AI-scan a vendor bill/invoice → invoice header + line items (reuses the
+      // local-purchase invoice extractor). 180s backend budget, so override
+      // axios's 30s default the same way as the other AI scan endpoints.
+      query: (formData) => ({ url: '/vendors/scan-bill', method: 'post', data: formData, timeout: 200000 }),
+    }),
+
+    // ── Purchase ────────────────────────────────────────────────────────────
+    getRequests: builder.query({
+      query: (params) => ({ url: '/purchase/requests', params }),
+      providesTags: ['Purchase'],
+    }),
+    createBulkRequest: builder.mutation({
+      query: (data) => ({ url: '/purchase/requests/bulk', method: 'post', data }),
+      invalidatesTags: ['Purchase', 'Financial', 'Reports'],
+    }),
+    raiseRequest: builder.mutation({
+      query: (data) => ({ url: '/purchase/requests', method: 'post', data }),
+      invalidatesTags: ['Purchase', 'Financial', 'Reports'],
+    }),
+    recordQuotationAsk: builder.mutation({
+      query: (data) => ({ url: '/purchase/quotation-requests', method: 'post', data }),
+    }),
+    uploadQuotationFile: builder.mutation({
+      query: ({ id, formData }) => ({ url: `/purchase/requests/${id}/upload-quotation`, method: 'post', data: formData }),
+      invalidatesTags: ['Purchase', 'Financial'],
+    }),
+    scanQuotationFile: builder.mutation({
+      // Backend gives the OpenAI call up to 180s for large scanned documents —
+      // override axios's 30s default so a slow-but-successful scan (e.g. a phone
+      // photo of a multi-line quotation) doesn't get killed client-side first.
+      // Same treatment as scanReceivedInvoice / scanLocalPurchaseInvoice.
+      query: (formData) => ({ url: '/purchase/scan-quotation', method: 'post', data: formData, timeout: 200000 }),
+    }),
+    updatePurchaseRequestDetails: builder.mutation({
+      query: ({ id, ...data }) => ({ url: `/purchase/requests/${id}/update-details`, method: 'patch', data }),
+      invalidatesTags: ['Purchase', 'Financial', 'PurchaseOrders', 'Reports'],
+    }),
+    addPurchaseNote: builder.mutation({
+      query: ({ id, text }) => ({ url: `/purchase/requests/${id}/notes`, method: 'patch', data: { text } }),
+      invalidatesTags: ['Purchase', 'Financial'],
+    }),
+    getPurchaseOrders: builder.query({
+      query: (params) => ({ url: '/purchase/orders', params }),
+      providesTags: ['PurchaseOrders'],
+    }),
+    receiveOrder: builder.mutation({
+      query: ({ id, formData }) => ({ url: `/purchase/orders/${id}/receive`, method: 'post', data: formData }),
+      // Also invalidates Orders/Tasks: receiving stock can auto-backfill orders that were
+      // taken/edited while short (see backfillPendingDeductionsForItem), clearing their
+      // "Stock Pending" badge and unblocking Task Management assignment.
+      invalidatesTags: ['PurchaseOrders', 'Inventory', 'Reports', 'Orders', 'Tasks'],
+    }),
+    scanReceivedInvoice: builder.mutation({
+      // Backend gives the OpenAI call up to 180s for large scanned documents —
+      // override axios's 30s default so a slow-but-successful scan doesn't get
+      // killed client-side first.
+      query: ({ id, formData }) => ({ url: `/purchase/orders/${id}/scan-invoice`, method: 'post', data: formData, timeout: 200000 }),
+    }),
+    resolveMissingOrder: builder.mutation({
+      query: (id) => ({ url: `/purchase/orders/${id}/resolve-missing`, method: 'patch' }),
+      invalidatesTags: ['PurchaseOrders'],
+    }),
+    updatePurchaseOrderActionTaken: builder.mutation({
+      query: ({ id, actionTakenStatus }) => ({ url: `/purchase/orders/${id}/action-taken`, method: 'patch', data: { actionTakenStatus } }),
+      // 'Completely Received' credits the remaining qty to inventory, same downstream
+      // effects as receiveOrder above — invalidate the same tags.
+      invalidatesTags: ['PurchaseOrders', 'Inventory', 'Reports', 'Orders', 'Tasks'],
+    }),
+    uploadPurchaseLR: builder.mutation({
+      query: ({ id, ...data }) => ({ url: `/purchase/orders/${id}/lr`, method: 'patch', data }),
+      // 'Financial' — the Quotation Requests table/payment modal show the LR copy reminder state.
+      invalidatesTags: ['PurchaseOrders', 'Reports', 'Financial'],
+    }),
+    scanPurchaseLR: builder.mutation({
+      // Backend gives the OpenAI call up to 180s for large scanned documents —
+      // override axios's 30s default so a slow-but-successful scan doesn't get
+      // killed client-side first.
+      query: ({ id, ...data }) => ({ url: `/purchase/orders/${id}/scan-lr`, method: 'post', data, timeout: 200000 }),
+    }),
+    getLocalPurchases: builder.query({
+      query: () => ({ url: '/purchase/local' }),
+      providesTags: ['LocalPurchases'],
+    }),
+    scanLocalPurchaseInvoice: builder.mutation({
+      // Backend gives the OpenAI call up to 180s for large scanned documents —
+      // override axios's 30s default so a slow-but-successful scan doesn't get
+      // killed client-side first.
+      query: (formData) => ({ url: '/purchase/local/scan-invoice', method: 'post', data: formData, timeout: 200000 }),
+    }),
+    createLocalPurchase: builder.mutation({
+      query: (formData) => ({ url: '/purchase/local', method: 'post', data: formData }),
+      // Also invalidates Orders/Tasks — see receiveOrder's comment (same auto-backfill).
+      // MaterialStocks — so Inventory's Material Stock tab reflects a Material Stocks-target purchase immediately.
+      invalidatesTags: ['LocalPurchases', 'LocalPurchaseExpenses', 'Inventory', 'MaterialStocks', 'Reports', 'Orders', 'Tasks'],
+    }),
+    getLocalPurchase: builder.query({
+      query: (id) => ({ url: `/purchase/local/${id}` }),
+      providesTags: (result, error, id) => [{ type: 'LocalPurchases', id }],
+    }),
+    getPurchasePersons: builder.query({
+      query: () => ({ url: '/purchase/purchase-persons' }),
+      providesTags: ['PurchasePersons'],
+    }),
+    createPurchasePerson: builder.mutation({
+      query: (data) => ({ url: '/purchase/purchase-persons', method: 'post', data }),
+      invalidatesTags: ['PurchasePersons'],
+    }),
+    getPurchaseHistory: builder.query({
+      query: () => ({ url: '/purchase/history' }),
+      providesTags: ['PurchaseHistory'],
+    }),
+
+    // ── Dispatch ─────────────────────────────────────────────────────────────
+    getDispatches: builder.query({
+      query: (params) => ({ url: '/dispatch', params }),
+      providesTags: ['Dispatch'],
+    }),
+    // Every distinct transport/carrier name ever entered across ALL dispatch records, leads and
+    // orders — feeds the Transport Name dropdown on Dispatch Details and on the Add Lead form so
+    // both list names used on OTHER orders, not just ones explicitly added via their "+ Add" box.
+    getDispatchTransportNames: builder.query({
+      query: () => ({ url: '/dispatch/transport-names' }),
+      providesTags: ['Dispatch', 'Leads', 'Orders'],
+    }),
+    getDispatch: builder.query({
+      query: (id) => ({ url: `/dispatch/${id}` }),
+      providesTags: (result, error, id) => [{ type: 'Dispatch', id }],
+    }),
+    createDispatch: builder.mutation({
+      query: (data) => ({ url: '/dispatch', method: 'post', data }),
+      invalidatesTags: ['Dispatch'],
+    }),
+    saveAsDraft: builder.mutation({
+      query: ({ id, ...data }) => ({ url: `/dispatch/${id}/draft`, method: 'patch', data }),
+      // Invalidate both the list queries (generic tag) and this specific getDispatch(id)
+      // cache entry (id-tagged) — without the id tag, a change made on one page (list's
+      // expand panel vs. the Detail page) never refreshes the other.
+      invalidatesTags: (result, error, { id }) => ['Dispatch', { type: 'Dispatch', id }],
+    }),
+    uploadInvoice: builder.mutation({
+      query: ({ id, formData }) => ({ url: `/dispatch/${id}/upload-invoice`, method: 'post', data: formData }),
+      invalidatesTags: (result, error, { id }) => ['Dispatch', { type: 'Dispatch', id }],
+    }),
+    confirmDispatch: builder.mutation({
+      query: ({ id, formData }) => ({ url: `/dispatch/${id}/confirm`, method: 'post', data: formData }),
+      invalidatesTags: (result, error, { id }) => ['Dispatch', { type: 'Dispatch', id }, 'Leads', 'Orders', 'Tasks'],
+    }),
+    uploadDispatchLR: builder.mutation({
+      query: ({ id, formData, ...data }) => ({ url: `/dispatch/${id}/lr`, method: 'patch', data: formData || data }),
+      invalidatesTags: (result, error, { id }) => ['Dispatch', { type: 'Dispatch', id }],
+    }),
+    scanDispatchLR: builder.mutation({
+      // Backend gives the OpenAI call up to 180s for large scanned documents —
+      // override axios's 30s default so a slow-but-successful scan (common for
+      // phone-camera captures of a lorry receipt) doesn't get killed client-side
+      // first. Same treatment as scanPurchaseLR / scanReceivedInvoice.
+      query: ({ id, ...data }) => ({ url: `/dispatch/${id}/scan-lr`, method: 'post', data, timeout: 200000 }),
+    }),
+    reportTransportMismatch: builder.mutation({
+      query: ({ id, ...data }) => ({ url: `/dispatch/${id}/transport-mismatch`, method: 'patch', data }),
+      invalidatesTags: ['Orders'],
+    }),
+    requestLrMismatchApproval: builder.mutation({
+      query: ({ id, ...data }) => ({ url: `/dispatch/${id}/lr-mismatch-request`, method: 'patch', data }),
+      invalidatesTags: (result, error, { id }) => ['Orders', 'Operations', { type: 'Dispatch', id }],
+    }),
+    requestInvoiceMismatchApproval: builder.mutation({
+      query: ({ id, ...data }) => ({ url: `/dispatch/${id}/invoice-mismatch-request`, method: 'patch', data }),
+      invalidatesTags: (result, error, { id }) => ['Orders', { type: 'Dispatch', id }],
+    }),
+    requestDispatchApproval: builder.mutation({
+      query: ({ id }) => ({ url: `/dispatch/${id}/approval-request`, method: 'patch' }),
+      invalidatesTags: (result, error, { id }) => ['Orders', 'Operations', { type: 'Dispatch', id }],
+    }),
+    verifyItem: builder.mutation({
+      query: ({ id, itemId, formData, verified }) => ({
+        url: `/dispatch/${id}/items/${itemId}/verify`,
+        method: 'patch',
+        data: formData || (verified !== undefined ? { verified } : undefined),
+      }),
+      invalidatesTags: (result, error, { id }) => ['Dispatch', { type: 'Dispatch', id }],
+    }),
+    verifyInvoice: builder.mutation({
+      query: ({ id, ...data }) => ({ url: `/dispatch/${id}/verify-invoice`, method: 'post', data }),
+    }),
+    // The three box-photo uploads run a duplicate check server-side; a near-match hands it to the AI,
+    // which can take longer than axios's 30s default — 120s matches the backend's own AI timeout.
+    uploadBoxPhotos: builder.mutation({
+      query: ({ id, formData }) => ({ url: `/dispatch/${id}/box-photos`, method: 'post', data: formData, timeout: 120000 }),
+      invalidatesTags: (result, error, { id }) => ['Dispatch', { type: 'Dispatch', id }],
+    }),
+    uploadItemBoxPhotos: builder.mutation({
+      query: ({ id, itemId, formData }) => ({ url: `/dispatch/${id}/items/${itemId}/box-photos`, method: 'post', data: formData, timeout: 120000 }),
+      invalidatesTags: (result, error, { id }) => ['Dispatch', { type: 'Dispatch', id }],
+    }),
+    uploadKitBoxPhotos: builder.mutation({
+      query: ({ id, kitDispatchId, formData }) => ({ url: `/dispatch/${id}/kits/${kitDispatchId}/box-photos`, method: 'post', data: formData, timeout: 120000 }),
+      invalidatesTags: (result, error, { id }) => ['Dispatch', { type: 'Dispatch', id }],
+    }),
+    // AI "Verify photos" scan across every photo on the shipment (backend gives the OpenAI call up to
+    // 240s for large sets — override axios's 30s default, same treatment as scanDispatchLR).
+    scanDispatchPhotos: builder.mutation({
+      query: ({ id }) => ({ url: `/dispatch/${id}/box-photos/scan`, method: 'post', timeout: 260000 }),
+      invalidatesTags: (result, error, { id }) => ['Dispatch', { type: 'Dispatch', id }],
+    }),
+    // Removes a saved box photo — this round's photos or a flagged duplicate (the backend refuses photos
+    // from an already-confirmed round).
+    removeDispatchPhoto: builder.mutation({
+      query: ({ id, url }) => ({ url: `/dispatch/${id}/box-photos/remove`, method: 'post', data: { url } }),
+      invalidatesTags: (result, error, { id }) => ['Dispatch', { type: 'Dispatch', id }],
+    }),
+    addBoxPhotoUrl: builder.mutation({
+      query: ({ id, type, url }) => ({ url: `/dispatch/${id}/box-photo-url`, method: 'patch', data: { type, url } }),
+      invalidatesTags: (result, error, { id }) => ['Dispatch', { type: 'Dispatch', id }],
+    }),
+    getTodaysDispatches: builder.query({
+      query: () => ({ url: '/dispatch/today' }),
+      providesTags: ['Dispatch'],
+    }),
+    getPendingDispatches: builder.query({
+      query: () => ({ url: '/dispatch/pending' }),
+      providesTags: ['Dispatch'],
+    }),
+    // Dispatch Team stat cards + their click-through lists. Also tagged Orders/Invoices so
+    // a payment recorded in Sales/Billing (which doesn't invalidate 'Dispatch') refreshes
+    // the Payment Pending card.
+    getDispatchStats: builder.query({
+      query: () => ({ url: '/dispatch/stats' }),
+      providesTags: ['Dispatch', 'Orders', 'Invoices'],
+    }),
+    getTransports: builder.query({
+      query: () => ({ url: '/dispatch/transports' }),
+      providesTags: ['Transport'],
+    }),
+    updateTransportStatus: builder.mutation({
+      query: ({ id, status }) => ({ url: `/dispatch/transports/${id}/status`, method: 'patch', data: { status } }),
+      invalidatesTags: ['Transport'],
+    }),
+    getPickupOrders: builder.query({
+      query: () => ({ url: '/dispatch/pickups' }),
+      providesTags: ['Pickups'],
+    }),
+    getTodaysPickupOrders: builder.query({
+      query: () => ({ url: '/dispatch/pickups/today' }),
+      providesTags: ['Pickups'],
+    }),
+    createPickupOrder: builder.mutation({
+      query: (data) => ({ url: '/dispatch/pickups', method: 'post', data }),
+      invalidatesTags: ['Pickups'],
+    }),
+    updatePickupOrder: builder.mutation({
+      query: ({ id, ...data }) => ({ url: `/dispatch/pickups/${id}`, method: 'patch', data }),
+      invalidatesTags: ['Pickups', 'LrPayments', 'PurchaseOrders'],
+    }),
+
+    // ── Inventory ────────────────────────────────────────────────────────────
+    getItems: builder.query({
+      query: (params) => ({ url: '/inventory', params }),
+      providesTags: ['Inventory'],
+    }),
+    getItem: builder.query({
+      query: (id) => ({ url: `/inventory/${id}` }),
+      providesTags: (result, error, id) => [{ type: 'Inventory', id }],
+    }),
+    createItem: builder.mutation({
+      query: (data) => ({ url: '/inventory', method: 'post', data }),
+      // Also invalidates Orders/Tasks — merging stock into an existing item code (mergeItemCode)
+      // can auto-backfill orders that were short on that item. See receiveOrder's comment.
+      invalidatesTags: ['Inventory', 'Orders', 'Tasks'],
+    }),
+    updateItem: builder.mutation({
+      query: ({ id, ...data }) => ({ url: `/inventory/${id}`, method: 'put', data }),
+      // Also invalidates Orders/Tasks — "Add Stock" (addStockQty) can auto-backfill orders
+      // that were short on this item. See receiveOrder's comment.
+      invalidatesTags: ['Inventory', 'Orders', 'Tasks'],
+    }),
+    deleteItem: builder.mutation({
+      query: (id) => ({ url: `/inventory/${id}`, method: 'delete' }),
+      invalidatesTags: ['Inventory', 'DeletedRecords'],
+    }),
+    sellStockRequest: builder.mutation({
+      query: ({ id, ...data }) => ({ url: `/inventory/${id}/sell-request`, method: 'post', data }),
+      invalidatesTags: ['Inventory', 'StockApprovals'],
+    }),
+    addStockRequest: builder.mutation({
+      query: ({ id, ...data }) => ({ url: `/inventory/${id}/add-request`, method: 'post', data }),
+      invalidatesTags: ['Inventory', 'StockApprovals'],
+    }),
+    fillStock: builder.mutation({
+      query: ({ id, ...data }) => ({ url: `/inventory/${id}/fill`, method: 'post', data }),
+      // Also invalidates Orders/Tasks — see receiveOrder's comment (same auto-backfill).
+      invalidatesTags: ['Inventory', 'StockHistory', 'Orders', 'Tasks'],
+    }),
+    getStockApprovals: builder.query({
+      query: () => ({ url: '/inventory/approvals' }),
+      providesTags: ['StockApprovals'],
+    }),
+    approveMovement: builder.mutation({
+      query: (id) => ({ url: `/inventory/approvals/${id}/approve`, method: 'patch' }),
+      // Also invalidates Orders/Tasks — an addition-type approval can auto-backfill orders
+      // that were short on this item. See receiveOrder's comment.
+      // StockHistory too, so the Stock Check Log's Approval column doesn't sit on "Pending".
+      invalidatesTags: ['StockApprovals', 'Inventory', 'Orders', 'Tasks', 'StockHistory'],
+    }),
+    rejectMovement: builder.mutation({
+      query: (id) => ({ url: `/inventory/approvals/${id}/reject`, method: 'patch' }),
+      invalidatesTags: ['StockApprovals', 'StockHistory'],
+    }),
+    getStockHistory: builder.query({
+      query: (params) => ({ url: '/inventory/history', params }),
+      providesTags: ['StockHistory'],
+    }),
+    getStockHistoryReport: builder.query({
+      query: (params) => ({ url: '/inventory/history/report', params }),
+      providesTags: ['StockHistory'],
+    }),
+    submitStockCheck: builder.mutation({
+      query: ({ items, notes }) => ({ url: '/inventory/stock-check', method: 'post', data: { items, notes } }),
+      invalidatesTags: ['Inventory', 'StockApprovals', 'StockHistory'],
+    }),
+    // Kits
+    getKits: builder.query({
+      query: (params) => ({ url: '/inventory/kits', params }),
+      providesTags: ['Kits'],
+    }),
+    createKit: builder.mutation({
+      query: (data) => ({ url: '/inventory/kits', method: 'post', data }),
+      invalidatesTags: ['Kits'],
+    }),
+    updateKit: builder.mutation({
+      query: ({ id, ...data }) => ({ url: `/inventory/kits/${id}`, method: 'put', data }),
+      invalidatesTags: ['Kits'],
+    }),
+    deleteKit: builder.mutation({
+      query: (id) => ({ url: `/inventory/kits/${id}`, method: 'delete' }),
+      invalidatesTags: ['Kits', 'DeletedRecords'],
+    }),
+    // Material Stocks (packing materials purchased & stored)
+    getMaterialStocks: builder.query({
+      query: (params) => ({ url: '/inventory/material-stocks', params }),
+      providesTags: ['MaterialStocks'],
+    }),
+    createMaterialStock: builder.mutation({
+      query: (data) => ({ url: '/inventory/material-stocks', method: 'post', data }),
+      invalidatesTags: ['MaterialStocks'],
+    }),
+    updateMaterialStock: builder.mutation({
+      query: ({ id, ...data }) => ({ url: `/inventory/material-stocks/${id}`, method: 'put', data }),
+      invalidatesTags: ['MaterialStocks'],
+    }),
+    deleteMaterialStock: builder.mutation({
+      query: (id) => ({ url: `/inventory/material-stocks/${id}`, method: 'delete' }),
+      invalidatesTags: ['MaterialStocks'],
+    }),
+    uploadMaterialStockInvoice: builder.mutation({
+      query: ({ id, formData }) => ({ url: `/inventory/material-stocks/${id}/upload-invoice`, method: 'post', data: formData }),
+      invalidatesTags: ['MaterialStocks'],
+    }),
+
+    // Packing Material Config
+    getPackingConfig: builder.query({
+      query: () => ({ url: '/inventory/packing-config' }),
+      providesTags: ['PackingConfig'],
+    }),
+    createPackingConfig: builder.mutation({
+      query: (data) => ({ url: '/inventory/packing-config', method: 'post', data }),
+      invalidatesTags: ['PackingConfig'],
+    }),
+    updatePackingConfig: builder.mutation({
+      query: ({ id, ...data }) => ({ url: `/inventory/packing-config/${id}`, method: 'put', data }),
+      invalidatesTags: ['PackingConfig'],
+    }),
+    deletePackingConfig: builder.mutation({
+      query: (id) => ({ url: `/inventory/packing-config/${id}`, method: 'delete' }),
+      invalidatesTags: ['PackingConfig'],
+    }),
+
+    // ── Financial ────────────────────────────────────────────────────────────
+    getPendingRequests: builder.query({
+      query: (params) => ({ url: '/financial/requests', params }),
+      providesTags: ['Financial'],
+    }),
+    approveFinancialRequest: builder.mutation({
+      query: (id) => ({ url: `/financial/requests/${id}/approve`, method: 'patch' }),
+      invalidatesTags: ['Financial', 'Purchase', 'PurchaseOrders', 'Reports'],
+    }),
+    batchApproveRequests: builder.mutation({
+      query: (batchId) => ({ url: `/financial/requests/batch/${batchId}/approve`, method: 'patch' }),
+      invalidatesTags: ['Financial', 'Purchase', 'PurchaseOrders', 'Reports'],
+    }),
+    rejectFinancialRequest: builder.mutation({
+      query: ({ id, reason }) => ({ url: `/financial/requests/${id}/reject`, method: 'patch', data: { reason } }),
+      invalidatesTags: ['Financial', 'Purchase'],
+    }),
+    updateFinancialQuotation: builder.mutation({
+      query: ({ id, ...data }) => ({ url: `/financial/requests/${id}/quotation`, method: 'put', data }),
+      invalidatesTags: ['Financial', 'Purchase', 'PurchaseOrders', 'Reports'],
+    }),
+    requestQuotationModification: builder.mutation({
+      query: ({ id, ...data }) => ({ url: `/financial/requests/${id}/request-modification`, method: 'patch', data }),
+      invalidatesTags: ['Financial', 'Purchase'],
+    }),
+    payPurchaseOrder: builder.mutation({
+      query: ({ id, formData }) => ({ url: `/financial/pay/${id}`, method: 'post', data: formData }),
+      invalidatesTags: ['Financial', 'PurchaseOrders', 'Reports'],
+    }),
+    updateOrderAmount: builder.mutation({
+      query: ({ id, amount }) => ({ url: `/financial/orders/${id}/amount`, method: 'patch', data: { amount } }),
+      invalidatesTags: ['Financial', 'PurchaseOrders', 'Reports'],
+    }),
+    getExpensePayments: builder.query({
+      query: (params) => ({ url: '/financial/expense-payments', params }),
+      providesTags: ['ExpensePayments'],
+    }),
+    payExpense: builder.mutation({
+      query: ({ id, formData }) => ({ url: `/financial/expense-payments/${id}/pay`, method: 'post', data: formData }),
+      invalidatesTags: (result, error, { id }) => ['ExpensePayments', 'Expenses', { type: 'Expenses', id }],
+    }),
+    getPickupExpenses: builder.query({
+      query: (params) => ({ url: '/financial/reimbursements/pickup', params }),
+      providesTags: ['PickupExpenses'],
+    }),
+    payPickupExpense: builder.mutation({
+      query: ({ id, formData }) => ({ url: `/financial/reimbursements/pickup/${id}/pay`, method: 'post', data: formData }),
+      invalidatesTags: ['PickupExpenses', 'Expenses'],
+    }),
+    getLocalPurchaseExpenses: builder.query({
+      query: (params) => ({ url: '/financial/reimbursements/local-purchase', params }),
+      providesTags: ['LocalPurchaseExpenses'],
+    }),
+    payLocalPurchaseExpense: builder.mutation({
+      query: ({ id, formData }) => ({ url: `/financial/reimbursements/local-purchase/${id}/pay`, method: 'post', data: formData }),
+      invalidatesTags: ['LocalPurchaseExpenses', 'Expenses', 'LocalPurchases'],
+    }),
+    getLrPayments: builder.query({
+      query: (params) => ({ url: '/financial/reimbursements/lr-payment', params }),
+      providesTags: ['LrPayments'],
+    }),
+    payLrPayment: builder.mutation({
+      query: ({ id, formData }) => ({ url: `/financial/reimbursements/lr-payment/${id}/pay`, method: 'post', data: formData }),
+      invalidatesTags: ['LrPayments', 'Expenses', 'PurchaseOrders', 'Pickups'],
+    }),
+
+    // ── Sales ────────────────────────────────────────────────────────────────
+    getLeads: builder.query({
+      query: (params) => ({ url: '/sales/leads', params }),
+      providesTags: ['Leads'],
+    }),
+    getLead: builder.query({
+      query: (id) => ({ url: `/sales/leads/${id}` }),
+      providesTags: (result, error, id) => [{ type: 'Leads', id }],
+    }),
+    createLead: builder.mutation({
+      query: (data) => ({ url: '/sales/leads', method: 'post', data }),
+      invalidatesTags: ['Leads'],
+    }),
+    updateLead: builder.mutation({
+      query: ({ id, ...data }) => ({ url: `/sales/leads/${id}`, method: 'put', data }),
+      // A logo change is copied server-side onto the lead's orders/quotations/negotiations
+      // (sales.controller updateLead) — refresh those too so every Logo display (Sales Orders,
+      // Operations, Task Management, Dispatch) updates.
+      invalidatesTags: (result, error, arg) => ('hotelLogoUrl' in (arg || {})
+        ? ['Leads', 'Orders', 'Operations', 'Quotations', 'Negotiations', 'Tasks', 'Dispatch']
+        : ['Leads']),
+    }),
+    deleteLead: builder.mutation({
+      query: (id) => ({ url: `/sales/leads/${id}`, method: 'delete' }),
+      invalidatesTags: ['Leads', 'DeletedRecords'],
+    }),
+    updateLeadStatus: builder.mutation({
+      query: ({ id, status }) => ({ url: `/sales/leads/${id}/status`, method: 'patch', data: { status } }),
+      invalidatesTags: ['Leads'],
+    }),
+    assignLead: builder.mutation({
+      query: ({ id, assignedTo }) => ({ url: `/sales/leads/${id}/assign`, method: 'patch', data: { assignedTo } }),
+      invalidatesTags: ['Leads'],
+    }),
+    getSalesQuotations: builder.query({
+      query: (params) => ({ url: '/sales/quotations', params }),
+      providesTags: ['Quotations'],
+    }),
+    createSalesQuotation: builder.mutation({
+      query: (data) => ({ url: '/sales/quotations', method: 'post', data }),
+      invalidatesTags: ['Quotations', 'Leads'],
+    }),
+    updateSalesQuotation: builder.mutation({
+      query: ({ id, ...data }) => ({ url: `/sales/quotations/${id}`, method: 'put', data }),
+      // Backend also writes payment updates onto the linked Order (see sales.controller
+      // updateQuotation) — invalidate Orders/Operations so Sales/Operations refetch too.
+      invalidatesTags: ['Quotations', 'Orders', 'Operations'],
+    }),
+    deleteSalesQuotation: builder.mutation({
+      query: (id) => ({ url: `/sales/quotations/${id}`, method: 'delete' }),
+      // getQuotationsInProcess (Billing's Quotations tab) also provides 'Quotations',
+      // so this invalidates both Sales' and Billing's Quotations tabs at once.
+      invalidatesTags: ['Quotations', 'DeletedRecords'],
+    }),
+    convertToNegotiation: builder.mutation({
+      query: ({ id, ...data }) => ({ url: `/sales/quotations/${id}/convert-negotiation`, method: 'post', data }),
+      invalidatesTags: ['Quotations', 'Negotiations', 'Leads'],
+    }),
+    convertLeadToNegotiation: builder.mutation({
+      query: ({ id, ...data }) => ({ url: `/sales/leads/${id}/convert-negotiation`, method: 'post', data }),
+      invalidatesTags: ['Leads', 'Negotiations'],
+    }),
+    getNegotiations: builder.query({
+      query: (params) => ({ url: '/sales/negotiations', params }),
+      providesTags: ['Negotiations'],
+    }),
+    updateNegotiation: builder.mutation({
+      query: ({ id, ...data }) => ({ url: `/sales/negotiations/${id}`, method: 'put', data }),
+      invalidatesTags: ['Negotiations'],
+    }),
+    deleteNegotiation: builder.mutation({
+      query: (id) => ({ url: `/sales/negotiations/${id}`, method: 'delete' }),
+      invalidatesTags: ['Negotiations', 'DeletedRecords'],
+    }),
+    convertToOrder: builder.mutation({
+      query: ({ id, ...data }) => ({ url: `/sales/negotiations/${id}/convert-order`, method: 'post', data }),
+      invalidatesTags: ['Negotiations', 'Orders', 'Leads', 'Quotations'],
+    }),
+    getSalesOrders: builder.query({
+      query: (params) => ({ url: '/sales/orders', params }),
+      providesTags: ['Orders'],
+    }),
+    getOrdersByHotelName: builder.query({
+      query: (name) => ({ url: '/sales/orders/by-hotel', params: { name } }),
+      providesTags: (result, error, name) => [{ type: 'Orders', id: `hotel-${name}` }],
+    }),
+    getSalesOrder: builder.query({
+      query: (id) => ({ url: `/sales/orders/${id}` }),
+      providesTags: (result, error, id) => [{ type: 'Orders', id }],
+    }),
+    createSalesOrder: builder.mutation({
+      query: (data) => ({ url: '/sales/orders', method: 'post', data }),
+      invalidatesTags: ['Orders', 'Leads', 'Quotations', 'Negotiations', 'Reports'],
+    }),
+    updateSalesOrder: builder.mutation({
+      query: ({ id, ...data }) => ({ url: `/sales/orders/${id}`, method: 'put', data }),
+      // Editing an order can change item qty/emergency-split composition, which Task
+      // Management's Today's Checklist + Pending Remaining Qty tab (useGetSuggestedTasksQuery,
+      // provides 'Tasks'/'SuggestedTasks') need to recompute against — this used to only
+      // invalidate Orders/Operations/Reports, so those tabs kept showing stale quantities
+      // until something else happened to refetch them.
+      // A logo change is written back to the order's lead and its quotations/negotiations
+      // (sales.controller updateOrder) — refresh those and Dispatch too.
+      invalidatesTags: (result, error, arg) => ('logoUrl' in (arg || {})
+        ? ['Orders', 'Operations', 'Reports', 'Tasks', 'SuggestedTasks', 'Leads', 'Quotations', 'Negotiations', 'Dispatch']
+        : ['Orders', 'Operations', 'Reports', 'Tasks', 'SuggestedTasks']),
+    }),
+    updateSalesOrderStatus: builder.mutation({
+      query: ({ id, status }) => ({ url: `/sales/orders/${id}/status`, method: 'patch', data: { status } }),
+      invalidatesTags: ['Orders', 'Leads', 'Reports'],
+    }),
+    deleteSalesOrder: builder.mutation({
+      query: (id) => ({ url: `/sales/orders/${id}`, method: 'delete' }),
+      invalidatesTags: ['Orders', 'Reports', 'DeletedRecords'],
+    }),
+    decideTransportMismatch: builder.mutation({
+      query: ({ id, decision }) => ({ url: `/sales/orders/${id}/transport-mismatch-decision`, method: 'patch', data: { decision } }),
+      invalidatesTags: ['Orders'],
+    }),
+    decideLrMismatchSales: builder.mutation({
+      query: ({ id, decision }) => ({ url: `/sales/orders/${id}/lr-mismatch-decision`, method: 'patch', data: { decision } }),
+      invalidatesTags: ['Orders', 'Operations', 'Dispatch'],
+    }),
+    decideInvoiceMismatch: builder.mutation({
+      query: ({ id, decision, note }) => ({ url: `/sales/orders/${id}/invoice-mismatch-decision`, method: 'patch', data: { decision, note } }),
+      invalidatesTags: ['Orders', 'Dispatch'],
+    }),
+    getComplaints: builder.query({
+      query: (params) => ({ url: '/sales/complaints', params }),
+      providesTags: ['Complaints'],
+    }),
+    createComplaint: builder.mutation({
+      query: (data) => ({ url: '/sales/complaints', method: 'post', data }),
+      invalidatesTags: ['Complaints'],
+    }),
+    updateComplaintStatus: builder.mutation({
+      query: ({ id, status, note, remarks }) => ({ url: `/sales/complaints/${id}/status`, method: 'patch', data: { status, note, remarks } }),
+      invalidatesTags: ['Complaints'],
+    }),
+    getComplaintHistory: builder.query({
+      query: (clientName) => ({ url: '/sales/complaints/history', params: { clientName } }),
+      providesTags: ['Complaints'],
+    }),
+    getReminders: builder.query({
+      query: () => ({ url: '/sales/reminders' }),
+      providesTags: ['Reminders'],
+    }),
+    getHotelNames: builder.query({
+      query: (params) => ({ url: '/sales/hotels', params }),
+      providesTags: ['Leads'],
+    }),
+    lookupHotel: builder.query({
+      query: ({ name, branch, category }) => ({ url: '/sales/hotels/lookup', params: { name, branch, category } }),
+    }),
+    uploadFiles: builder.mutation({
+      query: ({ formData, folder }) => ({
+        url: `/sales/upload${folder ? `?folder=${folder}` : ''}`,
+        method: 'post',
+        data: formData,
+      }),
+    }),
+    deleteFile: builder.mutation({
+      query: (publicId) => ({ url: '/sales/upload', method: 'delete', data: { publicId } }),
+    }),
+
+    // ── Billing ──────────────────────────────────────────────────────────────
+    getBillingParties: builder.query({
+      query: (params) => ({ url: '/billing/parties', params }),
+      providesTags: ['BillingParties'],
+    }),
+    createBillingParty: builder.mutation({
+      query: (data) => ({ url: '/billing/parties', method: 'post', data }),
+      invalidatesTags: ['BillingParties'],
+    }),
+    updateBillingParty: builder.mutation({
+      query: ({ id, ...data }) => ({ url: `/billing/parties/${id}`, method: 'put', data }),
+      invalidatesTags: ['BillingParties'],
+    }),
+    deleteBillingParty: builder.mutation({
+      query: (id) => ({ url: `/billing/parties/${id}`, method: 'delete' }),
+      invalidatesTags: ['BillingParties', 'DeletedRecords'],
+    }),
+    getBillingPartyLedger: builder.query({
+      query: (id) => ({ url: `/billing/parties/${id}/ledger` }),
+      providesTags: (result, error, id) => [{ type: 'BillingParties', id }],
+    }),
+    getInvoices: builder.query({
+      query: (params) => ({ url: '/billing/invoices', params }),
+      providesTags: ['Invoices'],
+    }),
+    getInvoice: builder.query({
+      query: (id) => ({ url: `/billing/invoices/${id}` }),
+      providesTags: (result, error, id) => [{ type: 'Invoices', id }],
+    }),
+    createInvoice: builder.mutation({
+      query: (data) => ({ url: '/billing/invoices', method: 'post', data }),
+      // Can carry an orderId that this recalculates payment status for (see billing.controller
+      // createInvoice) — invalidate Orders/Operations so Sales/Operations refetch too.
+      invalidatesTags: ['Invoices', 'BillingParties', 'Orders', 'Operations', 'Reports'],
+    }),
+    updateInvoicePricing: builder.mutation({
+      query: ({ id, products, kitOrders, kitPackagePrice, reason }) => ({ url: `/billing/invoices/${id}/pricing`, method: 'patch', data: { products, kitOrders, kitPackagePrice, reason } }),
+      // Backend rewrites the linked Order's products/kitOrders/total/gstAmount too (see
+      // billing.controller updateInvoicePricing) — invalidate everything that reads order
+      // totals so Sales/Operations/Dispatch/Task views refetch alongside Billing/Reports.
+      invalidatesTags: ['Invoices', 'Orders', 'Operations', 'Dispatch', 'Reports', 'Tasks'],
+    }),
+    updateQuotationPricing: builder.mutation({
+      query: ({ id, products, kitOrders, kitPackagePrice, reason }) => ({ url: `/billing/quotations/${id}/pricing`, method: 'patch', data: { products, kitOrders, kitPackagePrice, reason } }),
+      // Same reasoning as updateInvoicePricing — a quotation "in process" very often already
+      // has a linked Order, which the backend edits directly (see updateQuotationPricing).
+      invalidatesTags: ['Quotations', 'Orders', 'Operations', 'Dispatch', 'Reports', 'Tasks'],
+    }),
+    deleteInvoice: builder.mutation({
+      query: (id) => ({ url: `/billing/invoices/${id}`, method: 'delete' }),
+      invalidatesTags: ['Invoices', 'Reports', 'DeletedRecords'],
+    }),
+    recordPayment: builder.mutation({
+      query: ({ id, ...data }) => ({ url: `/billing/invoices/${id}/payment`, method: 'post', data }),
+      // Backend also writes this payment onto the linked Order (see billing.controller
+      // recordPayment) — invalidate Orders/Operations so Sales/Operations refetch too.
+      invalidatesTags: ['Invoices', 'BillingParties', 'Orders', 'Operations', 'Reports'],
+    }),
+    getInvoicePayments: builder.query({
+      query: (id) => ({ url: `/billing/invoices/${id}/payments` }),
+      providesTags: (result, error, id) => [{ type: 'Invoices', id: `${id}-payments` }],
+    }),
+    convertQuotationToInvoice: builder.mutation({
+      query: (data) => ({ url: '/billing/invoices/convert-quotation', method: 'post', data }),
+      // Backend also syncs the linked order's tasks with the freshly-resolved payment
+      // status (see billing.controller convertQuotationToInvoice → syncOrderTasksPayment) —
+      // invalidate Orders/Operations so Sales/Operations refetch instead of showing the
+      // payment status cached from before this invoice existed.
+      invalidatesTags: ['Invoices', 'BillingParties', 'Quotations', 'Orders', 'Operations', 'Reports'],
+    }),
+    getQuotationsInProcess: builder.query({
+      query: () => ({ url: '/billing/quotations-in-process' }),
+      providesTags: ['Quotations'],
+    }),
+
+    // ── Expenses ─────────────────────────────────────────────────────────────
+    getExpenses: builder.query({
+      query: (params) => ({ url: '/expenses', params }),
+      providesTags: ['Expenses'],
+    }),
+    createExpense: builder.mutation({
+      query: (formData) => ({ url: '/expenses', method: 'post', data: formData }),
+      invalidatesTags: ['Expenses', 'Reports'],
+    }),
+    updateExpense: builder.mutation({
+      query: ({ id, ...data }) => ({ url: `/expenses/${id}`, method: 'put', data }),
+      invalidatesTags: ['Expenses', 'Reports'],
+    }),
+    deleteExpense: builder.mutation({
+      query: (id) => ({ url: `/expenses/${id}`, method: 'delete' }),
+      invalidatesTags: ['Expenses', 'Reports'],
+    }),
+    getExpenseHistory: builder.query({
+      query: (params) => ({ url: '/expenses/history', params }),
+      providesTags: ['Expenses'],
+    }),
+    getExpenseById: builder.query({
+      query: (id) => ({ url: `/expenses/${id}` }),
+      providesTags: (result, error, id) => [{ type: 'Expenses', id }],
+    }),
+    recordExpensePayment: builder.mutation({
+      query: ({ id, formData }) => ({ url: `/expenses/${id}/pay`, method: 'post', data: formData }),
+      invalidatesTags: (result, error, { id }) => ['Expenses', 'Reports', { type: 'Expenses', id }],
+    }),
+
+    // ── Tasks ────────────────────────────────────────────────────────────────
+    getTasks: builder.query({
+      query: (params) => ({ url: '/tasks', params }),
+      providesTags: ['Tasks'],
+    }),
+    getSuggestedTasks: builder.query({
+      query: () => ({ url: '/tasks/suggested' }),
+      providesTags: ['SuggestedTasks', 'Tasks', 'Inventory'],
+    }),
+    // Button-triggered AI summary on top of Today's Checklist — use the lazy hook so it
+    // only fires on demand, not on every poll/refetch of getSuggestedTasks. Persisted
+    // server-side, so it invalidates 'TaskInsight' for getLatestTaskInsight below.
+    getSuggestedTasksInsight: builder.query({
+      // Backend gives the OpenAI call up to 120s — override axios's 30s default
+      // so a slow-but-successful insight run doesn't get killed client-side first.
+      query: () => ({ url: '/tasks/suggested/insight', timeout: 140000 }),
+      invalidatesTags: ['TaskInsight'],
+    }),
+    // Restores the last persisted AI insight run on page load/refresh — no AI call.
+    getLatestTaskInsight: builder.query({
+      query: () => ({ url: '/tasks/suggested/insight/latest' }),
+      providesTags: ['TaskInsight'],
+    }),
+    getEmergencyRequests: builder.query({
+      query: () => ({ url: '/tasks/emergency-requests' }),
+      providesTags: ['Tasks'],
+    }),
+    // Authoritative dispatch-readiness preview for one order — same missing-product check
+    // the dispatch gate itself runs, so the "Verify" UI can't show green when the real
+    // dispatch action would still reject it.
+    getOrderDispatchReadiness: builder.query({
+      query: (orderId) => ({ url: `/tasks/order/${orderId}/readiness` }),
+      providesTags: ['Tasks'],
+    }),
+    getTask: builder.query({
+      query: (id) => ({ url: `/tasks/${id}` }),
+      providesTags: (result, error, id) => [{ type: 'Tasks', id }],
+    }),
+    createTask: builder.mutation({
+      query: (data) => ({ url: '/tasks', method: 'post', data }),
+      // Stock (Inventory + Material Stock) is deducted per task at assignment time (see
+      // utils/taskQuantity.js's deductStockForTask) — without 'Inventory' here, the Inventory
+      // page kept showing pre-deduction stock counts until manually refreshed.
+      invalidatesTags: ['Tasks', 'Inventory'],
+    }),
+    updateTaskStatus: builder.mutation({
+      query: ({ id, status, feedback }) => ({ url: `/tasks/${id}/status`, method: 'patch', data: { status, ...(feedback !== undefined ? { feedback } : {}) } }),
+      invalidatesTags: ['Tasks'],
+    }),
+    reassignTask: builder.mutation({
+      query: ({ id, assignedTo, fromAssignedTo }) => ({ url: `/tasks/${id}/reassign`, method: 'patch', data: { assignedTo, ...(fromAssignedTo ? { fromAssignedTo } : {}) } }),
+      invalidatesTags: ['Tasks'],
+    }),
+    // Mid-task switch (In Progress/Paused) — splits the task into the outgoing assignee's
+    // completed portion + a new Pending task for the remainder. 'Reports' refreshes the
+    // Switch Report and Task Performance Report.
+    switchTask: builder.mutation({
+      query: ({ id, assignedTo, fromAssignedTo, completedQty, remainingQty }) => ({
+        url: `/tasks/${id}/switch`,
+        method: 'patch',
+        data: { assignedTo, completedQty, remainingQty, ...(fromAssignedTo ? { fromAssignedTo } : {}) },
+      }),
+      invalidatesTags: ['Tasks', 'Reports'],
+    }),
+    // "Task to Assignee" tasks (New Task → Task for = Task to Assignee) — own collection, so
+    // these never touch the 'Tasks' cache. Status changes also refresh ActiveAlerts so the
+    // assignee's ringing stops right away on Completed/Closed.
+    getAssigneeTasks: builder.query({
+      query: (params) => ({ url: '/tasks/assignee-tasks', params }),
+      providesTags: ['AssigneeTasks'],
+    }),
+    getAssigneeTask: builder.query({
+      query: (id) => ({ url: `/tasks/assignee-tasks/${id}` }),
+      providesTags: (result, error, id) => ['AssigneeTasks', { type: 'AssigneeTasks', id }],
+    }),
+    createAssigneeTasks: builder.mutation({
+      query: (data) => ({ url: '/tasks/assignee-tasks', method: 'post', data }),
+      invalidatesTags: ['AssigneeTasks', 'ActiveAlerts', 'Reports'],
+    }),
+    updateAssigneeTaskStatus: builder.mutation({
+      query: ({ id, status, remarks }) => ({ url: `/tasks/assignee-tasks/${id}/status`, method: 'patch', data: { status, remarks } }),
+      invalidatesTags: ['AssigneeTasks', 'ActiveAlerts', 'Reports'],
+    }),
+    approveEmergency: builder.mutation({
+      query: (id) => ({ url: `/tasks/${id}/approve-emergency`, method: 'patch' }),
+      invalidatesTags: ['Tasks'],
+    }),
+    dispatchTaskOrder: builder.mutation({
+      query: (id) => ({ url: `/tasks/${id}/dispatch`, method: 'patch' }),
+      invalidatesTags: ['Tasks', 'Orders', 'Operations', 'Dispatch'],
+    }),
+    requestEmergencyDispatch: builder.mutation({
+      query: ({ id, reason }) => ({ url: `/tasks/${id}/request-emergency`, method: 'patch', data: { reason } }),
+      invalidatesTags: ['Tasks', 'Operations', 'Orders'],
+    }),
+    // "Full Order" scope — flags every task/product under the order at once, instead
+    // of just the one task the Emergency Dispatch modal was opened from.
+    requestEmergencyDispatchForOrder: builder.mutation({
+      query: ({ orderId, reason }) => ({ url: `/tasks/order/${orderId}/request-emergency`, method: 'patch', data: { reason } }),
+      invalidatesTags: ['Tasks', 'Operations', 'Orders'],
+    }),
+    approveEmergencySalesHead: builder.mutation({
+      query: (id) => ({ url: `/tasks/${id}/approve-emergency/sales`, method: 'patch' }),
+      invalidatesTags: ['Tasks', 'Operations', 'Orders'],
+    }),
+    approveEmergencyOpsHead: builder.mutation({
+      query: (id) => ({ url: `/tasks/${id}/approve-emergency/ops`, method: 'patch' }),
+      // Ops approval auto-forwards the order to Dispatch server-side, so the Dispatch
+      // module's list must be invalidated here too, not just Tasks/Operations/Orders.
+      invalidatesTags: ['Tasks', 'Operations', 'Orders', 'Dispatch'],
+    }),
+    deleteTask: builder.mutation({
+      query: (id) => ({ url: `/tasks/${id}`, method: 'delete' }),
+      // Deleting a not-yet-Done task credits its stock back (see taskQuantity.js's
+      // reverseStockForTask) — 'Inventory' must be invalidated too or the Inventory page
+      // keeps showing the pre-credit-back (lower) stock count until manually refreshed.
+      invalidatesTags: ['Tasks', 'Inventory', 'DeletedRecords'],
+    }),
+    // ── Task Time Management config ────────────────────────────────────────────
+    getTaskTimeConfigs: builder.query({
+      query: () => ({ url: '/tasks/time-config' }),
+      providesTags: ['TaskTimeConfig'],
+    }),
+    createTaskTimeConfig: builder.mutation({
+      query: (data) => ({ url: '/tasks/time-config', method: 'post', data }),
+      invalidatesTags: ['TaskTimeConfig'],
+    }),
+    updateTaskTimeConfig: builder.mutation({
+      query: ({ id, ...data }) => ({ url: `/tasks/time-config/${id}`, method: 'put', data }),
+      invalidatesTags: ['TaskTimeConfig'],
+    }),
+    deleteTaskTimeConfig: builder.mutation({
+      query: (id) => ({ url: `/tasks/time-config/${id}`, method: 'delete' }),
+      invalidatesTags: ['TaskTimeConfig'],
+    }),
+
+    // ── Operations ───────────────────────────────────────────────────────────
+    getOperationOrders: builder.query({
+      query: (params) => ({ url: '/operations/orders', params }),
+      providesTags: ['Operations'],
+    }),
+    getTodaysOrders: builder.query({
+      query: () => ({ url: '/operations/orders/today' }),
+      providesTags: ['Operations'],
+    }),
+    getTodaysDispatch: builder.query({
+      query: () => ({ url: '/operations/orders/today-dispatch' }),
+      providesTags: ['Operations'],
+    }),
+    updateOperationOrderStatus: builder.mutation({
+      query: ({ id, ...data }) => ({ url: `/operations/orders/${id}/status`, method: 'patch', data }),
+      invalidatesTags: ['Operations', 'Tasks'],
+    }),
+    assignTask: builder.mutation({
+      query: ({ orderId, ...data }) => ({ url: `/operations/orders/${orderId}/assign-task`, method: 'post', data }),
+      // Same per-task stock deduction as createTask above — keep the Inventory page in sync.
+      invalidatesTags: ['Operations', 'Tasks', 'Inventory'],
+    }),
+    assignTasksPerProduct: builder.mutation({
+      query: ({ orderId, ...data }) => ({ url: `/operations/orders/${orderId}/assign-tasks-per-product`, method: 'post', data }),
+      // Same per-task stock deduction as createTask above — keep the Inventory page in sync.
+      invalidatesTags: ['Operations', 'Tasks', 'Inventory'],
+    }),
+    setOrderEmergency: builder.mutation({
+      query: ({ id, isEmergency }) => ({ url: `/operations/orders/${id}/emergency`, method: 'patch', data: { isEmergency } }),
+      invalidatesTags: ['Operations'],
+    }),
+    decideLrMismatchOps: builder.mutation({
+      query: ({ id, decision }) => ({ url: `/operations/orders/${id}/lr-mismatch-decision`, method: 'patch', data: { decision } }),
+      invalidatesTags: ['Orders', 'Operations', 'Dispatch'],
+    }),
+    decideDispatchApproval: builder.mutation({
+      query: ({ id, decision }) => ({ url: `/operations/orders/${id}/dispatch-approval-decision`, method: 'patch', data: { decision } }),
+      invalidatesTags: ['Orders', 'Operations', 'Dispatch', 'Reports'],
+    }),
+    updateItemPrintingStatus: builder.mutation({
+      query: ({ orderId, itemKey, printingStatus, product }) => ({
+        url: `/operations/orders/${orderId}/items/${itemKey}/printing-status`,
+        method: 'patch',
+        data: { printingStatus, product },
+      }),
+      // Task Management's Today's Checklist reads order data via 'Orders' (useGetSalesOrdersQuery)
+      // and per-item printing readiness via 'Tasks'/'SuggestedTasks' (useGetSuggestedTasksQuery) —
+      // both must be busted here too, or kitPrintGate/checklist gating keeps evaluating stale data
+      // after Operations sets a kit's/product's printing status to Received/Closed.
+      invalidatesTags: ['Operations', 'Orders', 'Tasks', 'SuggestedTasks'],
+    }),
+    splitPartialDelivery: builder.mutation({
+      query: ({ id, ...data }) => ({ url: `/operations/orders/${id}/partial-split`, method: 'post', data }),
+      invalidatesTags: ['Operations'],
+    }),
+    // Operations > Order Management > "Use Existing": draw this order's packing material from
+    // the hotel's own reserved Material Stock rows. Invalidates MaterialStocks (Inventory tab
+    // reflects the draw-down) and Orders/Tasks (line marked packingFromExistingStock).
+    useExistingMaterialStock: builder.mutation({
+      query: ({ id, groups }) => ({ url: `/operations/orders/${id}/use-existing-stock`, method: 'post', data: groups ? { groups } : {} }),
+      invalidatesTags: ['Operations', 'MaterialStocks', 'Orders', 'Tasks'],
+    }),
+    getHotelDesigns: builder.query({
+      query: (params) => ({ url: '/operations/hotel-designs', params }),
+      providesTags: ['HotelDesigns'],
+    }),
+    // Read-only feed for the Operations "Approved Designs" tab — refreshes whenever a
+    // sticker/design approval changes (approveStickerRequest invalidates 'Stickers').
+    getApprovedDesigns: builder.query({
+      query: (params) => ({ url: '/operations/approved-designs', params }),
+      providesTags: ['Stickers', 'HotelDesigns'],
+    }),
+    saveHotelDesign: builder.mutation({
+      query: (data) => ({ url: '/operations/hotel-designs', method: 'post', data }),
+      invalidatesTags: ['HotelDesigns'],
+    }),
+    approveStickerRequest: builder.mutation({
+      query: ({ id, role }) => ({ url: `/operations/stickers/${id}/approve`, method: 'patch', data: { role } }),
+      // Full dual approval auto-saves the artwork to HotelDesign (size + vendor + date) for
+      // reuse and for the Parties > eye-view "Packaging Designs on File" list — refresh both.
+      invalidatesTags: ['Stickers', 'HotelDesigns'],
+    }),
+    rejectStickerRequest: builder.mutation({
+      query: ({ id, role, reason }) => ({ url: `/operations/stickers/${id}/reject`, method: 'patch', data: { role, reason } }),
+      invalidatesTags: ['Stickers'],
+    }),
+    // Queue row visibility (Sticker/Box/Ziplock/Butter Paper/Wooden Brush/Other tabs) —
+    // hides a single row from its packaging queue tab only, without touching the Order.
+    getHiddenQueueRows: builder.query({
+      query: () => ({ url: '/operations/queue-rows/hidden' }),
+      providesTags: ['HiddenQueueRows'],
+    }),
+    hideQueueRow: builder.mutation({
+      query: (data) => ({ url: '/operations/queue-rows', method: 'post', data }),
+      invalidatesTags: ['HiddenQueueRows', 'DeletedRecords'],
+    }),
+    getStickerRequests: builder.query({
+      query: (params) => ({ url: '/operations/stickers', params }),
+      providesTags: ['Stickers'],
+    }),
+    createStickerRequest: builder.mutation({
+      query: (data) => ({ url: '/operations/stickers', method: 'post', data }),
+      invalidatesTags: ['Stickers'],
+    }),
+    uploadStickerDesign: builder.mutation({
+      // Tolerant of either { id, formData } or { id, files } (antd fileList).
+      query: ({ id, formData, files }) => {
+        let data = formData;
+        if (!data && files?.length) {
+          data = new FormData();
+          const f = files[0]?.originFileObj || files[0];
+          if (f) data.append('design', f);
+        }
+        return { url: `/operations/stickers/${id}/upload-design`, method: 'post', data };
+      },
+      invalidatesTags: ['Stickers'],
+    }),
+    updateStickerStatus: builder.mutation({
+      query: ({ id, ...data }) => ({ url: `/operations/stickers/${id}/status`, method: 'patch', data }),
+      invalidatesTags: ['Stickers'],
+    }),
+    reassignStickerRequest: builder.mutation({
+      query: ({ id, vendorId }) => ({ url: `/operations/stickers/${id}/reassign`, method: 'patch', data: { vendorId } }),
+      invalidatesTags: ['Stickers'],
+    }),
+    uploadStickerInvoice: builder.mutation({
+      query: ({ id, formData }) => ({ url: `/operations/stickers/${id}/upload-invoice`, method: 'post', data: formData }),
+      invalidatesTags: ['Stickers'],
+    }),
+    sendToStickerTeam: builder.mutation({
+      // Accept an array, { ids }, { items:[{id|_id}] }, or { id } and normalize to an id array.
+      query: (arg) => {
+        let ids = [];
+        if (Array.isArray(arg)) ids = arg;
+        else if (arg?.ids) ids = arg.ids;
+        else if (arg?.items) ids = arg.items.map((i) => i.id || i._id || i.key).filter(Boolean);
+        else if (arg?.id) ids = [arg.id];
+        return { url: '/operations/stickers/send-to-team', method: 'post', data: { ids } };
+      },
+      invalidatesTags: ['Stickers'],
+    }),
+    sendDesignConfirmationWhatsApp: builder.mutation({
+      query: ({ id }) => ({ url: `/operations/stickers/${id}/send-design-confirmation`, method: 'post' }),
+    }),
+    getPackagingInvoices: builder.query({
+      query: (type) => ({ url: `/operations/invoices/${type}` }),
+      providesTags: (result, error, type) => [{ type: 'PackagingInvoices', id: type }],
+    }),
+    uploadPackagingInvoice: builder.mutation({
+      query: ({ type, formData }) => ({ url: `/operations/invoices/${type}`, method: 'post', data: formData }),
+      invalidatesTags: (result, error, { type }) => [{ type: 'PackagingInvoices', id: type }],
+    }),
+
+    // ── Notifications ────────────────────────────────────────────────────────
+    getNotifications: builder.query({
+      query: (params) => ({ url: '/notifications', params }),
+      // LIST id lets NotificationStreamListener's live push refetch just the bell /
+      // Notifications page, not stock/payment alerts (mutations still invalidate all).
+      providesTags: [{ type: 'Notifications', id: 'LIST' }],
+    }),
+    markNotificationRead: builder.mutation({
+      query: (id) => ({ url: `/notifications/${id}/read`, method: 'patch' }),
+      invalidatesTags: ['Notifications'],
+    }),
+    markAllNotificationsRead: builder.mutation({
+      query: () => ({ url: '/notifications/mark-all-read', method: 'patch' }),
+      invalidatesTags: ['Notifications'],
+    }),
+    getStockAlerts: builder.query({
+      query: () => ({ url: '/notifications/stock-alerts' }),
+      providesTags: ['Notifications', 'Inventory'],
+    }),
+    getPaymentAlerts: builder.query({
+      query: () => ({ url: '/notifications/payment-alerts' }),
+      providesTags: ['Notifications', 'Invoices'],
+    }),
+    deleteNotification: builder.mutation({
+      query: (id) => ({ url: `/notifications/${id}`, method: 'delete' }),
+      invalidatesTags: ['Notifications'],
+    }),
+    deleteAllNotifications: builder.mutation({
+      query: () => ({ url: '/notifications/all', method: 'delete' }),
+      invalidatesTags: ['Notifications'],
+    }),
+    getNotificationSoundConfig: builder.query({
+      query: () => ({ url: '/notifications/sound-config' }),
+      providesTags: ['NotificationSoundConfig'],
+    }),
+    updateNotificationSoundConfig: builder.mutation({
+      query: (data) => ({ url: '/notifications/sound-config', method: 'put', data }),
+      invalidatesTags: ['NotificationSoundConfig'],
+    }),
+    uploadNotificationSoundFile: builder.mutation({
+      query: (formData) => ({ url: '/notifications/sound-config/upload-audio', method: 'post', data: formData }),
+    }),
+
+    // ── Settings ─────────────────────────────────────────────────────────────
+    getCountryCodes: builder.query({
+      query: () => ({ url: '/settings/country-codes' }),
+    }),
+    getCompanySettings: builder.query({
+      query: () => ({ url: '/settings/company' }),
+      providesTags: ['Settings'],
+    }),
+    getPublicBranding: builder.query({
+      query: () => ({ url: '/settings/public-branding' }),
+      providesTags: ['Settings'],
+    }),
+    updateCompanySettings: builder.mutation({
+      query: (data) => ({ url: '/settings/company', method: 'put', data }),
+      invalidatesTags: ['Settings'],
+    }),
+    uploadLogo: builder.mutation({
+      query: (formData) => ({ url: '/settings/company/logo', method: 'post', data: formData }),
+      invalidatesTags: ['Settings'],
+    }),
+    uploadSignature: builder.mutation({
+      query: (formData) => ({ url: '/settings/company/signature', method: 'post', data: formData }),
+      invalidatesTags: ['Settings'],
+    }),
+    uploadQrCode: builder.mutation({
+      query: (formData) => ({ url: '/settings/company/qrcode', method: 'post', data: formData }),
+      invalidatesTags: ['Settings'],
+    }),
+    getUsers: builder.query({
+      query: (params) => ({ url: '/settings/users', params }),
+      providesTags: ['Users'],
+    }),
+    createUser: builder.mutation({
+      query: (data) => ({ url: '/settings/users', method: 'post', data }),
+      invalidatesTags: ['Users'],
+    }),
+    updateUser: builder.mutation({
+      query: ({ id, ...data }) => ({ url: `/settings/users/${id}`, method: 'put', data }),
+      // Also refresh Auth so editing the logged-in user (e.g. their profile photo)
+      // updates the header/profile drawer without a re-login (getMe refetches).
+      invalidatesTags: ['Users', 'Auth'],
+    }),
+    deleteUser: builder.mutation({
+      query: (id) => ({ url: `/settings/users/${id}`, method: 'delete' }),
+      invalidatesTags: ['Users', 'DeletedRecords'],
+    }),
+    updatePermissions: builder.mutation({
+      query: ({ id, permissions }) => ({ url: `/settings/users/${id}/permissions`, method: 'put', data: { permissions } }),
+      invalidatesTags: ['Users'],
+    }),
+    getDeletedRecords: builder.query({
+      query: () => ({ url: '/settings/deleted-records' }),
+      providesTags: ['DeletedRecords'],
+    }),
+    restoreRecord: builder.mutation({
+      query: ({ type, id }) => ({ url: `/settings/deleted-records/${type}/${id}/restore`, method: 'post' }),
+      // Refresh the archive AND every module list a restored record could belong
+      // to, so it immediately reappears in its original place without a reload.
+      invalidatesTags: [
+        'DeletedRecords',
+        'Parties', 'BillingParties', 'PartyLedger',
+        'Leads', 'Sales', 'Orders', 'Quotations', 'Negotiations', 'Invoices', 'Billing',
+        'Inventory', 'Kits', 'Vendors', 'Staff', 'Users',
+      ],
+    }),
+    // Dropdown options (user-added select values)
+    getOptions: builder.query({
+      query: (params) => ({ url: '/settings/options', params }),
+      providesTags: ['Options'],
+    }),
+    createOption: builder.mutation({
+      query: (data) => ({ url: '/settings/options', method: 'post', data }),
+      invalidatesTags: ['Options'],
+    }),
+
+    // ── Ledgers ───────────────────────────────────────────────────────────────
+    createParty: builder.mutation({
+      query: (data) => ({ url: '/parties', method: 'post', data }),
+      invalidatesTags: ['Parties'],
+    }),
+    getParties: builder.query({
+      query: (params) => ({ url: '/parties', params }),
+      providesTags: ['Parties'],
+    }),
+    getPartyLedger: builder.query({
+      query: (id) => ({ url: `/parties/${id}/ledger` }),
+      providesTags: (result, error, id) => [{ type: 'PartyLedger', id }],
+    }),
+    getPartyOrders: builder.query({
+      query: (id) => ({ url: `/parties/${id}/orders` }),
+      providesTags: (result, error, id) => [{ type: 'PartyOrders', id }],
+    }),
+    deleteParty: builder.mutation({
+      query: (id) => ({ url: `/parties/${id}`, method: 'delete' }),
+      invalidatesTags: ['Parties', 'DeletedRecords'],
+    }),
+    // Super Admin / Admin "Switch Category" (Parties tab eye-view): preview how many Lead/Quotation/
+    // Negotiation/Order copies a switch would rewrite, then apply it. The switch rewrites the
+    // category on every linked record, so every list that shows or filters by it is refreshed.
+    getPartyCategoryImpact: builder.query({
+      query: ({ id, category }) => ({ url: `/parties/${id}/category-impact`, params: { category } }),
+    }),
+    switchPartyCategory: builder.mutation({
+      query: ({ id, ...data }) => ({ url: `/parties/${id}/category`, method: 'patch', data }),
+      invalidatesTags: ['Parties', 'Leads', 'Quotations', 'Negotiations', 'Orders', 'Operations', 'HotelDesigns', 'Reports'],
+    }),
+    getCustomersLedger: builder.query({
+      query: () => ({ url: '/parties/customers-ledger' }),
+      providesTags: ['Parties'],
+    }),
+    getVendorsLedger: builder.query({
+      query: () => ({ url: '/parties/vendors-ledger' }),
+      providesTags: ['Parties'],
+    }),
+    // Live "other pending dues" total for a hotel — used by invoice/quotation documents
+    // (Billing, Sales, Dispatch) to show a hotel's outstanding balance on new documents.
+    getHotelPendingDue: builder.query({
+      query: (params) => ({ url: '/parties/pending-due', params }),
+    }),
+    // Per-hotel product consumption/reorder forecast, derived from order history plus
+    // Rooms × Occupancy% as a fallback — powers the Sales "Consumption Forecast" tab.
+    getConsumptionForecast: builder.query({
+      query: () => ({ url: '/parties/consumption-forecast' }),
+      providesTags: ['Parties'],
+    }),
+
+    // ── Reports ──────────────────────────────────────────────────────────────
+    getSalesReport: builder.query({
+      query: (params) => ({ url: '/reports/sales', params }),
+      providesTags: ['Reports'],
+    }),
+    getPurchaseReport: builder.query({
+      query: (params) => ({ url: '/reports/purchase', params }),
+      providesTags: ['Reports'],
+    }),
+    getLocalPurchaseReport: builder.query({
+      query: (params) => ({ url: '/reports/local-purchase', params }),
+      providesTags: ['Reports'],
+    }),
+    getProfitLoss: builder.query({
+      query: (params) => ({ url: '/reports/profit-loss', params }),
+      providesTags: ['Reports'],
+    }),
+    getBillPL: builder.query({
+      query: (params) => ({ url: '/reports/bill-wise-pl', params }),
+      providesTags: ['Reports'],
+    }),
+    getMonthlyGst: builder.query({
+      query: (params) => ({ url: '/reports/monthly-gst', params }),
+      providesTags: ['Reports'],
+    }),
+    getAuditorTax: builder.query({
+      query: (params) => ({ url: '/reports/auditor-tax', params }),
+      providesTags: ['Reports'],
+    }),
+    getForwardingCourierReport: builder.query({
+      query: (params) => ({ url: '/reports/forwarding-courier', params }),
+      providesTags: ['Reports'],
+    }),
+    getMyPerformance: builder.query({
+      query: (params) => ({ url: '/reports/my-performance', params }),
+      providesTags: ['Reports'],
+    }),
+    getPerformance: builder.query({
+      query: (params) => ({ url: '/reports/performance', params }),
+      providesTags: ['Reports'],
+    }),
+    getTaskPerformanceReport: builder.query({
+      query: (params) => ({ url: '/reports/task-performance', params }),
+      providesTags: ['Reports'],
+    }),
+    // Also tagged 'Stickers' so design approve/reject (Sales or Operations) refreshes it —
+    // incl. the Operations > Approved/Rejected Report tab, which reads this with type=design.
+    getEmergencyApprovalsReport: builder.query({
+      query: (params) => ({ url: '/reports/emergency-approvals', params }),
+      providesTags: ['Reports', 'Stickers'],
+    }),
+    getSwitchReport: builder.query({
+      query: (params) => ({ url: '/reports/switches', params }),
+      providesTags: ['Reports'],
+    }),
+    getDamagedReport: builder.query({
+      query: (params) => ({ url: '/reports/damaged', params }),
+      providesTags: ['Reports'],
+    }),
+    getPaymentBankReport: builder.query({
+      query: (params) => ({ url: '/reports/payment-bank', params }),
+      providesTags: ['Reports'],
+    }),
+    // Also tagged 'Leads' so editing a lead's follow-up date/time/status refreshes it.
+    getLeadFollowupReport: builder.query({
+      query: (params) => ({ url: '/reports/lead-followups', params }),
+      providesTags: ['Reports', 'Leads'],
+    }),
+    getAssigneeTaskReport: builder.query({
+      query: (params) => ({ url: '/reports/assignee-tasks', params }),
+      providesTags: ['Reports', 'AssigneeTasks'],
+    }),
+
+    // ── WhatsApp ────────────────────────────────────────────────────────────
+    getWhatsAppConfig: builder.query({
+      query: () => ({ url: '/whatsapp/config' }),
+      providesTags: ['WhatsApp'],
+    }),
+    getWhatsAppCredentials: builder.query({
+      query: () => ({ url: '/whatsapp/credentials' }),
+      providesTags: ['WhatsApp'],
+    }),
+    saveWhatsAppConfig: builder.mutation({
+      query: (data) => ({ url: '/whatsapp/config', method: 'post', data }),
+      invalidatesTags: ['WhatsApp', 'WhatsAppTemplates'],
+    }),
+    testWhatsAppConnection: builder.mutation({
+      query: (data) => ({ url: '/whatsapp/test', method: 'post', data }),
+      invalidatesTags: ['WhatsApp', 'WhatsAppTemplates'],
+    }),
+    disconnectWhatsApp: builder.mutation({
+      query: () => ({ url: '/whatsapp/disconnect', method: 'post' }),
+      invalidatesTags: ['WhatsApp', 'WhatsAppTemplates', 'WhatsAppEvents', 'WhatsAppMappings'],
+    }),
+    syncWhatsAppTemplates: builder.mutation({
+      query: () => ({ url: '/whatsapp/sync-templates', method: 'post' }),
+      invalidatesTags: ['WhatsAppTemplates'],
+    }),
+    getWhatsAppTemplates: builder.query({
+      query: (params) => ({ url: '/whatsapp/templates', params }),
+      providesTags: ['WhatsAppTemplates'],
+    }),
+    getWhatsAppEvents: builder.query({
+      query: () => ({ url: '/whatsapp/events' }),
+      providesTags: ['WhatsAppEvents'],
+    }),
+    getWhatsAppEventMappings: builder.query({
+      query: () => ({ url: '/whatsapp/event-mappings' }),
+      providesTags: ['WhatsAppMappings'],
+    }),
+    saveWhatsAppEventMapping: builder.mutation({
+      query: (data) => ({ url: '/whatsapp/event-mappings', method: 'post', data }),
+      invalidatesTags: ['WhatsAppMappings', 'WhatsAppTemplates'],
+    }),
+    deleteWhatsAppEventMapping: builder.mutation({
+      query: (id) => ({ url: `/whatsapp/event-mappings/${id}`, method: 'delete' }),
+      invalidatesTags: ['WhatsAppMappings', 'WhatsAppTemplates'],
+    }),
+    sendWhatsAppMessage: builder.mutation({
+      query: (data) => ({ url: '/whatsapp/send', method: 'post', data }),
+    }),
+
+    // ── Alert Configuration ──────────────────────────────────────────────────
+    getAlertConfigs: builder.query({
+      query: () => ({ url: '/alert-config' }),
+      providesTags: ['AlertConfigs'],
+    }),
+    saveAlertConfig: builder.mutation({
+      query: (data) => ({ url: '/alert-config', method: 'post', data }),
+      invalidatesTags: ['AlertConfigs'],
+    }),
+    uploadAlertAudio: builder.mutation({
+      query: (formData) => ({ url: '/alert-config/upload-audio', method: 'post', data: formData }),
+    }),
+    getActiveAlerts: builder.query({
+      query: () => ({ url: '/alerts/active' }),
+      providesTags: ['ActiveAlerts'],
+    }),
+    snoozeAlert: builder.mutation({
+      query: (data) => ({ url: '/alerts/snooze', method: 'post', data }),
+      invalidatesTags: ['ActiveAlerts', 'SnoozedAlerts'],
+    }),
+    stopAlert: builder.mutation({
+      query: (data) => ({ url: '/alerts/stop', method: 'post', data }),
+      invalidatesTags: ['ActiveAlerts', 'SnoozedAlerts'],
+    }),
+    getSnoozedAlerts: builder.query({
+      query: () => ({ url: '/alerts/snoozed' }),
+      providesTags: ['SnoozedAlerts'],
+    }),
+    clearSnoozedAlert: builder.mutation({
+      query: (id) => ({ url: `/alerts/snoozed/${id}/clear`, method: 'post' }),
+      invalidatesTags: ['ActiveAlerts', 'SnoozedAlerts'],
+    }),
+
+    // ── GST Integration ──────────────────────────────────────────────────────
+    getGstConfig: builder.query({
+      query: () => ({ url: '/settings/gst-config' }),
+      providesTags: ['GstConfig'],
+    }),
+    getGstCredentials: builder.query({
+      query: () => ({ url: '/settings/gst-config/credentials' }),
+      providesTags: ['GstConfig'],
+    }),
+    updateGstConfig: builder.mutation({
+      query: (data) => ({ url: '/settings/gst-config', method: 'put', data }),
+      invalidatesTags: ['GstConfig'],
+    }),
+    deleteGstConfig: builder.mutation({
+      query: () => ({ url: '/settings/gst-config', method: 'delete' }),
+      invalidatesTags: ['GstConfig'],
+    }),
+    testGstConnection: builder.mutation({
+      query: (data) => ({ url: '/settings/gst-config/test', method: 'post', data }),
+    }),
+    verifyGstin: builder.query({
+      query: (gstin) => ({ url: `/settings/gst/verify/${encodeURIComponent(gstin)}` }),
+    }),
+    verifyPincode: builder.query({
+      query: (pincode) => ({ url: `/settings/pincode/${encodeURIComponent(pincode)}` }),
+    }),
+
+    // ── AI Integration (OpenAI) ──────────────────────────────────────────────
+    getAiConfig: builder.query({
+      query: () => ({ url: '/settings/ai-config' }),
+      providesTags: ['AiConfig'],
+    }),
+    getAiCredentials: builder.query({
+      query: () => ({ url: '/settings/ai-config/credentials' }),
+      providesTags: ['AiConfig'],
+    }),
+    updateAiConfig: builder.mutation({
+      query: (data) => ({ url: '/settings/ai-config', method: 'put', data }),
+      invalidatesTags: ['AiConfig'],
+    }),
+    deleteAiConfig: builder.mutation({
+      query: () => ({ url: '/settings/ai-config', method: 'delete' }),
+      invalidatesTags: ['AiConfig'],
+    }),
+    testAiConnection: builder.mutation({
+      query: (data) => ({ url: '/settings/ai-config/test', method: 'post', data }),
+      invalidatesTags: ['AiConfig'],
+    }),
+
+    // ── Purchase: AI Quotation Comparison ────────────────────────────────────
+    compareQuotations: builder.mutation({
+      // Backend gives the OpenAI call up to 300s — up to 5 large/multi-page
+      // documents go into one vision request. Override axios's 30s default,
+      // which is what was tripping "timeout of 30000ms exceeded" here even on a
+      // comparison the backend would otherwise have finished successfully.
+      query: (formData) => ({ url: '/purchase/quotation-comparison', method: 'post', data: formData, timeout: 320000 }),
+      invalidatesTags: ['QuotationComparisons'],
+    }),
+    getQuotationComparisons: builder.query({
+      query: (params) => ({ url: '/purchase/quotation-comparison', params }),
+      providesTags: ['QuotationComparisons'],
+    }),
+    getQuotationComparison: builder.query({
+      query: (id) => ({ url: `/purchase/quotation-comparison/${id}` }),
+      providesTags: ['QuotationComparisons'],
+    }),
+    selectBestQuotation: builder.mutation({
+      query: ({ id, selectedIndex }) => ({ url: `/purchase/quotation-comparison/${id}/select`, method: 'post', data: { selectedIndex } }),
+      invalidatesTags: ['QuotationComparisons', 'Purchase', 'Financial'],
+    }),
+  }),
+});
+
+export const {
+  // Auth
+  useLoginMutation,
+  useLogoutMutation,
+  useGetMeQuery,
+  useChangePasswordMutation,
+  // Dashboard
+  useGetKPIsQuery,
+  useGetRecentOrdersQuery,
+  useGetLowStockQuery,
+  useGetRevenueTrendQuery,
+  useGetOrderStatusQuery,
+  useGetTopProductsQuery,
+  useGetTaskStatusQuery,
+  // Staff
+  useGetStaffQuery,
+  useGetStaffMemberQuery,
+  useCreateStaffMutation,
+  useUpdateStaffMutation,
+  useDeleteStaffMutation,
+  useUpdateCredentialsMutation,
+  useToggleLoginMutation,
+  useGetClaimsQuery,
+  useCreateClaimMutation,
+  useUpdateClaimStatusMutation,
+  // HRMS (EktaHR)
+  useGetHrStaffListQuery,
+  useGetHrStaffQuery,
+  useGetHrStaffSetupQuery,
+  useGetHrBranchesQuery,
+  useGetHrActiveShiftQuery,
+  useGetHrShiftScheduleQuery,
+  useGetHrAttendanceQuery,
+  useGetHrAttendanceFineQuery,
+  useGetHrAttendanceOvertimeQuery,
+  useGetHrLeaveBalancesQuery,
+  useGetHrSalaryStructureQuery,
+  useGetHrSalaryOverviewQuery,
+  useGetHrApprovalsQuery,
+  useGetHrStaffDocumentsQuery,
+  useGetHrAllStaffAttendanceQuery,
+  useGetHrOvertimeListQuery,
+  useGetHrPayrollQuery,
+  useGetHrIncentivesQuery,
+  // HRMS Geo
+  useGetGeoDashboardQuery,
+  useGetGeoLiveQuery,
+  useGetGeoCustomersQuery,
+  useGetGeoCustomerQuery,
+  useGetGeoEmployeeAccessQuery,
+  useGetGeoTravelAllowancesQuery,
+  useGetGeoTaskTravelAllowanceQuery,
+  useGetGeoTasksQuery,
+  useGetGeoTrackingSummaryQuery,
+  useGetGeoTimelineQuery,
+  useGetGeoTimelineLocationsQuery,
+  useGetGeoTrackingDetailsQuery,
+  // Vendors
+  useGetVendorsQuery,
+  useGetVendorQuery,
+  useCreateVendorMutation,
+  useUpdateVendorMutation,
+  useDeleteVendorMutation,
+  useGetVendorHistoryQuery,
+  useGetVendorLedgerQuery,
+  useLazyGetVendorLedgerQuery,
+  useUpdateVendorStatusMutation,
+  useGenerateAiSummaryMutation,
+  useScanVendorDocumentMutation,
+  useScanVendorBillMutation,
+  // Purchase
+  useGetRequestsQuery,
+  useCreateBulkRequestMutation,
+  useRaiseRequestMutation,
+  useRecordQuotationAskMutation,
+  useUploadQuotationFileMutation,
+  useScanQuotationFileMutation,
+  useUpdatePurchaseRequestDetailsMutation,
+  useAddPurchaseNoteMutation,
+  useGetPurchaseOrdersQuery,
+  useReceiveOrderMutation,
+  useScanReceivedInvoiceMutation,
+  useResolveMissingOrderMutation,
+  useUpdatePurchaseOrderActionTakenMutation,
+  useUploadPurchaseLRMutation,
+  useScanPurchaseLRMutation,
+  useGetLocalPurchasesQuery,
+  useScanLocalPurchaseInvoiceMutation,
+  useCreateLocalPurchaseMutation,
+  useGetLocalPurchaseQuery,
+  useGetPurchasePersonsQuery,
+  useCreatePurchasePersonMutation,
+  useGetPurchaseHistoryQuery,
+  // Dispatch
+  useGetDispatchesQuery,
+  useGetDispatchTransportNamesQuery,
+  useGetDispatchQuery,
+  useCreateDispatchMutation,
+  useSaveAsDraftMutation,
+  useUploadInvoiceMutation,
+  useConfirmDispatchMutation,
+  useVerifyInvoiceMutation,
+  useUploadBoxPhotosMutation,
+  useUploadItemBoxPhotosMutation,
+  useUploadKitBoxPhotosMutation,
+  useScanDispatchPhotosMutation,
+  useRemoveDispatchPhotoMutation,
+  useAddBoxPhotoUrlMutation,
+  useGetTodaysDispatchesQuery,
+  useGetPendingDispatchesQuery,
+  useGetDispatchStatsQuery,
+  useGetTransportsQuery,
+  useUpdateTransportStatusMutation,
+  useGetPickupOrdersQuery,
+  useGetTodaysPickupOrdersQuery,
+  useCreatePickupOrderMutation,
+  useUpdatePickupOrderMutation,
+  useGetComplaintHistoryQuery,
+  useGetRemindersQuery,
+  useGetHotelNamesQuery,
+  useLazyLookupHotelQuery,
+  useGetSuggestedTasksQuery,
+  useLazyGetSuggestedTasksInsightQuery,
+  useGetLatestTaskInsightQuery,
+  useAssignTasksPerProductMutation,
+  useSetOrderEmergencyMutation,
+  useDecideLrMismatchOpsMutation,
+  useSplitPartialDeliveryMutation,
+  useUseExistingMaterialStockMutation,
+  useGetHotelDesignsQuery,
+  useGetApprovedDesignsQuery,
+  useSaveHotelDesignMutation,
+  useApproveStickerRequestMutation,
+  useRejectStickerRequestMutation,
+  useGetHiddenQueueRowsQuery,
+  useHideQueueRowMutation,
+  useUploadDispatchLRMutation,
+  useScanDispatchLRMutation,
+  useReportTransportMismatchMutation,
+  useRequestLrMismatchApprovalMutation,
+  useRequestInvoiceMismatchApprovalMutation,
+  useRequestDispatchApprovalMutation,
+  useDecideDispatchApprovalMutation,
+  useVerifyItemMutation,
+  // Inventory
+  useGetItemsQuery,
+  useGetItemQuery,
+  useCreateItemMutation,
+  useUpdateItemMutation,
+  useDeleteItemMutation,
+  useSellStockRequestMutation,
+  useAddStockRequestMutation,
+  useFillStockMutation,
+  useGetStockApprovalsQuery,
+  useApproveMovementMutation,
+  useRejectMovementMutation,
+  useGetStockHistoryQuery,
+  useLazyGetStockHistoryQuery,
+  useGetStockHistoryReportQuery,
+  useSubmitStockCheckMutation,
+  useGetKitsQuery,
+  useCreateKitMutation,
+  useUpdateKitMutation,
+  useDeleteKitMutation,
+  // Packing Config
+  useGetPackingConfigQuery,
+  useCreatePackingConfigMutation,
+  useUpdatePackingConfigMutation,
+  useDeletePackingConfigMutation,
+  // Material Stocks
+  useGetMaterialStocksQuery,
+  useCreateMaterialStockMutation,
+  useUpdateMaterialStockMutation,
+  useDeleteMaterialStockMutation,
+  useUploadMaterialStockInvoiceMutation,
+  // Financial
+  useGetPendingRequestsQuery,
+  useApproveFinancialRequestMutation,
+  useBatchApproveRequestsMutation,
+  useRejectFinancialRequestMutation,
+  useUpdateFinancialQuotationMutation,
+  useRequestQuotationModificationMutation,
+  usePayPurchaseOrderMutation,
+  useUpdateOrderAmountMutation,
+  useGetExpensePaymentsQuery,
+  usePayExpenseMutation,
+  useGetPickupExpensesQuery,
+  usePayPickupExpenseMutation,
+  useGetLocalPurchaseExpensesQuery,
+  usePayLocalPurchaseExpenseMutation,
+  useGetLrPaymentsQuery,
+  usePayLrPaymentMutation,
+  // Sales
+  useGetLeadsQuery,
+  useGetLeadQuery,
+  useCreateLeadMutation,
+  useUpdateLeadMutation,
+  useDeleteLeadMutation,
+  useUpdateLeadStatusMutation,
+  useAssignLeadMutation,
+  useGetSalesQuotationsQuery,
+  useCreateSalesQuotationMutation,
+  useUpdateSalesQuotationMutation,
+  useDeleteSalesQuotationMutation,
+  useConvertToNegotiationMutation,
+  useConvertLeadToNegotiationMutation,
+  useGetNegotiationsQuery,
+  useUpdateNegotiationMutation,
+  useDeleteNegotiationMutation,
+  useConvertToOrderMutation,
+  useGetSalesOrdersQuery,
+  useGetOrdersByHotelNameQuery,
+  useGetSalesOrderQuery,
+  useCreateSalesOrderMutation,
+  useUpdateSalesOrderMutation,
+  useUpdateSalesOrderStatusMutation,
+  useDeleteSalesOrderMutation,
+  useDecideTransportMismatchMutation,
+  useDecideLrMismatchSalesMutation,
+  useDecideInvoiceMismatchMutation,
+  useGetComplaintsQuery,
+  useCreateComplaintMutation,
+  useUpdateComplaintStatusMutation,
+  // Billing
+  useGetBillingPartiesQuery,
+  useCreateBillingPartyMutation,
+  useUpdateBillingPartyMutation,
+  useDeleteBillingPartyMutation,
+  useGetBillingPartyLedgerQuery,
+  useGetInvoicesQuery,
+  useGetInvoiceQuery,
+  useCreateInvoiceMutation,
+  useUpdateInvoicePricingMutation,
+  useUpdateQuotationPricingMutation,
+  useDeleteInvoiceMutation,
+  useRecordPaymentMutation,
+  useGetInvoicePaymentsQuery,
+  useConvertQuotationToInvoiceMutation,
+  useGetQuotationsInProcessQuery,
+  // Expenses
+  useGetExpensesQuery,
+  useCreateExpenseMutation,
+  useUpdateExpenseMutation,
+  useDeleteExpenseMutation,
+  useGetExpenseHistoryQuery,
+  useGetExpenseByIdQuery,
+  useRecordExpensePaymentMutation,
+  // Tasks
+  useGetTasksQuery,
+  useGetTaskQuery,
+  useGetEmergencyRequestsQuery,
+  useLazyGetOrderDispatchReadinessQuery,
+  useCreateTaskMutation,
+  useUpdateTaskStatusMutation,
+  useReassignTaskMutation,
+  useSwitchTaskMutation,
+  useApproveEmergencyMutation,
+  useDispatchTaskOrderMutation,
+  useRequestEmergencyDispatchMutation,
+  useRequestEmergencyDispatchForOrderMutation,
+  useApproveEmergencySalesHeadMutation,
+  useApproveEmergencyOpsHeadMutation,
+  useDeleteTaskMutation,
+  useGetTaskTimeConfigsQuery,
+  useCreateTaskTimeConfigMutation,
+  useUpdateTaskTimeConfigMutation,
+  useDeleteTaskTimeConfigMutation,
+  // Operations
+  useGetOperationOrdersQuery,
+  useGetTodaysOrdersQuery,
+  useGetTodaysDispatchQuery,
+  useUpdateOperationOrderStatusMutation,
+  useUpdateItemPrintingStatusMutation,
+  useAssignTaskMutation,
+  useGetStickerRequestsQuery,
+  useCreateStickerRequestMutation,
+  useUploadStickerDesignMutation,
+  useUpdateStickerStatusMutation,
+  useReassignStickerRequestMutation,
+  useUploadStickerInvoiceMutation,
+  useSendToStickerTeamMutation,
+  useSendDesignConfirmationWhatsAppMutation,
+  useGetPackagingInvoicesQuery,
+  useUploadPackagingInvoiceMutation,
+  // Notifications
+  useGetNotificationsQuery,
+  useMarkNotificationReadMutation,
+  useMarkAllNotificationsReadMutation,
+  useGetStockAlertsQuery,
+  useGetPaymentAlertsQuery,
+  useDeleteNotificationMutation,
+  useDeleteAllNotificationsMutation,
+  useGetNotificationSoundConfigQuery,
+  useUpdateNotificationSoundConfigMutation,
+  useUploadNotificationSoundFileMutation,
+  // Settings
+  useGetCountryCodesQuery,
+  useGetCompanySettingsQuery,
+  useGetPublicBrandingQuery,
+  useUpdateCompanySettingsMutation,
+  useUploadLogoMutation,
+  useUploadSignatureMutation,
+  useUploadQrCodeMutation,
+  useGetUsersQuery,
+  useCreateUserMutation,
+  useUpdateUserMutation,
+  useDeleteUserMutation,
+  useUpdatePermissionsMutation,
+  useGetDeletedRecordsQuery,
+  useRestoreRecordMutation,
+  useGetOptionsQuery,
+  useCreateOptionMutation,
+  // Parties
+  useGetPartiesQuery,
+  useGetPartyLedgerQuery,
+  useLazyGetPartyLedgerQuery,
+  useGetPartyOrdersQuery,
+  useCreatePartyMutation,
+  useDeletePartyMutation,
+  useGetPartyCategoryImpactQuery,
+  useSwitchPartyCategoryMutation,
+  useGetCustomersLedgerQuery,
+  useGetVendorsLedgerQuery,
+  useGetConsumptionForecastQuery,
+  // Reports
+  useGetSalesReportQuery,
+  useGetPurchaseReportQuery,
+  useGetLocalPurchaseReportQuery,
+  useGetProfitLossQuery,
+  useGetBillPLQuery,
+  useGetMonthlyGstQuery,
+  useGetAuditorTaxQuery,
+  useGetForwardingCourierReportQuery,
+  useGetMyPerformanceQuery,
+  useGetPerformanceQuery,
+  useGetTaskPerformanceReportQuery,
+  useGetEmergencyApprovalsReportQuery,
+  useGetSwitchReportQuery,
+  useGetDamagedReportQuery,
+  useGetPaymentBankReportQuery,
+  useGetLeadFollowupReportQuery,
+  useGetAssigneeTaskReportQuery,
+  useGetAssigneeTasksQuery,
+  useGetAssigneeTaskQuery,
+  useCreateAssigneeTasksMutation,
+  useUpdateAssigneeTaskStatusMutation,
+  useUploadFilesMutation,
+  useDeleteFileMutation,
+  // WhatsApp
+  useGetWhatsAppConfigQuery,
+  useGetWhatsAppCredentialsQuery,
+  useSaveWhatsAppConfigMutation,
+  useTestWhatsAppConnectionMutation,
+  useDisconnectWhatsAppMutation,
+  useSyncWhatsAppTemplatesMutation,
+  useGetWhatsAppTemplatesQuery,
+  useGetWhatsAppEventsQuery,
+  useGetWhatsAppEventMappingsQuery,
+  useSaveWhatsAppEventMappingMutation,
+  useDeleteWhatsAppEventMappingMutation,
+  useSendWhatsAppMessageMutation,
+  // Alert Configuration
+  useGetAlertConfigsQuery,
+  useSaveAlertConfigMutation,
+  useUploadAlertAudioMutation,
+  useGetActiveAlertsQuery,
+  useSnoozeAlertMutation,
+  useStopAlertMutation,
+  useGetSnoozedAlertsQuery,
+  useClearSnoozedAlertMutation,
+  // GST Integration
+  useGetGstConfigQuery,
+  useGetGstCredentialsQuery,
+  useLazyGetGstCredentialsQuery,
+  useUpdateGstConfigMutation,
+  useDeleteGstConfigMutation,
+  useTestGstConnectionMutation,
+  useVerifyGstinQuery,
+  useLazyVerifyGstinQuery,
+  useLazyVerifyPincodeQuery,
+
+  // AI Integration
+  useGetAiConfigQuery,
+  useGetAiCredentialsQuery,
+  useLazyGetAiCredentialsQuery,
+  useUpdateAiConfigMutation,
+  useDeleteAiConfigMutation,
+  useTestAiConnectionMutation,
+
+  // AI Quotation Comparison
+  useCompareQuotationsMutation,
+  useGetQuotationComparisonsQuery,
+  useGetQuotationComparisonQuery,
+  useSelectBestQuotationMutation,
+} = apiSlice;

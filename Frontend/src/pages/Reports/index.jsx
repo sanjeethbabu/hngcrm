@@ -1,0 +1,3316 @@
+import React, { useState, useMemo, useRef } from 'react';
+import { Row, Col, Card, Table, Button, Select, Input, Typography, Space, Tabs, Divider, DatePicker, Tag, Empty, Checkbox, Popover } from 'antd';
+import { DownloadOutlined, FileExcelOutlined, FilePdfOutlined, SearchOutlined, FilterOutlined, CalendarOutlined } from '@ant-design/icons';
+import {
+  BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
+  XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
+} from 'recharts';
+import { useSelector } from 'react-redux';
+import { motion } from 'framer-motion';
+import dayjs from 'dayjs';
+import html2pdf from 'html2pdf.js';
+import PageBreadcrumb from '../../components/common/PageBreadcrumb';
+import useTabAccess from '../../hooks/useTabAccess';
+import TaskPerformanceReport from '../../components/reports/TaskPerformanceReport';
+import DamagedReport from '../../components/reports/DamagedReport';
+import PaymentBankReport from '../../components/reports/PaymentBankReport';
+import LeadFollowupReport from '../../components/reports/LeadFollowupReport';
+import AssigneeTaskReport from '../../components/reports/AssigneeTaskReport';
+import {
+  useGetSalesReportQuery,
+  useGetPurchaseReportQuery,
+  useGetLocalPurchaseReportQuery,
+  useGetProfitLossQuery,
+  useGetBillPLQuery,
+  useGetMonthlyGstQuery,
+  useGetForwardingCourierReportQuery,
+  useGetPerformanceQuery,
+  useGetEmergencyApprovalsReportQuery,
+  useGetSwitchReportQuery,
+} from '../../store/api/apiSlice';
+
+const { Title, Text } = Typography;
+const { Option } = Select;
+
+// One entry per real Expense.category enum value (Backend/src/models/Expense.js), matching
+// EXPENSE_CAT_MAP in reports.controller.js 1:1 — every category a user can actually log an
+// expense against gets its own selectable chip, instead of Raw Material/Other/Purchase being
+// silently lumped into one "Other" bucket.
+const BASE_EXPENSE_CATEGORIES = [
+  { key: 'raw_material', label: 'Raw Material', color: '#8a1652' },
+  { key: 'transport',    label: 'Transport',     color: '#D85C9E' },
+  { key: 'utilities',    label: 'Utilities',     color: '#B11E6A' },
+  { key: 'purchase',     label: 'Purchase',      color: '#C94F8A' },
+  { key: 'other',        label: 'Other',         color: '#6b1240' },
+];
+// Distinct hues for the user-added "Other" sub-categories (P&L `expenseCategories`), so they
+// stay tellable apart from the brand-pink base categories in the pie/statement.
+const CUSTOM_EXPENSE_COLORS = ['#722ed1', '#13c2c2', '#faad14', '#2f54eb', '#52c41a', '#fa541c', '#1890ff', '#eb2f96'];
+
+const CHART_COLORS = ['#B11E6A', '#D85C9E', '#8a1652', '#C94F8A', '#e91e8c', '#f06292'];
+const statusColor = { Paid: '#52c41a', Pending: '#fa8c16', 'Partially Paid': '#B11E6A', Overdue: '#ff4d4f' };
+
+
+const exportToExcel = (headers, rows, filename) => {
+  const bom = 'ï»¿';
+  const csv = [headers, ...rows]
+    .map(r => r.map(c => `"${String(c ?? '').replace(/"/g, '""')}"`).join(','))
+    .join('\n');
+  const blob = new Blob([bom + csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+};
+
+// Rasterizes a tab's KPI+table content (not the filter bar/buttons above it) to a PDF via
+// html2pdf (html2canvas + jsPDF under the hood — same library used for invoice/quotation
+// PDFs in Billing). Table pagination/scroll chrome is captured as-is; this is an internal
+// report export, not a branded document, so pixel-perfect layout isn't the goal.
+const exportRefToPdf = async (ref, filename) => {
+  if (!ref?.current) return;
+  await html2pdf()
+    .from(ref.current)
+    .set({
+      margin: 6,
+      filename,
+      image: { type: 'jpeg', quality: 0.95 },
+      html2canvas: { scale: 2, useCORS: true },
+      jsPDF: { unit: 'mm', format: 'a3', orientation: 'landscape' },
+      pagebreak: { mode: ['css', 'legacy'] },
+    })
+    .save();
+};
+
+const periodToRange = (period) => {
+  const now = dayjs();
+  switch (period) {
+    case 'week': return [now.startOf('week'), now.endOf('week')];
+    case 'month': return [now.startOf('month'), now.endOf('month')];
+    // dayjs core has no 'quarter' unit (that needs the quarterOfYear plugin, not loaded
+    // here) — compute the quarter's start month manually instead.
+    case 'quarter': {
+      const qStartMonth = Math.floor(now.month() / 3) * 3;
+      const start = now.month(qStartMonth).startOf('month');
+      return [start, start.add(2, 'month').endOf('month')];
+    }
+    case 'year': return [now.startOf('year'), now.endOf('year')];
+    default: return null;
+  }
+};
+
+// Indian fiscal year: Apr 1 – Mar 31. Returns the dayjs start-of-day for the FY that `base`
+// falls in (e.g. any date in Jan–Mar resolves to the previous calendar year's Apr 1).
+const fiscalYearStart = (base) => base.year(base.month() >= 3 ? base.year() : base.year() - 1).month(3).date(1).startOf('day');
+
+// Named quick-select date buckets for the P&L "Select Date" filter — each resolves to a
+// concrete [start, end] dayjs range as of the moment this is called.
+const quickDateRanges = () => {
+  const now = dayjs();
+  const thisFyStart = fiscalYearStart(now);
+  const thisFyEnd = thisFyStart.add(1, 'year').subtract(1, 'day').endOf('day');
+  const prevFyStart = thisFyStart.subtract(1, 'year');
+  const prevFyEnd = thisFyStart.subtract(1, 'day').endOf('day');
+  const qStartMonth = Math.floor(now.month() / 3) * 3;
+  const thisQStart = now.month(qStartMonth).startOf('month');
+  const thisQEnd = thisQStart.add(2, 'month').endOf('month');
+  const lastQStart = thisQStart.subtract(3, 'month');
+  const lastQEnd = thisQStart.subtract(1, 'day').endOf('day');
+
+  return [
+    { key: 'today', label: 'Today', range: [now.startOf('day'), now.endOf('day')] },
+    { key: 'yesterday', label: 'Yesterday', range: [now.subtract(1, 'day').startOf('day'), now.subtract(1, 'day').endOf('day')] },
+    { key: 'this_week', label: 'This week', range: [now.startOf('week'), now.endOf('week')] },
+    { key: 'last_week', label: 'Last Week', range: [now.subtract(1, 'week').startOf('week'), now.subtract(1, 'week').endOf('week')] },
+    { key: 'last_7_days', label: 'Last 7 days', range: [now.subtract(6, 'day').startOf('day'), now.endOf('day')] },
+    { key: 'this_month', label: 'This month', range: [now.startOf('month'), now.endOf('month')] },
+    { key: 'last_month', label: 'Last Month', range: [now.subtract(1, 'month').startOf('month'), now.subtract(1, 'month').endOf('month')] },
+    { key: 'this_quarter', label: 'This quarter', range: [thisQStart, thisQEnd] },
+    { key: 'last_quarter', label: 'Last quarter', range: [lastQStart, lastQEnd] },
+    { key: 'current_fy', label: 'Current fiscal year', range: [thisFyStart, thisFyEnd] },
+    { key: 'previous_fy', label: 'Previous fiscal year', range: [prevFyStart, prevFyEnd] },
+    { key: 'last_365_days', label: 'Last 365 Days', range: [now.subtract(365, 'day').startOf('day'), now.endOf('day')] },
+  ];
+};
+
+export default function Reports() {
+  const isDark = useSelector((s) => s.theme.isDark);
+  const cardBg = isDark ? '#1E1E2E' : '#ffffff';
+  const textColor = isDark ? '#e0e0e0' : '#1a1a2e';
+  const borderColor = isDark ? '#333' : '#f0f0f0';
+  const gridColor = isDark ? '#333' : '#f0f0f0';
+  const tickColor = isDark ? '#aaa' : '#666';
+
+  const { filterTabs } = useTabAccess('Reports');
+
+  const [purchaseReportSearch, setPurchaseReportSearch] = useState('');
+  const [salesReportSearch, setSalesReportSearch] = useState('');
+  const [salesProductFilter, setSalesProductFilter] = useState(null);
+  const [salesPersonFilter, setSalesPersonFilter] = useState(null);
+  const [purchaseProductFilter, setPurchaseProductFilter] = useState(null);
+  const [salesDateRange, setSalesDateRange] = useState(null);
+  const [purchaseDateRange, setPurchaseDateRange] = useState(null);
+  const [purchaseGstTab, setPurchaseGstTab] = useState('with_gst');
+
+  // Local Purchase Report state
+  const [lpSearch, setLpSearch] = useState('');
+  const [lpVendorFilter, setLpVendorFilter] = useState(null);
+  const [lpStatusFilter, setLpStatusFilter] = useState('all');
+  const [lpDateRange, setLpDateRange] = useState(null);
+
+  // Auditor Tax Report state
+  const [auditorSubTab, setAuditorSubTab] = useState('sales');
+  const [auditorGstFilter, setAuditorGstFilter] = useState('all');
+  const [auditorSearch, setAuditorSearch] = useState('');
+
+  // Forwarding & Courier Charges Report state
+  const [fcSearch, setFcSearch] = useState('');
+  const [fcMonthFilter, setFcMonthFilter] = useState('all');
+  // 'combined' | 'forwarding' | 'courier' — mirrors gstViewMode below, driven by the two
+  // Forwarding/Courier checkboxes so either charge type can be viewed on its own.
+  const [fcViewMode, setFcViewMode] = useState('combined');
+  // Transport Cost Scope (Client/HNG/Unspecified) filter — lets this report be viewed as
+  // CLIENT-billed vs HNG-borne charges separately.
+  const [fcScopeFilter, setFcScopeFilter] = useState('all');
+
+  // Monthly GST Report state
+  const [gstMonthFilter, setGstMonthFilter] = useState('all');
+  // 'combined' | 'sales' | 'purchase' — driven by the GST Out (Sales) / GST In (Purchase)
+  // checkboxes in the filter bar; at least one stays checked at all times.
+  const [gstViewMode, setGstViewMode] = useState('combined');
+
+  // P&L state
+  const [plSelectedMonth, setPlSelectedMonth] = useState('all');
+  const [plDateRange, setPlDateRange] = useState(null);
+  // Tracks which "Select Date" quick bucket (Today/This week/Current fiscal year/etc.) is
+  // active, purely so the picker panel can highlight it; the actual filtering runs off
+  // plDateRange like it always has. Cleared whenever the RangePicker itself is used directly.
+  const [plQuickSelect, setPlQuickSelect] = useState(null);
+  // All expense categories are deducted (checked) by default — Net Profit starts as
+  // Gross Profit minus every real expense category, matching the P&L definition; unchecking
+  // a chip excludes just that category from the Net Profit calc. Tracked as the EXCLUDED set
+  // (plSelectedExpenses is derived below) because "Other" sub-categories arrive with the P&L
+  // data — any new one must start out deducted, not silently left out of Net Profit.
+  const [plExcludedExpenses, setPlExcludedExpenses] = useState([]);
+  const [plProductFilter, setPlProductFilter] = useState(null);
+  const [plGstMode, setPlGstMode] = useState('excl');
+
+  // Bill-wise P&L state
+  const [billPlSearch, setBillPlSearch] = useState('');
+  const [billPlProductFilter, setBillPlProductFilter] = useState(null);
+
+  // Performance state
+  const [perfTab, setPerfTab] = useState('leaderboard');
+
+  // Emergency Approval Report state
+  const [eaTypeFilter, setEaTypeFilter] = useState('all');
+  const [eaStatusFilter, setEaStatusFilter] = useState('all');
+  const [eaSearch, setEaSearch] = useState('');
+  const [swTypeFilter, setSwTypeFilter] = useState('all');
+  const [swSearch, setSwSearch] = useState('');
+
+  // Header-level global date filter — applies to every tab. Tabs with their own date
+  // picker (Sales/Purchase/P&L) let that picker override this default; tabs with no picker
+  // of their own (Bill-wise P&L/Monthly GST/Forwarding & Courier/Performance) use this
+  // directly, since previously they had no date filtering UI at all.
+  const [headerDateRange, setHeaderDateRange] = useState(null);
+  const [headerPeriod, setHeaderPeriod] = useState('month');
+  const [activeTabKey, setActiveTabKey] = useState('sales_report');
+  // DOM refs wrapping each tab's KPI+table content (excluding its filter bar) — targeted by
+  // that tab's PDF export button, and by the header's PDF button via activeTabExportMap below.
+  const salesRef = useRef(null);
+  const purchaseRef = useRef(null);
+  const localPurchaseRef = useRef(null);
+  const plRef = useRef(null);
+  const billPlRef = useRef(null);
+  const performanceRef = useRef(null);
+  const monthlyGstRef = useRef(null);
+  const forwardingCourierRef = useRef(null);
+  const auditorTaxRef = useRef(null);
+  const emergencyApprovalsRef = useRef(null);
+  const switchReportRef = useRef(null);
+  // Exposes the Payment Bank Details tab's own { excel, pdf } exports to the header buttons.
+  const paymentBankReportRef = useRef(null);
+  // Same for the Lead Follow-up Report tab.
+  const leadFollowupReportRef = useRef(null);
+  const assigneeTaskReportRef = useRef(null);
+
+  const handlePeriodChange = (period) => {
+    setHeaderPeriod(period);
+    setHeaderDateRange(periodToRange(period));
+  };
+  const handleHeaderRangeChange = (range) => {
+    setHeaderDateRange(range);
+    setHeaderPeriod(null); // custom range no longer matches a quick-select bucket
+  };
+
+  // ── API-backed report data — RTK Query ──
+  // Date-range pickers below feed these as query params, so the backend does the actual
+  // filtering (buildDateFilterOn in reports.controller) rather than the UI silently ignoring
+  // the selected range. Tab-specific pickers (when set) override the header's global range.
+  // RangePicker (without showTime) resolves both ends to midnight — normalizing here to
+  // startOf/endOf day (idempotent for ranges already at those bounds, e.g. periodToRange's
+  // output) is what makes a same-day range (start === end) actually match that day's records
+  // instead of only records timestamped exactly at midnight.
+  const toDateParams = (range) => (
+    range?.[0] && range?.[1]
+      ? { startDate: range[0].startOf('day').toISOString(), endDate: range[1].endOf('day').toISOString() }
+      : undefined
+  );
+  const headerDateParams = useMemo(() => toDateParams(headerDateRange), [headerDateRange]);
+  const salesDateParams = useMemo(
+    () => toDateParams(salesDateRange) || headerDateParams,
+    [salesDateRange, headerDateParams]
+  );
+  const purchaseDateParams = useMemo(
+    () => toDateParams(purchaseDateRange) || headerDateParams,
+    [purchaseDateRange, headerDateParams]
+  );
+  const lpDateParams = useMemo(
+    () => toDateParams(lpDateRange) || headerDateParams,
+    [lpDateRange, headerDateParams]
+  );
+  const plDateParams = useMemo(
+    () => toDateParams(plDateRange) || headerDateParams,
+    [plDateRange, headerDateParams]
+  );
+
+  const { data: salesReportRaw } = useGetSalesReportQuery(salesDateParams);
+  const { data: purchaseReportRaw } = useGetPurchaseReportQuery(purchaseDateParams);
+  const { data: localPurchaseReportRaw } = useGetLocalPurchaseReportQuery(lpDateParams);
+  const { data: profitLossRaw } = useGetProfitLossQuery(plDateParams);
+  const { data: billPLRaw } = useGetBillPLQuery(headerDateParams);
+  const { data: monthlyGstRaw } = useGetMonthlyGstQuery(headerDateParams);
+  const { data: performanceRaw } = useGetPerformanceQuery(headerDateParams);
+  const { data: forwardingCourierRaw } = useGetForwardingCourierReportQuery(headerDateParams);
+  const { data: emergencyApprovalsRaw } = useGetEmergencyApprovalsReportQuery(headerDateParams);
+  const { data: switchReportRaw } = useGetSwitchReportQuery(headerDateParams);
+
+  const apiSalesData = useMemo(() => salesReportRaw || { data: [], summary: {}, chartData: [] }, [salesReportRaw]);
+  const apiPurchaseData = useMemo(() => purchaseReportRaw || { data: [], summary: {}, chartData: [] }, [purchaseReportRaw]);
+  const apiLocalPurchaseData = useMemo(() => localPurchaseReportRaw || { data: [], summary: {}, chartData: [] }, [localPurchaseReportRaw]);
+  const apiPLData = useMemo(() => profitLossRaw?.data || { summary: {}, monthlyData: [], expenseBreakdown: {} }, [profitLossRaw]);
+  // Base categories + one entry per "Other" sub-category present in this P&L window.
+  const expenseCategoryConfig = useMemo(() => [
+    ...BASE_EXPENSE_CATEGORIES,
+    ...(apiPLData.expenseCategories || []).map((c, i) => ({ ...c, color: CUSTOM_EXPENSE_COLORS[i % CUSTOM_EXPENSE_COLORS.length] })),
+  ], [apiPLData]);
+  const plSelectedExpenses = expenseCategoryConfig.map(c => c.key).filter(k => !plExcludedExpenses.includes(k));
+  const apiBillPL = useMemo(() => billPLRaw?.data || [], [billPLRaw]);
+  const apiGstData = useMemo(() => monthlyGstRaw?.data || [], [monthlyGstRaw]);
+  const apiPerformance = useMemo(() => performanceRaw?.data || { leaderboard: [] }, [performanceRaw]);
+  const apiForwardingCourier = useMemo(
+    () => forwardingCourierRaw || { data: [], monthlyHotelData: [], summary: {} },
+    [forwardingCourierRaw]
+  );
+  const apiEmergencyApprovals = useMemo(
+    () => emergencyApprovalsRaw || { data: [], summary: {}, chartData: [] },
+    [emergencyApprovalsRaw]
+  );
+  const apiSwitchReport = useMemo(
+    () => switchReportRaw || { data: [], summary: {} },
+    [switchReportRaw]
+  );
+
+  const handleExport = async (type) => {
+    try {
+      const endpointMap = { sales: '/reports/sales/export', purchase: '/reports/purchase/export', gst: '/reports/monthly-gst/export' };
+      const url = endpointMap[type];
+      if (!url) return;
+      const { default: api } = await import('../../api/axios');
+      const { data } = await api.get(url, { responseType: 'blob' });
+      const blobUrl = URL.createObjectURL(new Blob([data]));
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      a.download = `${type}-report.csv`;
+      a.click();
+      URL.revokeObjectURL(blobUrl);
+    } catch { /* silent */ }
+  };
+
+  const salesRawData = apiSalesData.data || [];
+  const purchaseRawData = apiPurchaseData.data || [];
+  const lpRawData = apiLocalPurchaseData.data || [];
+
+  const salesChartData = apiSalesData.chartData?.length ? apiSalesData.chartData : [];
+  const purchaseChartData = apiPurchaseData.chartData?.length ? apiPurchaseData.chartData : [];
+  const lpChartData = apiLocalPurchaseData.chartData?.length ? apiLocalPurchaseData.chartData : [];
+
+  const filteredSalesData = salesRawData.filter(r => {
+    const q = salesReportSearch.toLowerCase();
+    const matchSearch = !q || (r.customer || '').toLowerCase().includes(q) || (r.inv_no || '').toLowerCase().includes(q) || (r.product || '').toLowerCase().includes(q);
+    const matchProduct = !salesProductFilter || r.product === salesProductFilter;
+    const matchSalesPerson = !salesPersonFilter || r.salesPerson === salesPersonFilter;
+    return matchSearch && matchProduct && matchSalesPerson;
+  });
+
+  const filteredPurchaseData = purchaseRawData.filter(r => {
+    const q = purchaseReportSearch.toLowerCase();
+    const matchSearch = !q || (r.supplier || '').toLowerCase().includes(q) || (r.inv_no || '').toLowerCase().includes(q) || (r.product || '').toLowerCase().includes(q);
+    const matchProduct = !purchaseProductFilter || r.product === purchaseProductFilter;
+    return matchSearch && matchProduct;
+  });
+
+  const filteredLpData = lpRawData.filter(r => {
+    const q = lpSearch.toLowerCase();
+    const matchSearch = !q || (r.vendor || '').toLowerCase().includes(q) || (r.invoiceNo || '').toLowerCase().includes(q) || (r.lpCode || '').toLowerCase().includes(q) || (r.product || '').toLowerCase().includes(q);
+    const matchVendor = !lpVendorFilter || r.vendor === lpVendorFilter;
+    const matchStatus = lpStatusFilter === 'all' || r.paymentStatus === lpStatusFilter;
+    return matchSearch && matchVendor && matchStatus;
+  });
+
+  const salesTotal = filteredSalesData.reduce((s, r) => s + r.inv_value, 0);
+  const purchaseTotal = filteredPurchaseData.reduce((s, r) => s + r.inv_value, 0);
+  const lpTotal = filteredLpData.reduce((s, r) => s + r.totalAmount, 0);
+  const lpPaidTotal = filteredLpData.reduce((s, r) => s + r.paidAmount, 0);
+  const lpPendingTotal = filteredLpData.reduce((s, r) => s + r.pendingAmount, 0);
+
+  const plMonthlyDataActive = (apiPLData.monthlyData?.length ? apiPLData.monthlyData : [])
+    .map(d => ({ ...d, expenses: d.expenses || {} }));
+  const plProductMonthlyDataActive = apiPLData.productMonthlyData || {};
+  const activeBillPLData = apiBillPL.length ? apiBillPL : [];
+  const activeGstData = apiGstData.length ? apiGstData : [];
+  const activeSalesPersonData = apiPerformance.leaderboard?.length ? apiPerformance.leaderboard : [];
+  const activeSalesPersonMonthly = apiPerformance.monthlyData || [];
+  const activeProductPLData = apiPLData.productData?.length ? apiPLData.productData : [];
+
+  // P&L computed values — product-aware
+  const plBaseData = (() => {
+    if (plProductFilter && plProductMonthlyDataActive[plProductFilter]) {
+      return plProductMonthlyDataActive[plProductFilter].map(pd => {
+        const allRow = plMonthlyDataActive.find(d => d.month === pd.month);
+        if (!allRow) return { ...pd, expenses: Object.fromEntries(expenseCategoryConfig.map(c => [c.key, 0])) };
+        const ratio = allRow.sales > 0 ? pd.sales / allRow.sales : 0;
+        const expenses = Object.fromEntries(
+          Object.entries(allRow.expenses || {}).map(([k, v]) => [k, Math.round(v * ratio * 100) / 100])
+        );
+        const paid = Math.round((allRow.paid || 0) * ratio * 100) / 100;
+        const pending = Math.round((allRow.pending || 0) * ratio * 100) / 100;
+        const paidGst = Math.round((allRow.paidGst || 0) * ratio * 100) / 100;
+        const pendingGst = Math.round((allRow.pendingGst || 0) * ratio * 100) / 100;
+        return { ...pd, expenses, paid, pending, paidGst, pendingGst };
+      });
+    }
+    return plMonthlyDataActive;
+  })();
+
+  const plFilteredData = plSelectedMonth === 'all' ? plBaseData : plBaseData.filter(d => d.month === plSelectedMonth);
+
+  const totalSalesExcl = plFilteredData.reduce((s, d) => s + d.sales, 0);
+  const totalSalesGst  = plFilteredData.reduce((s, d) => s + (d.salesGst || 0), 0);
+  const totalCogsExcl  = plFilteredData.reduce((s, d) => s + d.cogs, 0);
+  const totalCogsGst   = plFilteredData.reduce((s, d) => s + (d.cogsGst || 0), 0);
+  const totalGrossProfitExcl = plFilteredData.reduce((s, d) => s + d.grossProfit, 0);
+  const totalPaidExcl    = plFilteredData.reduce((s, d) => s + (d.paid || 0), 0);
+  const totalPendingExcl = plFilteredData.reduce((s, d) => s + (d.pending || 0), 0);
+  const totalPaidGst     = plFilteredData.reduce((s, d) => s + (d.paidGst || 0), 0);
+  const totalPendingGst  = plFilteredData.reduce((s, d) => s + (d.pendingGst || 0), 0);
+
+  const totalSales      = plGstMode === 'incl' ? totalSalesExcl + totalSalesGst : totalSalesExcl;
+  const totalCogs       = plGstMode === 'incl' ? totalCogsExcl + totalCogsGst   : totalCogsExcl;
+  const totalGrossProfit = plGstMode === 'incl' ? totalSales - totalCogs         : totalGrossProfitExcl;
+  // Reconciles exactly with totalSales in both GST modes: excl-mode uses just the
+  // excl-GST paid/pending split, incl-mode adds each order's GST portion on top.
+  const totalPaid    = plGstMode === 'incl' ? totalPaidExcl + totalPaidGst       : totalPaidExcl;
+  const totalPending = plGstMode === 'incl' ? totalPendingExcl + totalPendingGst : totalPendingExcl;
+  const totalExpenses = plFilteredData.reduce((s, d) =>
+    s + plSelectedExpenses.reduce((sum, cat) => sum + (d.expenses[cat] || 0), 0), 0
+  );
+  // Damaged-goods loss from Billing quantity reductions (Reports > Damaged Report). Cost-basis
+  // loss reduces Net Profit (the lessed units' revenue AND their COGS already dropped from
+  // Total Sales / COGS above); revenue-basis loss is a memo figure only. Not product-split, so
+  // it only applies at the un-product-filtered view.
+  const totalDamageLoss        = plFilteredData.reduce((s, d) => s + (d.damageLoss || 0), 0);
+  const totalDamageRevenueLoss = plFilteredData.reduce((s, d) => s + (d.damageRevenueLoss || 0), 0);
+  const totalNetProfit = totalGrossProfit - totalExpenses - totalDamageLoss;
+  const netGstPayable  = totalSalesGst - totalCogsGst;
+
+  const plChartData = plFilteredData.map(d => ({
+    month: d.month,
+    sales: d.sales,
+    grossProfit: d.grossProfit,
+    damageLoss: d.damageLoss || 0,
+    totalExpenses: plSelectedExpenses.reduce((sum, cat) => sum + (d.expenses[cat] || 0), 0),
+    netProfit: d.grossProfit - plSelectedExpenses.reduce((sum, cat) => sum + (d.expenses[cat] || 0), 0) - (d.damageLoss || 0),
+  }));
+
+  const expensePieData = expenseCategoryConfig
+    .filter(c => plSelectedExpenses.includes(c.key))
+    .map(c => ({
+      name: c.label,
+      value: plFilteredData.reduce((sum, d) => sum + (d.expenses[c.key] || 0), 0),
+      color: c.color,
+    }))
+    .filter(d => d.value > 0);
+
+  // Product-specific monthly breakdown (for detail view when a product is selected)
+  const selectedProductMonthly = plProductFilter
+    ? plBaseData.map(d => ({ ...d, netProfit: d.grossProfit - plSelectedExpenses.reduce((s, cat) => s + (d.expenses[cat] || 0), 0) }))
+    : null;
+  // Sold Qty / Stock Qty for the selected product — sourced from activeProductPLData (the
+  // same per-product totals the unfiltered "Product-wise Profit & Loss" table shows), so the
+  // single-product detail view carries the same two figures instead of dropping them.
+  const selectedProductStats = plProductFilter
+    ? activeProductPLData.find(p => p.product === plProductFilter)
+    : null;
+
+  // Dynamic filter options from real data
+  const salesProductOptions = useMemo(() => [...new Set(salesRawData.map(r => r.product).filter(Boolean))], [salesRawData]);
+  const salesPersonOptions = useMemo(() => [...new Set(salesRawData.map(r => r.salesPerson).filter(Boolean))], [salesRawData]);
+  const purchaseProductOptions = useMemo(() => [...new Set(purchaseRawData.map(r => r.product).filter(Boolean))], [purchaseRawData]);
+  const lpVendorOptions = useMemo(() => [...new Set(lpRawData.map(r => r.vendor).filter(Boolean))], [lpRawData]);
+  const plProductOptions = useMemo(() => activeProductPLData.map(p => p.product).filter(Boolean), [activeProductPLData]);
+  const plMonthOptions = useMemo(() => plMonthlyDataActive.map(d => d.month), [plMonthlyDataActive]);
+  const billPlProductOptions = useMemo(() => [...new Set(apiBillPL.map(r => r.product).filter(Boolean))], [apiBillPL]);
+
+  // Product distribution for sales pie
+  const salesByProduct = Object.entries(
+    filteredSalesData.reduce((acc, r) => {
+      acc[r.product] = (acc[r.product] || 0) + r.inv_value;
+      return acc;
+    }, {})
+  ).map(([name, value], i) => ({ name, value, color: CHART_COLORS[i % CHART_COLORS.length] }));
+
+  // Supplier distribution for purchase pie
+  const purchaseBySupplier = Object.entries(
+    filteredPurchaseData.reduce((acc, r) => {
+      acc[r.supplier] = (acc[r.supplier] || 0) + r.inv_value;
+      return acc;
+    }, {})
+  ).map(([name, value], i) => ({ name, value, color: CHART_COLORS[i % CHART_COLORS.length] }));
+
+  // Vendor distribution for local purchase pie
+  const lpByVendor = Object.entries(
+    filteredLpData.reduce((acc, r) => {
+      acc[r.vendor] = (acc[r.vendor] || 0) + r.totalAmount;
+      return acc;
+    }, {})
+  ).map(([name, value], i) => ({ name, value, color: CHART_COLORS[i % CHART_COLORS.length] }));
+
+  // Export handlers for tabs whose data is computed at component scope (not inside a
+  // per-tab IIFE) — registered here so both the tab's own button and the header's
+  // Excel/PDF buttons (which fire whichever tab is active) call the exact same logic.
+  const exportSalesExcel = () => {
+    const headers = ['GSTIN/UIN', 'Customer Name', 'Sales Person', 'State Code', 'Place of Supply', 'Invoice No', 'Original Invoice No', 'Invoice Date', 'Invoice Value', 'Taxable Value', 'Total Tax (%)', 'Total Tax Amount', 'Central Tax (CGST)', 'State/UT Tax (SGST)', 'Integrated Tax (IGST)', 'Cess'];
+    const rows = filteredSalesData.map(r => [
+      r.gst_no, r.customer, r.salesPerson, r.state_code, r.state_name,
+      r.inv_no, r.orig_inv_no, r.inv_date, r.inv_value,
+      r.taxable, r.total_tax > 0 ? ((r.total_tax / r.taxable) * 100).toFixed(0) + '%' : '0%',
+      r.total_tax, r.cgst, r.sgst, r.igst, 0,
+    ]);
+    exportToExcel(headers, rows, 'Sales_Report.csv');
+  };
+  const exportSalesPdf = () => exportRefToPdf(salesRef, 'Sales_Report.pdf');
+
+  const exportPurchaseExcel = () => {
+    const headers = ['Vendor GSTIN', 'Supplier Name', 'Product', 'HSN Code', 'GST Rate (%)', 'Qty', 'Unit Price', 'State Code', 'Place of Supply', 'Invoice No', 'Original Invoice No', 'Invoice Date', 'Taxable Value', 'CGST', 'SGST', 'IGST', 'Total Tax', 'Invoice Value'];
+    const rows = filteredPurchaseData.map(r => [
+      r.vendor_gst, r.supplier, r.product, r.hsn, r.gst_rate,
+      r.qty, r.unit_price, r.state_code, r.state_name,
+      r.inv_no, r.orig_inv_no, r.inv_date,
+      r.taxable, r.cgst, r.sgst, r.igst, r.total_tax, r.inv_value,
+    ]);
+    exportToExcel(headers, rows, 'Purchase_Report.csv');
+  };
+  const exportPurchasePdf = () => exportRefToPdf(purchaseRef, 'Purchase_Report.pdf');
+
+  const exportLpExcel = () => {
+    const headers = ['LP Code', 'Invoice No', 'Date', 'Vendor', 'Products', 'Qty', 'Total Amount', 'GST Amount', 'Paid Amount', 'Pending Amount', 'Payment Status', 'Due Date'];
+    const rows = filteredLpData.map(r => [
+      r.lpCode, r.invoiceNo, r.date, r.vendor, r.product, r.qty,
+      r.totalAmount, r.gstAmount, r.paidAmount, r.pendingAmount, r.paymentStatus, r.dueDate,
+    ]);
+    exportToExcel(headers, rows, 'Local_Purchase_Report.csv');
+  };
+  const exportLpPdf = () => exportRefToPdf(localPurchaseRef, 'Local_Purchase_Report.pdf');
+
+  const exportPlExcel = () => {
+    // Exports every expense category with its own column regardless of which chips are
+    // currently checked in the UI — the export is a full record, not a filtered view.
+    const headers = ['Month', 'Sales (Excl. GST)', 'Sales GST', 'COGS', 'Gross Profit', 'Damaged Goods Loss', 'Paid', 'Pending', ...expenseCategoryConfig.map(c => c.label), 'Net Profit'];
+    const rows = plFilteredData.map(d => {
+      const exp = plSelectedExpenses.reduce((sum, cat) => sum + (d.expenses?.[cat] || 0), 0);
+      return [
+        d.month, d.sales, d.salesGst || 0, d.cogs, d.grossProfit, d.damageLoss || 0, d.paid || 0, d.pending || 0,
+        ...expenseCategoryConfig.map(c => d.expenses?.[c.key] || 0),
+        d.grossProfit - exp - (d.damageLoss || 0),
+      ];
+    });
+    const catTotals = expenseCategoryConfig.map(c => plFilteredData.reduce((s, d) => s + (d.expenses?.[c.key] || 0), 0));
+    rows.push(['TOTAL', totalSales, totalSalesGst, totalCogs, totalGrossProfit, totalDamageLoss, totalPaid, totalPending, ...catTotals, totalNetProfit]);
+    exportToExcel(headers, rows, 'Profit_Loss_Report.csv');
+  };
+  const exportPlPdf = () => exportRefToPdf(plRef, 'Profit_Loss_Report.pdf');
+  const exportPlDownload = () => { exportPlExcel(); exportPlPdf(); };
+
+  // Bill-wise P&L, Monthly GST, Forwarding & Courier, and Auditor Tax re-derive their
+  // filtered rows here too (duplicating the same small filter, mirrored inside each tab's
+  // own render body below) purely so their export functions can live at component scope —
+  // refs must never be mutated during render (React Compiler rule), so the export-handler
+  // lookup below can only be built from functions that already exist outside any per-tab
+  // render closure.
+  const billPlFilteredForExport = activeBillPLData.filter(r => {
+    const q = billPlSearch.toLowerCase();
+    const matchSearch = !q || r.inv_no.toLowerCase().includes(q) || r.client.toLowerCase().includes(q) || r.product.toLowerCase().includes(q);
+    const matchProd = !billPlProductFilter || r.product === billPlProductFilter;
+    return matchSearch && matchProd;
+  });
+  const exportBillPlExcel = () => {
+    const headers = ['Invoice #', 'Date', 'Client', 'Product', 'Taxable Sales', 'CGST', 'SGST', 'GST Collected', 'Total Bill', 'COGS', 'Gross Profit', 'Margin %', 'Status'];
+    const rows = billPlFilteredForExport.map(r => [
+      r.inv_no, r.date, r.client, r.product, r.sell_taxable, r.cgst, r.sgst,
+      r.gst_collected, r.sell_total, r.cogs, r.gross_profit,
+      r.sell_taxable > 0 ? ((r.gross_profit / r.sell_taxable) * 100).toFixed(1) + '%' : '0%',
+      r.status,
+    ]);
+    exportToExcel(headers, rows, 'Bill_wise_PL_Report.csv');
+  };
+  const exportBillPlPdf = () => exportRefToPdf(billPlRef, 'Bill_wise_PL_Report.pdf');
+
+  const gstFilteredForExport = gstMonthFilter === 'all' ? activeGstData : activeGstData.filter(r => r.month === gstMonthFilter);
+  const exportGstExcel = () => {
+    // Export matches the selected view — Sales Only / Purchase Only download their own
+    // standalone GST report instead of always dumping the combined columns.
+    if (gstViewMode === 'sales') {
+      const headers = ['Month', 'Year', 'Sales Taxable (₹)', 'Sales CGST (₹)', 'Sales SGST (₹)', 'Sales IGST (₹)', 'Total Output GST (₹)'];
+      const rows = gstFilteredForExport.map(r => [r.month, r.year, r.sales_taxable, r.sales_cgst, r.sales_sgst, r.sales_igst, r.sales_total_gst]);
+      exportToExcel(headers, rows, 'Monthly_Sales_GST_Report.csv');
+    } else if (gstViewMode === 'purchase') {
+      const headers = ['Month', 'Year', 'Purchase Taxable (₹)', 'Purchase CGST (₹)', 'Purchase SGST (₹)', 'Purchase IGST (₹)', 'Total Input GST/ITC (₹)'];
+      const rows = gstFilteredForExport.map(r => [r.month, r.year, r.pur_taxable, r.pur_cgst, r.pur_sgst, r.pur_igst, r.pur_total_gst]);
+      exportToExcel(headers, rows, 'Monthly_Purchase_GST_Report.csv');
+    } else {
+      const headers = ['Month', 'Year', 'Sales Taxable (₹)', 'Sales CGST (₹)', 'Sales SGST (₹)', 'Sales IGST (₹)', 'Total Output GST (₹)', 'Purchase Taxable (₹)', 'Purchase CGST (₹)', 'Purchase SGST (₹)', 'Purchase IGST (₹)', 'Total Input GST/ITC (₹)', 'Net GST Payable (₹)'];
+      const rows = gstFilteredForExport.map(r => [
+        r.month, r.year,
+        r.sales_taxable, r.sales_cgst, r.sales_sgst, r.sales_igst, r.sales_total_gst,
+        r.pur_taxable, r.pur_cgst, r.pur_sgst, r.pur_igst, r.pur_total_gst,
+        Math.max(r.sales_total_gst - r.pur_total_gst, 0),
+      ]);
+      exportToExcel(headers, rows, 'Monthly_GST_Report.csv');
+    }
+  };
+  const exportGstPdf = () => exportRefToPdf(monthlyGstRef, 'Monthly_GST_Report.pdf');
+
+  const fcFilteredForExport = (apiForwardingCourier.monthlyHotelData || []).filter(r => {
+    const q = fcSearch.toLowerCase();
+    const matchSearch = !q || (r.hotel || '').toLowerCase().includes(q);
+    const matchMonth = fcMonthFilter === 'all' || `${r.month}-${r.year}` === fcMonthFilter;
+    const matchScope = fcScopeFilter === 'all' || r.transportCostScope === fcScopeFilter;
+    return matchSearch && matchMonth && matchScope;
+  });
+  const exportFcExcel = () => {
+    // Export matches the selected view — Forwarding-only / Courier-only download their own
+    // standalone report instead of always dumping the combined columns.
+    if (fcViewMode === 'forwarding') {
+      const headers = ['S.No', 'Month', 'Hotel', 'Transport Cost Scope', 'Invoices', 'Forwarding Charge'];
+      const rows = fcFilteredForExport.map((r, i) => [i + 1, `${r.month} ${r.year}`, r.hotel, r.transportCostScope, r.invoiceCount, r.forwardingCharge]);
+      exportToExcel(headers, rows, 'Forwarding_Charges_Report.csv');
+    } else if (fcViewMode === 'courier') {
+      const headers = ['S.No', 'Month', 'Hotel', 'Transport Cost Scope', 'Invoices', 'Courier Charge'];
+      const rows = fcFilteredForExport.map((r, i) => [i + 1, `${r.month} ${r.year}`, r.hotel, r.transportCostScope, r.invoiceCount, r.courierCharge]);
+      exportToExcel(headers, rows, 'Courier_Charges_Report.csv');
+    } else {
+      const headers = ['S.No', 'Month', 'Hotel', 'Transport Cost Scope', 'Invoices', 'Forwarding Charge', 'Courier Charge', 'Total Charge'];
+      const rows = fcFilteredForExport.map((r, i) => [
+        i + 1, `${r.month} ${r.year}`, r.hotel, r.transportCostScope, r.invoiceCount, r.forwardingCharge, r.courierCharge, r.totalCharge,
+      ]);
+      exportToExcel(headers, rows, 'Forwarding_Courier_Charges_Report.csv');
+    }
+  };
+  const exportFcPdf = () => exportRefToPdf(forwardingCourierRef, 'Forwarding_Courier_Charges_Report.pdf');
+
+  // GST/Non-GST bucket keys off Invoice.invoiceType (the statutory distinction — same field
+  // the backend's dedicated /reports/auditor-tax endpoint filters on), not the computed tax
+  // amount — a GST-type invoice with a 0%-rated line item would otherwise be miscategorized
+  // as "without GST" by amount alone.
+  const auditorSalesGstForExport = salesRawData.filter(r => {
+    const matchGst = auditorGstFilter === 'all' ? true : auditorGstFilter === 'with_gst' ? r.invoiceType === 'GST' : r.invoiceType !== 'GST';
+    const q = auditorSearch.toLowerCase();
+    const matchSearch = !q || r.customer.toLowerCase().includes(q) || r.inv_no.toLowerCase().includes(q) || r.gst_no.toLowerCase().includes(q);
+    return matchGst && matchSearch;
+  });
+  const auditorPurchaseGstForExport = purchaseRawData.filter(r => {
+    const matchGst = auditorGstFilter === 'all' ? true : auditorGstFilter === 'with_gst' ? r.total_tax > 0 : r.total_tax === 0;
+    const q = auditorSearch.toLowerCase();
+    const matchSearch = !q || r.supplier.toLowerCase().includes(q) || r.inv_no.toLowerCase().includes(q) || r.vendor_gst.toLowerCase().includes(q);
+    return matchGst && matchSearch;
+  });
+  const exportAuditorExcel = () => {
+    if (auditorSubTab === 'sales') {
+      const headers = ['S.No', 'GSTIN/UIN', 'Receiver Name', 'Invoice No', 'Invoice Date', 'Invoice Value', 'Place of Supply', 'Taxable Value', 'Central Tax Rate (%)', 'Central Tax (₹)', 'State/UT Tax Rate (%)', 'State/UT Tax (₹)', 'Integrated Tax Rate (%)', 'Integrated Tax (₹)', 'Cess (₹)', 'Total Tax (₹)'];
+      const rows = auditorSalesGstForExport.map((r, i) => [
+        i + 1, r.gst_no, r.customer, r.inv_no, r.inv_date, r.inv_value,
+        `${r.state_code} - ${r.state_name}`, r.taxable,
+        r.cgst > 0 ? ((r.cgst / r.taxable) * 100).toFixed(0) + '%' : '0%', r.cgst,
+        r.sgst > 0 ? ((r.sgst / r.taxable) * 100).toFixed(0) + '%' : '0%', r.sgst,
+        r.igst > 0 ? ((r.igst / r.taxable) * 100).toFixed(0) + '%' : '0%', r.igst,
+        0, r.total_tax,
+      ]);
+      exportToExcel(headers, rows, 'Auditor_Sales_Tax_Report.csv');
+    } else {
+      const headers = ['S.No', 'Vendor GSTIN', 'Supplier Name', 'Product', 'HSN Code', 'Invoice No', 'Invoice Date', 'Invoice Value', 'Place of Supply', 'Taxable Value', 'Central Tax Rate (%)', 'Central Tax (₹)', 'State/UT Tax Rate (%)', 'State/UT Tax (₹)', 'Integrated Tax Rate (%)', 'Integrated Tax (₹)', 'Cess (₹)', 'Total Tax (₹)'];
+      const rows = auditorPurchaseGstForExport.map((r, i) => [
+        i + 1, r.vendor_gst, r.supplier, r.product, r.hsn, r.inv_no, r.inv_date, r.inv_value,
+        `${r.state_code} - ${r.state_name}`, r.taxable,
+        r.cgst > 0 ? ((r.cgst / r.taxable) * 100).toFixed(0) + '%' : '0%', r.cgst,
+        r.sgst > 0 ? ((r.sgst / r.taxable) * 100).toFixed(0) + '%' : '0%', r.sgst,
+        r.igst > 0 ? ((r.igst / r.taxable) * 100).toFixed(0) + '%' : '0%', r.igst,
+        0, r.total_tax,
+      ]);
+      exportToExcel(headers, rows, 'Auditor_Purchase_Tax_Report.csv');
+    }
+  };
+  const exportAuditorPdf = () => exportRefToPdf(auditorTaxRef, 'Auditor_Tax_Report.pdf');
+
+  const exportPerformanceExcel = () => {
+    const headers = ['Rank', 'Name', 'Role', 'Orders', 'Revenue', 'Target', 'Conversion %', 'Complaints'];
+    const sorted = [...activeSalesPersonData].sort((a, b) => b.revenue - a.revenue);
+    const rows = sorted.map((p, i) => [i + 1, p.name, p.role, p.orders, p.revenue, p.target, p.conversion, p.complaints]);
+    exportToExcel(headers, rows, 'Performance_Report.csv');
+  };
+  const exportPerformancePdf = () => exportRefToPdf(performanceRef, 'Performance_Report.pdf');
+
+  const eaFilteredRows = (apiEmergencyApprovals.data || []).filter((r) => {
+    const matchType = eaTypeFilter === 'all' || r.module === eaTypeFilter;
+    const matchStatus = eaStatusFilter === 'all' || r.status === eaStatusFilter;
+    const q = eaSearch.toLowerCase();
+    const matchSearch = !q
+      || r.orderCode?.toLowerCase().includes(q)
+      || r.clientName?.toLowerCase().includes(q)
+      || r.sentBy?.toLowerCase().includes(q)
+      || r.reason?.toLowerCase().includes(q);
+    return matchType && matchStatus && matchSearch;
+  });
+  const exportEaExcel = () => {
+    const headers = ['Type', 'Order Code', 'Client', 'Sent Date', 'Sent Time', 'Sent By', 'Sent Reason', 'Approved Date', 'Approved Time', 'Approver 1 Role', 'Approver 1', 'Approver 1 Decision', 'Approver 1 Date', 'Approver 2 Role', 'Approver 2', 'Approver 2 Decision', 'Approver 2 Date', 'Status', 'Decision Reason'];
+    const rows = eaFilteredRows.map((r) => [
+      r.type, r.orderCode, r.clientName, r.sentDate, r.sentTime, r.sentBy, r.reason,
+      r.approvedDate, r.approvedTime,
+      r.approver1Role, r.approver1Name, r.approver1Decision, r.approver1Date,
+      r.approver2Role, r.approver2Name, r.approver2Decision, r.approver2Date,
+      r.status, r.approvedReason,
+    ]);
+    exportToExcel(headers, rows, 'Approval_Report.csv');
+  };
+  const exportEaPdf = () => exportRefToPdf(emergencyApprovalsRef, 'Emergency_Approval_Report.pdf');
+
+  const swFilteredRows = (apiSwitchReport.data || []).filter((r) => {
+    const matchType = swTypeFilter === 'all' || r.module === swTypeFilter;
+    const q = swSearch.toLowerCase();
+    const matchSearch = !q
+      || r.reference?.toLowerCase().includes(q)
+      || r.orderCode?.toLowerCase().includes(q)
+      || r.clientName?.toLowerCase().includes(q)
+      || r.switchFrom?.toLowerCase().includes(q)
+      || r.switchTo?.toLowerCase().includes(q)
+      || r.switchBy?.toLowerCase().includes(q);
+    return matchType && matchSearch;
+  });
+  const exportSwExcel = () => {
+    const headers = ['Type', 'Reference', 'Order Code', 'Client', 'Switch From', 'Switch To', 'Total Qty', 'Completed', 'Remaining', 'New Task', 'Switch By', 'Switch Date', 'Switch Time'];
+    const rows = swFilteredRows.map((r) => [
+      r.type, r.reference, r.orderCode, r.clientName, r.switchFrom, r.switchTo,
+      r.totalQty ?? '', r.completedQty ?? '', r.remainingQty ?? '', r.newTaskCode || '',
+      r.switchBy, r.switchDate, r.switchTime,
+    ]);
+    exportToExcel(headers, rows, 'Switch_Report.csv');
+  };
+  const exportSwPdf = () => exportRefToPdf(switchReportRef, 'Switch_Report.pdf');
+
+  // Freshly built every render from the functions above (not persisted via ref — mutating a
+  // ref during render is unsafe/disallowed) so the header's Excel/PDF buttons can dispatch
+  // to whichever tab is currently active.
+  const activeTabExportMap = {
+    sales_report: { excel: exportSalesExcel, pdf: exportSalesPdf },
+    purchase_report: { excel: exportPurchaseExcel, pdf: exportPurchasePdf },
+    local_purchase_report: { excel: exportLpExcel, pdf: exportLpPdf },
+    pl: { excel: exportPlExcel, pdf: exportPlPdf },
+    bill_pl: { excel: exportBillPlExcel, pdf: exportBillPlPdf },
+    performance: { excel: exportPerformanceExcel, pdf: exportPerformancePdf },
+    monthly_gst: { excel: exportGstExcel, pdf: exportGstPdf },
+    forwarding_courier: { excel: exportFcExcel, pdf: exportFcPdf },
+    auditor_tax: { excel: exportAuditorExcel, pdf: exportAuditorPdf },
+    emergency_approvals: { excel: exportEaExcel, pdf: exportEaPdf },
+    switch_report: { excel: exportSwExcel, pdf: exportSwPdf },
+    payment_bank_report: { excel: () => paymentBankReportRef.current?.excel(), pdf: () => paymentBankReportRef.current?.pdf() },
+    lead_followup_report: { excel: () => leadFollowupReportRef.current?.excel(), pdf: () => leadFollowupReportRef.current?.pdf() },
+    assignee_task_report: { excel: () => assigneeTaskReportRef.current?.excel(), pdf: () => assigneeTaskReportRef.current?.pdf() },
+  };
+
+  return (
+    <div className="page-container fade-in">
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 20, flexWrap: 'wrap', gap: 12 }}>
+        <PageBreadcrumb title="Reports & Analytics" items={[{ label: 'Reports & Analytics' }]} style={{ marginBottom: 0 }} />
+        <Space wrap>
+          <div style={{ display: 'flex', alignItems: 'center', background: isDark ? 'rgba(255,255,255,0.05)' : '#f5f5f5', padding: '4px 8px', borderRadius: 8, border: `1px solid ${isDark ? '#333' : '#f0f0f0'}` }}>
+            <DatePicker.RangePicker
+              bordered={false}
+              style={{ width: 260, background: 'transparent' }}
+              value={headerDateRange}
+              onChange={handleHeaderRangeChange}
+              allowClear
+            />
+          </div>
+          <Select value={headerPeriod ?? undefined} placeholder="Custom range" allowClear style={{ width: 120, borderRadius: 8 }} onChange={handlePeriodChange} onClear={() => { setHeaderPeriod(null); setHeaderDateRange(null); }}>
+            <Option value="week">This Week</Option>
+            <Option value="month">This Month</Option>
+            <Option value="quarter">Quarter</Option>
+            <Option value="year">Year</Option>
+          </Select>
+          <Button
+            icon={<FileExcelOutlined />}
+            style={{ color: '#B11E6A', borderColor: '#B11E6A44' }}
+            onClick={() => activeTabExportMap[activeTabKey]?.excel?.()}
+          >Excel</Button>
+          <Button
+            icon={<FilePdfOutlined />}
+            style={{ color: '#8a1652', borderColor: '#8a165244' }}
+            onClick={() => activeTabExportMap[activeTabKey]?.pdf?.()}
+          >PDF</Button>
+        </Space>
+      </div>
+
+      <Tabs
+        defaultActiveKey="sales_report"
+        onChange={setActiveTabKey}
+        items={filterTabs([
+          /* ─────────── SALES REPORT ─────────── */
+          {
+            key: 'sales_report',
+            label: 'Sales Report',
+            children: (
+              <div>
+                <Card style={{ borderRadius: 12, border: 'none', background: cardBg, marginBottom: 14, boxShadow: '0 2px 12px rgba(177,30,106,0.06)' }} styles={{ body: { padding: '12px 16px' } }}>
+                  <Space wrap style={{ width: '100%' }}>
+                    <FilterOutlined style={{ color: '#B11E6A' }} />
+                    <Text strong style={{ color: textColor, fontSize: 13 }}>Filter by:</Text>
+                    <Select allowClear placeholder="Select Product" value={salesProductFilter} onChange={setSalesProductFilter} style={{ width: 200 }}>
+                      {salesProductOptions.map(p => (
+                        <Option key={p} value={p}>{p}</Option>
+                      ))}
+                    </Select>
+                    <Select allowClear placeholder="Select Sales Person" value={salesPersonFilter} onChange={setSalesPersonFilter} style={{ width: 200 }}>
+                      {salesPersonOptions.map(p => (
+                        <Option key={p} value={p}>{p}</Option>
+                      ))}
+                    </Select>
+                    <DatePicker.RangePicker style={{ width: 260 }} onChange={setSalesDateRange} />
+                    <Input prefix={<SearchOutlined style={{ color: '#B11E6A' }} />} placeholder="Search customer, invoice..." allowClear value={salesReportSearch} onChange={(e) => setSalesReportSearch(e.target.value)} style={{ width: 220, borderRadius: 8 }} />
+                    <Button icon={<FileExcelOutlined />} style={{ color: '#52c41a', borderColor: '#52c41a44' }} onClick={exportSalesExcel}>Excel</Button>
+                    <Button icon={<FilePdfOutlined />} style={{ color: '#B11E6A', borderColor: '#B11E6A44' }} onClick={exportSalesPdf}>PDF</Button>
+                  </Space>
+                </Card>
+
+                <div ref={salesRef}>
+                <Row gutter={[14, 14]} style={{ marginBottom: 14 }}>
+                  <Col xs={24} lg={16}>
+                    <Card
+                      title={
+                        <Space>
+                          <Text strong style={{ color: textColor }}>Month-wise Sales Revenue</Text>
+                          {salesProductFilter && <Tag style={{ background: '#B11E6A22', color: '#B11E6A', border: '1px solid #B11E6A44', borderRadius: 20 }}>{salesProductFilter}</Tag>}
+                          {salesPersonFilter && <Tag style={{ background: '#7c3aed22', color: '#7c3aed', border: '1px solid #7c3aed44', borderRadius: 20 }}>{salesPersonFilter}</Tag>}
+                        </Space>
+                      }
+                      style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }}
+                      styles={{ body: { padding: '12px 16px 16px' } }}
+                    >
+                      <ResponsiveContainer width="100%" height={240}>
+                        <BarChart data={salesChartData}>
+                          <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />
+                          <XAxis dataKey="month" tick={{ fill: tickColor, fontSize: 12 }} />
+                          <YAxis tick={{ fill: tickColor, fontSize: 12 }} tickFormatter={v => `₹${(v ?? 0).toLocaleString()}`} />
+                          <Tooltip formatter={(v) => [`₹${(v ?? 0).toLocaleString()}`, 'Revenue']} contentStyle={{ background: isDark ? '#1E1E2E' : '#fff', borderRadius: 8 }} />
+                          <Bar dataKey="amount" fill="#B11E6A" radius={[4, 4, 0, 0]} name="Sales Revenue" />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </Card>
+                  </Col>
+                  <Col xs={24} lg={8}>
+                    <Card style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)', height: '100%' }} styles={{ body: { padding: '16px' } }}>
+                      <Text strong style={{ color: textColor, display: 'block', marginBottom: 12 }}>Sales by Product</Text>
+                      <ResponsiveContainer width="100%" height={160}>
+                        <PieChart>
+                          <Pie data={salesByProduct} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={65} label={false}>
+                            {salesByProduct.map((entry, idx) => (
+                              <Cell key={idx} fill={entry.color} />
+                            ))}
+                          </Pie>
+                          <Tooltip formatter={(v) => `₹${(v ?? 0).toLocaleString()}`} />
+                        </PieChart>
+                      </ResponsiveContainer>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 5, marginTop: 4 }}>
+                        {salesByProduct.map(e => (
+                          <div key={e.name} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <Space size={6}>
+                              <div style={{ width: 8, height: 8, borderRadius: '50%', background: e.color }} />
+                              <Text style={{ fontSize: 11, color: textColor }}>{e.name}</Text>
+                            </Space>
+                            <Text style={{ fontSize: 11, fontWeight: 600 }}>₹{(e.value ?? 0).toLocaleString()}</Text>
+                          </div>
+                        ))}
+                      </div>
+                    </Card>
+                  </Col>
+                </Row>
+
+                <Card style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }} styles={{ body: { padding: 16 } }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+                    <Title level={5} style={{ color: textColor, margin: 0 }}>Sales Report (GST Format)</Title>
+                    <Text type="secondary" style={{ fontSize: 12 }}>{filteredSalesData.length} records • Total: <Text strong style={{ color: '#B11E6A' }}>₹{(salesTotal ?? 0).toLocaleString()}</Text></Text>
+                  </div>
+                  <Table
+                    size="small"
+                    scroll={{ x: 'max-content' }}
+                    dataSource={filteredSalesData}
+                    columns={[
+                      { title: 'GST No', dataIndex: 'gst_no', key: 'gst_no', width: 160, render: v => <Text style={{ fontSize: 12 }}>{v}</Text> },
+                      { title: 'Customer Name', dataIndex: 'customer', key: 'customer', width: 150, render: v => <Text strong style={{ fontSize: 12 }}>{v}</Text> },
+                      { title: 'Sales Person', dataIndex: 'salesPerson', key: 'salesPerson', width: 140, render: v => v ? <Tag style={{ background: '#7c3aed15', color: '#7c3aed', border: '1px solid #7c3aed33', borderRadius: 20 }}>{v}</Tag> : <Text type="secondary" style={{ fontSize: 12 }}>—</Text> },
+                      { title: 'Product', dataIndex: 'product', key: 'product', width: 140, render: v => <Tag style={{ background: '#8a165215', color: '#8a1652', border: '1px solid #8a165233', borderRadius: 20 }}>{v}</Tag> },
+                      { title: 'State Code', dataIndex: 'state_code', key: 'state_code', width: 90, align: 'center' },
+                      { title: 'State Name', dataIndex: 'state_name', key: 'state_name', width: 130 },
+                      { title: 'Invoice No', dataIndex: 'inv_no', key: 'inv_no', width: 110, render: v => <Text style={{ color: '#B11E6A' }}>{v}</Text> },
+                      { title: 'Original Inv No', dataIndex: 'orig_inv_no', key: 'orig_inv_no', width: 130, render: v => <Text style={{ color: '#7c3aed' }}>{v}</Text> },
+                      { title: 'Invoice Date', dataIndex: 'inv_date', key: 'inv_date', width: 110 },
+                      { title: 'Invoice Value', dataIndex: 'inv_value', key: 'inv_value', width: 120, render: v => <Text strong>₹{(v ?? 0).toLocaleString()}</Text> },
+                      { title: 'Total Tax', dataIndex: 'total_tax', key: 'total_tax', width: 100, render: v => <Text style={{ color: '#fa8c16' }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                      { title: 'Taxable Value', dataIndex: 'taxable', key: 'taxable', width: 120, render: v => <Text>₹{(v ?? 0).toLocaleString()}</Text> },
+                      { title: 'CGST', dataIndex: 'cgst', key: 'cgst', width: 90, render: v => <Text>₹{(v ?? 0).toLocaleString()}</Text> },
+                      { title: 'SGST', dataIndex: 'sgst', key: 'sgst', width: 90, render: v => <Text>₹{(v ?? 0).toLocaleString()}</Text> },
+                      { title: 'IGST', dataIndex: 'igst', key: 'igst', width: 90, render: v => <Text>₹{(v ?? 0).toLocaleString()}</Text> },
+                    ]}
+                    pagination={{ showSizeChanger: true, pageSizeOptions: ['10', '20', '50', '100'], defaultPageSize: 10 }}
+                  />
+                </Card>
+                </div>
+              </div>
+            ),
+          },
+
+          /* ─────────── PURCHASE REPORT ─────────── */
+          {
+            key: 'purchase_report',
+            label: 'Purchase Report',
+            children: (
+              <div>
+                <Card style={{ borderRadius: 12, border: 'none', background: cardBg, marginBottom: 14, boxShadow: '0 2px 12px rgba(177,30,106,0.06)' }} styles={{ body: { padding: '12px 16px' } }}>
+                  <Space wrap style={{ width: '100%' }}>
+                    <FilterOutlined style={{ color: '#B11E6A' }} />
+                    <Text strong style={{ color: textColor, fontSize: 13 }}>Filter by:</Text>
+                    <Select allowClear placeholder="Select Product" value={purchaseProductFilter} onChange={setPurchaseProductFilter} style={{ width: 200 }}>
+                      {purchaseProductOptions.map(p => (
+                        <Option key={p} value={p}>{p}</Option>
+                      ))}
+                    </Select>
+                    <DatePicker.RangePicker style={{ width: 260 }} onChange={setPurchaseDateRange} />
+                    <Input prefix={<SearchOutlined style={{ color: '#B11E6A' }} />} placeholder="Search supplier, invoice..." allowClear value={purchaseReportSearch} onChange={(e) => setPurchaseReportSearch(e.target.value)} style={{ width: 220, borderRadius: 8 }} />
+                    <Button icon={<FileExcelOutlined />} style={{ color: '#52c41a', borderColor: '#52c41a44' }} onClick={exportPurchaseExcel}>Excel</Button>
+                    <Button icon={<FilePdfOutlined />} style={{ color: '#B11E6A', borderColor: '#B11E6A44' }} onClick={exportPurchasePdf}>PDF</Button>
+                  </Space>
+                </Card>
+
+                <div ref={purchaseRef}>
+                <Row gutter={[14, 14]} style={{ marginBottom: 14 }}>
+                  <Col xs={24} lg={16}>
+                    <Card
+                      title={
+                        <Space>
+                          <Text strong style={{ color: textColor }}>Month-wise Purchase Spending</Text>
+                          {purchaseProductFilter && <Tag style={{ background: '#B11E6A22', color: '#B11E6A', border: '1px solid #B11E6A44', borderRadius: 20 }}>{purchaseProductFilter}</Tag>}
+                        </Space>
+                      }
+                      style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }}
+                      styles={{ body: { padding: '12px 16px 16px' } }}
+                    >
+                      <ResponsiveContainer width="100%" height={240}>
+                        <BarChart data={purchaseChartData}>
+                          <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />
+                          <XAxis dataKey="month" tick={{ fill: tickColor, fontSize: 12 }} />
+                          <YAxis tick={{ fill: tickColor, fontSize: 12 }} tickFormatter={v => `₹${(v ?? 0).toLocaleString()}`} />
+                          <Tooltip formatter={(v) => [`₹${(v ?? 0).toLocaleString()}`, 'Amount Spent']} contentStyle={{ background: isDark ? '#1E1E2E' : '#fff', borderRadius: 8 }} />
+                          <Bar dataKey="amount" fill="#B11E6A" radius={[4, 4, 0, 0]} name="Purchase Amount" />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </Card>
+                  </Col>
+                  <Col xs={24} lg={8}>
+                    <Card style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)', height: '100%' }} styles={{ body: { padding: '16px' } }}>
+                      <Text strong style={{ color: textColor, display: 'block', marginBottom: 12 }}>Purchase by Supplier</Text>
+                      <ResponsiveContainer width="100%" height={160}>
+                        <PieChart>
+                          <Pie data={purchaseBySupplier} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={65} label={false}>
+                            {purchaseBySupplier.map((entry, idx) => (
+                              <Cell key={idx} fill={entry.color} />
+                            ))}
+                          </Pie>
+                          <Tooltip formatter={(v) => `₹${(v ?? 0).toLocaleString()}`} />
+                        </PieChart>
+                      </ResponsiveContainer>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 5, marginTop: 4 }}>
+                        {purchaseBySupplier.map(e => (
+                          <div key={e.name} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <Space size={6}>
+                              <div style={{ width: 8, height: 8, borderRadius: '50%', background: e.color }} />
+                              <Text style={{ fontSize: 11, color: textColor }}>{e.name}</Text>
+                            </Space>
+                            <Text style={{ fontSize: 11, fontWeight: 600 }}>₹{(e.value ?? 0).toLocaleString()}</Text>
+                          </div>
+                        ))}
+                      </div>
+                    </Card>
+                  </Col>
+                </Row>
+
+                {/* GST / Without GST sub-tabs */}
+                <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
+                  {[['with_gst', 'With GST'], ['without_gst', 'Without GST']].map(([k, lbl]) => (
+                    <button key={k} type="button" onClick={() => setPurchaseGstTab(k)} style={{
+                      padding: '6px 20px', borderRadius: 20, cursor: 'pointer', fontWeight: 600, fontSize: 13, transition: 'all 0.15s',
+                      border: `1.5px solid ${purchaseGstTab === k ? '#B11E6A' : borderColor}`,
+                      background: purchaseGstTab === k ? '#B11E6A18' : 'transparent',
+                      color: purchaseGstTab === k ? '#B11E6A' : isDark ? '#aaa' : '#666',
+                    }}>{lbl}</button>
+                  ))}
+                </div>
+
+                {purchaseGstTab === 'with_gst' && (() => {
+                  const gstData = filteredPurchaseData.filter(r => r.total_tax > 0);
+                  const productGstSummary = Object.values(
+                    gstData.reduce((acc, r) => {
+                      if (!acc[r.product]) acc[r.product] = { product: r.product, hsn: r.hsn, gst_rate: r.gst_rate, taxable: 0, cgst: 0, sgst: 0, igst: 0, total_tax: 0, inv_value: 0, count: 0 };
+                      acc[r.product].taxable += r.taxable;
+                      acc[r.product].cgst += r.cgst;
+                      acc[r.product].sgst += r.sgst;
+                      acc[r.product].igst += r.igst;
+                      acc[r.product].total_tax += r.total_tax;
+                      acc[r.product].inv_value += r.inv_value;
+                      acc[r.product].count += 1;
+                      return acc;
+                    }, {})
+                  );
+                  return (
+                    <>
+                      <Row gutter={[12, 12]} style={{ marginBottom: 14 }}>
+                        {[
+                          { label: 'Total Taxable Value', value: gstData.reduce((s, r) => s + r.taxable, 0), color: '#B11E6A' },
+                          { label: 'Total CGST Paid', value: gstData.reduce((s, r) => s + r.cgst, 0), color: '#fa8c16' },
+                          { label: 'Total SGST Paid', value: gstData.reduce((s, r) => s + r.sgst, 0), color: '#7c3aed' },
+                          { label: 'Total Tax (Input Credit)', value: gstData.reduce((s, r) => s + r.total_tax, 0), color: '#52c41a' },
+                        ].map((s, i) => (
+                          <Col xs={12} sm={6} key={s.label}>
+                            <Card style={{ borderRadius: 12, border: `1px solid ${s.color}22`, background: `linear-gradient(135deg,${s.color}22,${s.color}08)` }} styles={{ body: { padding: '12px 14px' } }}>
+                              <Text style={{ fontSize: 11, color: isDark ? '#aaa' : '#888', display: 'block', marginBottom: 4 }}>{s.label}</Text>
+                              <div style={{ fontSize: 18, fontWeight: 800, color: s.color }}>₹{(s.value ?? 0).toLocaleString()}</div>
+                            </Card>
+                          </Col>
+                        ))}
+                      </Row>
+                      <Card style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)', marginBottom: 14 }} styles={{ body: { padding: 16 } }}>
+                        <Title level={5} style={{ color: textColor, margin: '0 0 12px 0' }}>Product-wise GST Summary</Title>
+                        <Table
+                          size="small"
+                          scroll={{ x: 'max-content' }}
+                          dataSource={productGstSummary.map((r, i) => ({ ...r, key: i }))}
+                          pagination={false}
+                          columns={[
+                            { title: 'Product', dataIndex: 'product', key: 'product', width: 180, render: v => <Tag style={{ background: '#B11E6A15', color: '#B11E6A', border: '1px solid #B11E6A33', borderRadius: 20 }}>{v}</Tag> },
+                            { title: 'HSN Code', dataIndex: 'hsn', key: 'hsn', width: 100, align: 'center', render: v => <Text style={{ fontFamily: 'monospace', color: '#7c3aed', fontSize: 12 }}>{v}</Text> },
+                            { title: 'GST Rate', dataIndex: 'gst_rate', key: 'gst_rate', width: 90, align: 'center', render: v => <Tag style={{ background: '#fa8c1615', color: '#fa8c16', border: '1px solid #fa8c1633', borderRadius: 20, fontSize: 11 }}>{v}%</Tag> },
+                            { title: 'Invoices', dataIndex: 'count', key: 'count', width: 80, align: 'center', render: v => <Text strong style={{ fontSize: 12 }}>{v}</Text> },
+                            { title: 'Taxable Value', dataIndex: 'taxable', key: 'taxable', width: 130, render: v => <Text style={{ fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                            { title: 'CGST', dataIndex: 'cgst', key: 'cgst', width: 100, render: v => <Text style={{ color: '#fa8c16', fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                            { title: 'SGST', dataIndex: 'sgst', key: 'sgst', width: 100, render: v => <Text style={{ color: '#7c3aed', fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                            { title: 'IGST', dataIndex: 'igst', key: 'igst', width: 100, render: v => <Text style={{ color: '#1890ff', fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                            { title: 'Total Tax', dataIndex: 'total_tax', key: 'total_tax', width: 110, render: v => <Text strong style={{ color: '#52c41a', fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                            { title: 'Invoice Value', dataIndex: 'inv_value', key: 'inv_value', width: 120, fixed: 'right', render: v => <Text strong style={{ color: '#B11E6A', fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                          ]}
+                          summary={(data) => {
+                            const t = (k) => data.reduce((s, r) => s + r[k], 0);
+                            return (
+                              <Table.Summary.Row style={{ fontWeight: 700, background: isDark ? '#2a1a2e' : '#fdf5fa' }}>
+                                <Table.Summary.Cell colSpan={4}><Text strong style={{ fontSize: 12 }}>Total</Text></Table.Summary.Cell>
+                                <Table.Summary.Cell><Text strong style={{ fontSize: 12 }}>₹{t('taxable').toLocaleString()}</Text></Table.Summary.Cell>
+                                <Table.Summary.Cell><Text strong style={{ color: '#fa8c16', fontSize: 12 }}>₹{t('cgst').toLocaleString()}</Text></Table.Summary.Cell>
+                                <Table.Summary.Cell><Text strong style={{ color: '#7c3aed', fontSize: 12 }}>₹{t('sgst').toLocaleString()}</Text></Table.Summary.Cell>
+                                <Table.Summary.Cell><Text strong style={{ color: '#1890ff', fontSize: 12 }}>₹{t('igst').toLocaleString()}</Text></Table.Summary.Cell>
+                                <Table.Summary.Cell><Text strong style={{ color: '#52c41a', fontSize: 12 }}>₹{t('total_tax').toLocaleString()}</Text></Table.Summary.Cell>
+                                <Table.Summary.Cell><Text strong style={{ color: '#B11E6A', fontSize: 12 }}>₹{t('inv_value').toLocaleString()}</Text></Table.Summary.Cell>
+                              </Table.Summary.Row>
+                            );
+                          }}
+                        />
+                      </Card>
+                      <Card style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }} styles={{ body: { padding: 16 } }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+                          <Title level={5} style={{ color: textColor, margin: 0 }}>Purchase Report — With GST (Invoice-wise)</Title>
+                          <Text type="secondary" style={{ fontSize: 12 }}>{gstData.length} records</Text>
+                        </div>
+                        <Table
+                          size="small"
+                          scroll={{ x: 'max-content' }}
+                          dataSource={gstData}
+                          columns={[
+                            { title: 'Vendor GSTIN', dataIndex: 'vendor_gst', key: 'vendor_gst', width: 160, fixed: 'left', render: v => <Text style={{ fontSize: 12 }}>{v}</Text> },
+                            { title: 'Supplier', dataIndex: 'supplier', key: 'supplier', width: 140, render: v => <Text strong style={{ fontSize: 12 }}>{v}</Text> },
+                            { title: 'Product', dataIndex: 'product', key: 'product', width: 160, render: v => <Tag style={{ background: '#B11E6A15', color: '#B11E6A', border: '1px solid #B11E6A33', borderRadius: 20 }}>{v}</Tag> },
+                            { title: 'HSN', dataIndex: 'hsn', key: 'hsn', width: 100, align: 'center', render: v => <Text style={{ fontSize: 12, fontFamily: 'monospace', color: '#7c3aed' }}>{v}</Text> },
+                            { title: 'GST%', dataIndex: 'gst_rate', key: 'gst_rate', width: 70, align: 'center', render: v => <Tag style={{ background: '#fa8c1615', color: '#fa8c16', border: '1px solid #fa8c1633', borderRadius: 20, fontSize: 11 }}>{v}%</Tag> },
+                            { title: 'Invoice No', dataIndex: 'inv_no', key: 'inv_no', width: 110, render: v => <Text style={{ color: '#B11E6A' }}>{v}</Text> },
+                            { title: 'Invoice Date', dataIndex: 'inv_date', key: 'inv_date', width: 110 },
+                            { title: 'State', dataIndex: 'state_name', key: 'state_name', width: 120 },
+                            { title: 'Taxable Value', dataIndex: 'taxable', key: 'taxable', width: 120, render: v => <Text style={{ fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                            { title: 'CGST', dataIndex: 'cgst', key: 'cgst', width: 90, render: v => <Text style={{ color: '#fa8c16', fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                            { title: 'SGST', dataIndex: 'sgst', key: 'sgst', width: 90, render: v => <Text style={{ color: '#7c3aed', fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                            { title: 'IGST', dataIndex: 'igst', key: 'igst', width: 90, render: v => <Text style={{ color: '#1890ff', fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                            { title: 'Total Tax', dataIndex: 'total_tax', key: 'total_tax', width: 100, render: v => <Text style={{ color: '#52c41a', fontWeight: 600, fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                            { title: 'Invoice Value', dataIndex: 'inv_value', key: 'inv_value', width: 120, fixed: 'right', render: v => <Text strong style={{ color: '#B11E6A', fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                          ]}
+                          pagination={{ showSizeChanger: true, pageSizeOptions: ['10', '20', '50', '100'], defaultPageSize: 10 }}
+                        />
+                      </Card>
+                    </>
+                  );
+                })()}
+
+                {purchaseGstTab === 'without_gst' && (() => {
+                  const noGstData = filteredPurchaseData.filter(r => r.total_tax === 0);
+                  return (
+                    <>
+                      <Row gutter={[12, 12]} style={{ marginBottom: 14 }}>
+                        {[
+                          { label: 'GST-Exempt Invoices', value: noGstData.length, color: '#B11E6A', isCount: true },
+                          { label: 'Total Invoice Value', value: noGstData.reduce((s, r) => s + r.inv_value, 0), color: '#8a1652' },
+                          { label: 'Total Taxable Value', value: noGstData.reduce((s, r) => s + r.taxable, 0), color: '#C94F8A' },
+                          { label: 'GST Savings', value: noGstData.reduce((s, r) => s + r.taxable, 0) * 0.18, color: '#52c41a' },
+                        ].map((s, i) => (
+                          <Col xs={12} sm={6} key={s.label}>
+                            <Card style={{ borderRadius: 12, border: `1px solid ${s.color}22`, background: `linear-gradient(135deg,${s.color}22,${s.color}08)` }} styles={{ body: { padding: '12px 14px' } }}>
+                              <Text style={{ fontSize: 11, color: isDark ? '#aaa' : '#888', display: 'block', marginBottom: 4 }}>{s.label}</Text>
+                              <div style={{ fontSize: 18, fontWeight: 800, color: s.color }}>{s.isCount ? s.value : `₹${(s.value ?? 0).toLocaleString()}`}</div>
+                            </Card>
+                          </Col>
+                        ))}
+                      </Row>
+                      <Card style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }} styles={{ body: { padding: 16 } }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+                          <Title level={5} style={{ color: textColor, margin: 0 }}>Purchase Report — Without GST (Exempt/Zero-rated)</Title>
+                          <Text type="secondary" style={{ fontSize: 12 }}>{noGstData.length} records</Text>
+                        </div>
+                        {noGstData.length === 0 ? (
+                          <div style={{ textAlign: 'center', padding: '40px 0', color: '#aaa', fontSize: 13 }}>No GST-exempt purchases found</div>
+                        ) : (
+                          <Table
+                            size="small"
+                            scroll={{ x: 'max-content' }}
+                            dataSource={noGstData}
+                            columns={[
+                              { title: 'Vendor GSTIN', dataIndex: 'vendor_gst', key: 'vendor_gst', width: 160, fixed: 'left', render: v => <Text style={{ fontSize: 12 }}>{v}</Text> },
+                              { title: 'Supplier', dataIndex: 'supplier', key: 'supplier', width: 140, render: v => <Text strong style={{ fontSize: 12 }}>{v}</Text> },
+                              { title: 'Product', dataIndex: 'product', key: 'product', width: 160, render: v => <Tag style={{ background: '#52c41a15', color: '#52c41a', border: '1px solid #52c41a33', borderRadius: 20 }}>{v}</Tag> },
+                              { title: 'HSN', dataIndex: 'hsn', key: 'hsn', width: 100, align: 'center', render: v => <Text style={{ fontSize: 12, fontFamily: 'monospace', color: '#7c3aed' }}>{v}</Text> },
+                              { title: 'GST%', dataIndex: 'gst_rate', key: 'gst_rate', width: 70, align: 'center', render: v => <Tag style={{ background: '#52c41a15', color: '#52c41a', border: '1px solid #52c41a33', borderRadius: 20, fontSize: 11 }}>Exempt</Tag> },
+                              { title: 'Qty', dataIndex: 'qty', key: 'qty', width: 70, align: 'center', render: v => <Text strong style={{ fontSize: 12 }}>{v}</Text> },
+                              { title: 'Unit Price', dataIndex: 'unit_price', key: 'unit_price', width: 100, render: v => <Text style={{ fontSize: 12 }}>₹{v?.toLocaleString()}</Text> },
+                              { title: 'Invoice No', dataIndex: 'inv_no', key: 'inv_no', width: 110, render: v => <Text style={{ color: '#B11E6A' }}>{v}</Text> },
+                              { title: 'Invoice Date', dataIndex: 'inv_date', key: 'inv_date', width: 110 },
+                              { title: 'State', dataIndex: 'state_name', key: 'state_name', width: 120 },
+                              { title: 'Taxable Value', dataIndex: 'taxable', key: 'taxable', width: 120, render: v => <Text style={{ fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                              { title: 'Invoice Value', dataIndex: 'inv_value', key: 'inv_value', width: 120, fixed: 'right', render: v => <Text strong style={{ color: '#B11E6A', fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                            ]}
+                            pagination={{ showSizeChanger: true, pageSizeOptions: ['10', '20', '50', '100'], defaultPageSize: 10 }}
+                          />
+                        )}
+                      </Card>
+                    </>
+                  );
+                })()}
+                </div>
+              </div>
+            ),
+          },
+
+          /* ─────────── LOCAL PURCHASE REPORT ─────────── */
+          {
+            key: 'local_purchase_report',
+            label: 'Local Purchase Report',
+            children: (
+              <div>
+                <Card style={{ borderRadius: 12, border: 'none', background: cardBg, marginBottom: 14, boxShadow: '0 2px 12px rgba(177,30,106,0.06)' }} styles={{ body: { padding: '12px 16px' } }}>
+                  <Space wrap style={{ width: '100%' }}>
+                    <FilterOutlined style={{ color: '#B11E6A' }} />
+                    <Text strong style={{ color: textColor, fontSize: 13 }}>Filter by:</Text>
+                    <Select allowClear placeholder="Select Vendor" value={lpVendorFilter} onChange={setLpVendorFilter} style={{ width: 200 }}>
+                      {lpVendorOptions.map(v => (
+                        <Option key={v} value={v}>{v}</Option>
+                      ))}
+                    </Select>
+                    <Select value={lpStatusFilter} onChange={setLpStatusFilter} style={{ width: 170 }}>
+                      <Option value="all">All Payment Status</Option>
+                      <Option value="Paid">Paid</Option>
+                      <Option value="Partially Paid">Partially Paid</Option>
+                      <Option value="Pending">Pending</Option>
+                    </Select>
+                    <DatePicker.RangePicker style={{ width: 260 }} onChange={setLpDateRange} />
+                    <Input prefix={<SearchOutlined style={{ color: '#B11E6A' }} />} placeholder="Search vendor, invoice..." allowClear value={lpSearch} onChange={(e) => setLpSearch(e.target.value)} style={{ width: 220, borderRadius: 8 }} />
+                    <Button icon={<FileExcelOutlined />} style={{ color: '#52c41a', borderColor: '#52c41a44' }} onClick={exportLpExcel}>Excel</Button>
+                    <Button icon={<FilePdfOutlined />} style={{ color: '#B11E6A', borderColor: '#B11E6A44' }} onClick={exportLpPdf}>PDF</Button>
+                  </Space>
+                </Card>
+
+                <div ref={localPurchaseRef}>
+                <Row gutter={[12, 12]} style={{ marginBottom: 14 }}>
+                  {[
+                    { label: 'Total Local Purchases', value: lpTotal, color: '#B11E6A', sub: `${filteredLpData.length} bills` },
+                    { label: 'Total Paid', value: lpPaidTotal, color: '#52c41a', sub: 'Settled to vendors' },
+                    { label: 'Total Pending', value: lpPendingTotal, color: '#fa8c16', sub: 'Yet to be paid' },
+                  ].map((s, i) => (
+                    <Col xs={24} sm={8} key={s.label}>
+                      <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.06 }}>
+                        <Card style={{ borderRadius: 12, border: `1px solid ${s.color}22`, background: `linear-gradient(135deg,${s.color}22,${s.color}08)` }} styles={{ body: { padding: '12px 14px' } }}>
+                          <Text style={{ fontSize: 10, color: isDark ? '#aaa' : '#888', display: 'block', marginBottom: 3 }}>{s.label}</Text>
+                          <div style={{ fontSize: 17, fontWeight: 800, color: s.color }}>₹{(s.value ?? 0).toLocaleString()}</div>
+                          <Text style={{ fontSize: 10, color: '#aaa' }}>{s.sub}</Text>
+                        </Card>
+                      </motion.div>
+                    </Col>
+                  ))}
+                </Row>
+
+                <Row gutter={[14, 14]} style={{ marginBottom: 14 }}>
+                  <Col xs={24} lg={16}>
+                    <Card
+                      title={
+                        <Space>
+                          <Text strong style={{ color: textColor }}>Month-wise Local Purchase Spending</Text>
+                          {lpVendorFilter && <Tag style={{ background: '#B11E6A22', color: '#B11E6A', border: '1px solid #B11E6A44', borderRadius: 20 }}>{lpVendorFilter}</Tag>}
+                        </Space>
+                      }
+                      style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }}
+                      styles={{ body: { padding: '12px 16px 16px' } }}
+                    >
+                      <ResponsiveContainer width="100%" height={240}>
+                        <BarChart data={lpChartData}>
+                          <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />
+                          <XAxis dataKey="month" tick={{ fill: tickColor, fontSize: 12 }} />
+                          <YAxis tick={{ fill: tickColor, fontSize: 12 }} tickFormatter={v => `₹${(v ?? 0).toLocaleString()}`} />
+                          <Tooltip formatter={(v, n) => [`₹${(v ?? 0).toLocaleString()}`, n]} contentStyle={{ background: isDark ? '#1E1E2E' : '#fff', borderRadius: 8 }} />
+                          <Legend />
+                          <Bar dataKey="paid" fill="#52c41a" name="Paid" radius={[4, 4, 0, 0]} />
+                          <Bar dataKey="pending" fill="#fa8c16" name="Pending" radius={[4, 4, 0, 0]} />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </Card>
+                  </Col>
+                  <Col xs={24} lg={8}>
+                    <Card style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)', height: '100%' }} styles={{ body: { padding: '16px' } }}>
+                      <Text strong style={{ color: textColor, display: 'block', marginBottom: 12 }}>Local Purchase by Vendor</Text>
+                      <ResponsiveContainer width="100%" height={160}>
+                        <PieChart>
+                          <Pie data={lpByVendor} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={65} label={false}>
+                            {lpByVendor.map((entry, idx) => (
+                              <Cell key={idx} fill={entry.color} />
+                            ))}
+                          </Pie>
+                          <Tooltip formatter={(v) => `₹${(v ?? 0).toLocaleString()}`} />
+                        </PieChart>
+                      </ResponsiveContainer>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 5, marginTop: 4 }}>
+                        {lpByVendor.map(e => (
+                          <div key={e.name} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <Space size={6}>
+                              <div style={{ width: 8, height: 8, borderRadius: '50%', background: e.color }} />
+                              <Text style={{ fontSize: 11, color: textColor }}>{e.name}</Text>
+                            </Space>
+                            <Text style={{ fontSize: 11, fontWeight: 600 }}>₹{(e.value ?? 0).toLocaleString()}</Text>
+                          </div>
+                        ))}
+                      </div>
+                    </Card>
+                  </Col>
+                </Row>
+
+                <Card style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }} styles={{ body: { padding: 16 } }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+                    <Title level={5} style={{ color: textColor, margin: 0 }}>Local Purchase Records</Title>
+                    <Text type="secondary" style={{ fontSize: 12 }}>{filteredLpData.length} records • Total: <Text strong style={{ color: '#B11E6A' }}>₹{(lpTotal ?? 0).toLocaleString()}</Text></Text>
+                  </div>
+                  <Table
+                    size="small"
+                    scroll={{ x: 'max-content' }}
+                    dataSource={filteredLpData}
+                    rowKey="key"
+                    columns={[
+                      { title: 'LP Code', dataIndex: 'lpCode', key: 'lpCode', width: 110, render: v => <Text style={{ color: '#B11E6A', fontSize: 12 }}>{v}</Text> },
+                      { title: 'Invoice No', dataIndex: 'invoiceNo', key: 'invoiceNo', width: 120, render: v => <Text style={{ fontSize: 12 }}>{v}</Text> },
+                      { title: 'Date', dataIndex: 'date', key: 'date', width: 100, render: v => <Text style={{ fontSize: 12 }}>{v}</Text> },
+                      { title: 'Vendor', dataIndex: 'vendor', key: 'vendor', width: 150, render: v => <Text strong style={{ fontSize: 12 }}>{v}</Text> },
+                      { title: 'Products', dataIndex: 'product', key: 'product', width: 200, render: v => <Text style={{ fontSize: 12 }}>{v}</Text> },
+                      { title: 'Qty', dataIndex: 'qty', key: 'qty', width: 70, align: 'center', render: v => <Text style={{ fontSize: 12 }}>{v}</Text> },
+                      { title: 'Total Amount', dataIndex: 'totalAmount', key: 'totalAmount', width: 120, render: v => <Text strong>₹{(v ?? 0).toLocaleString()}</Text> },
+                      { title: 'GST Amount', dataIndex: 'gstAmount', key: 'gstAmount', width: 110, render: v => <Text style={{ color: '#fa8c16', fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                      { title: 'Paid Amount', dataIndex: 'paidAmount', key: 'paidAmount', width: 110, render: v => <Text style={{ color: '#52c41a', fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                      { title: 'Pending Amount', dataIndex: 'pendingAmount', key: 'pendingAmount', width: 120, render: v => <Text style={{ color: v > 0 ? '#ff4d4f' : '#aaa', fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                      {
+                        title: 'Payment Status', dataIndex: 'paymentStatus', key: 'paymentStatus', width: 130, fixed: 'right',
+                        render: v => <Tag style={{ background: `${statusColor[v] || '#888'}18`, color: statusColor[v] || '#888', border: `1px solid ${statusColor[v] || '#888'}44`, borderRadius: 20 }}>{v}</Tag>,
+                      },
+                      { title: 'Due Date', dataIndex: 'dueDate', key: 'dueDate', width: 100, render: v => <Text style={{ fontSize: 12 }}>{v || '—'}</Text> },
+                    ]}
+                    pagination={{ showSizeChanger: true, pageSizeOptions: ['10', '20', '50', '100'], defaultPageSize: 10 }}
+                    locale={{ emptyText: <Empty description="No local purchase records found" /> }}
+                    summary={(data) => {
+                      const tTotal = data.reduce((s, r) => s + r.totalAmount, 0);
+                      const tGst = data.reduce((s, r) => s + r.gstAmount, 0);
+                      const tPaid = data.reduce((s, r) => s + r.paidAmount, 0);
+                      const tPending = data.reduce((s, r) => s + r.pendingAmount, 0);
+                      return (
+                        <Table.Summary.Row style={{ fontWeight: 700, background: isDark ? '#2a1a2e' : '#fdf5fa' }}>
+                          <Table.Summary.Cell colSpan={6}><Text strong style={{ fontSize: 12 }}>Total</Text></Table.Summary.Cell>
+                          <Table.Summary.Cell><Text strong style={{ fontSize: 12 }}>₹{(tTotal ?? 0).toLocaleString()}</Text></Table.Summary.Cell>
+                          <Table.Summary.Cell><Text strong style={{ color: '#fa8c16', fontSize: 12 }}>₹{(tGst ?? 0).toLocaleString()}</Text></Table.Summary.Cell>
+                          <Table.Summary.Cell><Text strong style={{ color: '#52c41a', fontSize: 12 }}>₹{(tPaid ?? 0).toLocaleString()}</Text></Table.Summary.Cell>
+                          <Table.Summary.Cell><Text strong style={{ color: tPending > 0 ? '#ff4d4f' : '#aaa', fontSize: 12 }}>₹{(tPending ?? 0).toLocaleString()}</Text></Table.Summary.Cell>
+                          <Table.Summary.Cell colSpan={2} />
+                        </Table.Summary.Row>
+                      );
+                    }}
+                  />
+                </Card>
+                </div>
+              </div>
+            ),
+          },
+
+          /* ─────────── PROFIT & LOSS ─────────── */
+          {
+            key: 'pl',
+            label: 'Profit & Loss',
+            children: (
+              <div>
+                {/* Filter Bar */}
+                <Card style={{ borderRadius: 12, border: 'none', background: cardBg, marginBottom: 14, boxShadow: '0 2px 12px rgba(177,30,106,0.06)' }} styles={{ body: { padding: '12px 16px' } }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, marginBottom: 12 }}>
+                    <Space wrap>
+                      <FilterOutlined style={{ color: '#B11E6A' }} />
+                      <Select
+                        allowClear
+                        placeholder="All Products"
+                        value={plProductFilter}
+                        onChange={v => { setPlProductFilter(v || null); }}
+                        style={{ width: 160 }}
+                      >
+                        {plProductOptions.map(p => (
+                          <Option key={p} value={p}>{p}</Option>
+                        ))}
+                      </Select>
+                      <Select value={plSelectedMonth} onChange={setPlSelectedMonth} style={{ width: 140 }}>
+                        <Option value="all">All Months</Option>
+                        {plMonthOptions.map(m => <Option key={m} value={m}>{m}</Option>)}
+                      </Select>
+                      <DatePicker.RangePicker
+                        value={plDateRange}
+                        onChange={(range) => { setPlDateRange(range); setPlQuickSelect(null); }}
+                        style={{ width: 250 }}
+                      />
+                      <Popover
+                        trigger="click"
+                        placement="bottomLeft"
+                        title={<Text strong style={{ fontSize: 13 }}>Select Date</Text>}
+                        content={
+                          <div style={{ width: 270, maxHeight: 380, overflowY: 'auto' }}>
+                            {quickDateRanges().map(opt => {
+                              const isActive = plQuickSelect === opt.key;
+                              return (
+                                <div
+                                  key={opt.key}
+                                  onClick={() => { setPlDateRange(opt.range); setPlQuickSelect(opt.key); }}
+                                  style={{
+                                    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                                    padding: '7px 8px', borderRadius: 8, cursor: 'pointer',
+                                    background: isActive ? '#B11E6A12' : 'transparent',
+                                  }}
+                                >
+                                  <div>
+                                    <div style={{ fontSize: 13, fontWeight: 600, color: isActive ? '#B11E6A' : textColor }}>{opt.label}</div>
+                                    <div style={{ fontSize: 11, color: '#999' }}>{opt.range[0].format('DD MMM YYYY')} - {opt.range[1].format('DD MMM YYYY')}</div>
+                                  </div>
+                                  <div style={{
+                                    width: 15, height: 15, borderRadius: '50%', flexShrink: 0,
+                                    border: `1.5px solid ${isActive ? '#B11E6A' : borderColor}`,
+                                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                  }}>
+                                    {isActive && <div style={{ width: 7, height: 7, borderRadius: '50%', background: '#B11E6A' }} />}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        }
+                      >
+                        <Button icon={<CalendarOutlined />} style={{ borderRadius: 8 }}>
+                          {plQuickSelect ? quickDateRanges().find(o => o.key === plQuickSelect)?.label : 'Select Date'}
+                        </Button>
+                      </Popover>
+                      {(plProductFilter || plSelectedMonth !== 'all' || plDateRange) && (
+                        <Button
+                          size="small"
+                          onClick={() => { setPlProductFilter(null); setPlSelectedMonth('all'); setPlDateRange(null); setPlQuickSelect(null); }}
+                          style={{ color: '#ff4d4f', borderColor: '#ff4d4f44', borderRadius: 20, fontSize: 12 }}
+                        >
+                          Clear Filters
+                        </Button>
+                      )}
+                    </Space>
+                    <Space>
+                      <Button icon={<FileExcelOutlined />} style={{ color: '#52c41a', borderColor: '#52c41a44' }} onClick={exportPlExcel}>Excel</Button>
+                      <Button icon={<FilePdfOutlined />} style={{ color: '#B11E6A', borderColor: '#B11E6A44' }} onClick={exportPlPdf}>PDF</Button>
+                      <Button icon={<DownloadOutlined />} type="primary" style={{ background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none' }} onClick={exportPlDownload}>Download Report</Button>
+                    </Space>
+                  </div>
+                  {(plProductFilter || plSelectedMonth !== 'all' || plDateRange) && (
+                    <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
+                      <Text style={{ fontSize: 12, color: '#888' }}>Active filters:</Text>
+                      {plProductFilter && <Tag style={{ background: '#B11E6A15', color: '#B11E6A', border: '1px solid #B11E6A33', borderRadius: 20 }}>{plProductFilter}</Tag>}
+                      {plSelectedMonth !== 'all' && <Tag style={{ background: '#8a165215', color: '#8a1652', border: '1px solid #8a165233', borderRadius: 20 }}>{plSelectedMonth}</Tag>}
+                      {plDateRange && (
+                        <Tag style={{ background: '#6b124015', color: '#6b1240', border: '1px solid #6b124033', borderRadius: 20 }}>
+                          {plQuickSelect ? quickDateRanges().find(o => o.key === plQuickSelect)?.label : `${plDateRange[0].format('DD MMM YYYY')} - ${plDateRange[1].format('DD MMM YYYY')}`}
+                        </Tag>
+                      )}
+                    </div>
+                  )}
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', marginBottom: 10 }}>
+                    <Text style={{ fontSize: 12, color: '#888' }}>GST Mode:</Text>
+                    {[{ key: 'excl', label: 'Excl. GST' }, { key: 'incl', label: 'Incl. GST' }].map(m => (
+                      <div
+                        key={m.key}
+                        onClick={() => setPlGstMode(m.key)}
+                        style={{
+                          padding: '4px 14px', borderRadius: 20, cursor: 'pointer', fontSize: 12, fontWeight: 600, transition: 'all 0.15s',
+                          border: `1.5px solid ${plGstMode === m.key ? '#B11E6A' : borderColor}`,
+                          background: plGstMode === m.key ? '#B11E6A18' : 'transparent',
+                          color: plGstMode === m.key ? '#B11E6A' : isDark ? '#aaa' : '#666',
+                        }}
+                      >{m.label}</div>
+                    ))}
+                    {plGstMode === 'incl' && (
+                      <Tag style={{ background: '#fa8c1615', color: '#fa8c16', border: '1px solid #fa8c1633', borderRadius: 20, fontSize: 11 }}>
+                        Shows gross amounts incl. GST
+                      </Tag>
+                    )}
+                  </div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                    <Text style={{ fontSize: 12, color: '#888' }}>Deduct Expenses:</Text>
+                    {expenseCategoryConfig.map(cat => {
+                      const isSelected = plSelectedExpenses.includes(cat.key);
+                      return (
+                        <div
+                          key={cat.key}
+                          onClick={() => setPlExcludedExpenses(prev =>
+                            isSelected ? [...prev, cat.key] : prev.filter(k => k !== cat.key)
+                          )}
+                          style={{
+                            padding: '4px 12px',
+                            borderRadius: 20,
+                            cursor: 'pointer',
+                            border: `1.5px solid ${isSelected ? cat.color : borderColor}`,
+                            background: isSelected ? `${cat.color}18` : 'transparent',
+                            color: isSelected ? cat.color : isDark ? '#aaa' : '#666',
+                            fontSize: 12,
+                            fontWeight: 600,
+                            transition: 'all 0.15s',
+                          }}
+                        >
+                          {cat.label}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </Card>
+
+                <div ref={plRef}>
+                {/* Summary Cards */}
+                <Row gutter={[12, 12]} style={{ marginBottom: 14 }}>
+                  {[
+                    { label: 'Total Sales',   value: totalSales,       color: '#B11E6A', sub: 'Revenue from products' },
+                    { label: 'Cost of Goods', value: totalCogs,        color: '#8a1652', sub: 'Purchase cost (COGS)' },
+                    { label: 'Gross Profit',  value: totalGrossProfit, color: '#C94F8A', sub: `Margin: ${totalSales ? ((totalGrossProfit / totalSales) * 100).toFixed(1) : 0}%` },
+                    ...(totalDamageLoss > 0 ? [{ label: 'Damaged Goods Loss', value: totalDamageLoss, color: '#ff4d4f', sub: `Lost billing value: ₹${(totalDamageRevenueLoss ?? 0).toLocaleString()}` }] : []),
+                    { label: 'Net Profit',    value: totalNetProfit,   color: '#6b1240', sub: `After ₹${(totalExpenses ?? 0).toLocaleString()} expenses${totalDamageLoss > 0 ? ` + ₹${totalDamageLoss.toLocaleString()} damage` : ''}` },
+                  ].map((s, i) => (
+                    <Col xs={12} sm={6} key={s.label}>
+                      <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.08 }}>
+                        <Card style={{ borderRadius: 12, border: 'none', background: `linear-gradient(135deg,${s.color}22 0%,${s.color}08 100%)`, border: `1px solid ${s.color}22` }} styles={{ body: { padding: '14px 16px' } }}>
+                          <Text style={{ fontSize: 11, color: isDark ? '#aaa' : '#888', display: 'block', marginBottom: 4 }}>{s.label}</Text>
+                          <div style={{ fontSize: 20, fontWeight: 800, color: s.color }}>₹{(s.value ?? 0).toLocaleString()}</div>
+                          <Text style={{ fontSize: 11, color: '#aaa' }}>{s.sub}</Text>
+                          {s.label === 'Total Sales' && (
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginTop: 6, paddingTop: 6, borderTop: `1px dashed ${s.color}33` }}>
+                              <Text style={{ fontSize: 11, color: '#52c41a', fontWeight: 600 }}>Paid: ₹{(totalPaid ?? 0).toLocaleString()}</Text>
+                              <Text style={{ fontSize: 11, color: '#fa8c16', fontWeight: 600 }}>Pending: ₹{(totalPending ?? 0).toLocaleString()}</Text>
+                            </div>
+                          )}
+                        </Card>
+                      </motion.div>
+                    </Col>
+                  ))}
+                </Row>
+
+                {/* Monthly P&L Bar Chart + Expense Pie */}
+                <Row gutter={[14, 14]} style={{ marginBottom: 14 }}>
+                  <Col xs={24} lg={16}>
+                    <Card
+                      title={
+                        <Space>
+                          <Text strong style={{ color: textColor }}>Monthly Gross Profit vs Net Profit</Text>
+                          {plProductFilter && <Tag style={{ background: '#B11E6A22', color: '#B11E6A', border: '1px solid #B11E6A44', borderRadius: 20 }}>{plProductFilter}</Tag>}
+                        </Space>
+                      }
+                      style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }}
+                      styles={{ body: { padding: '12px 16px 16px' } }}
+                    >
+                      <ResponsiveContainer width="100%" height={260}>
+                        <BarChart data={plChartData} barGap={4}>
+                          <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />
+                          <XAxis dataKey="month" tick={{ fill: tickColor, fontSize: 12 }} />
+                          <YAxis tick={{ fill: tickColor, fontSize: 12 }} tickFormatter={v => `₹${(v ?? 0).toLocaleString()}`} />
+                          <Tooltip formatter={(v, name) => [`₹${(v ?? 0).toLocaleString()}`, name]} contentStyle={{ background: isDark ? '#1E1E2E' : '#fff', borderRadius: 8 }} />
+                          <Legend />
+                          <Bar dataKey="grossProfit"   fill="#B11E6A" name="Gross Profit" radius={[4, 4, 0, 0]} />
+                          <Bar dataKey="totalExpenses" fill="#C94F8A" name="Expenses"     radius={[4, 4, 0, 0]} />
+                          <Bar dataKey="netProfit"     fill="#6b1240" name="Net Profit"   radius={[4, 4, 0, 0]} />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </Card>
+                  </Col>
+                  <Col xs={24} lg={8}>
+                    <Card
+                      title={<Text strong style={{ color: textColor }}>Expense Breakdown</Text>}
+                      style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)', height: '100%' }}
+                      styles={{ body: { padding: '12px 16px 16px' } }}
+                    >
+                      {expensePieData.length > 0 ? (
+                        <>
+                          <ResponsiveContainer width="100%" height={160}>
+                            <PieChart>
+                              <Pie data={expensePieData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={70} label={false}>
+                                {expensePieData.map((entry, idx) => (
+                                  <Cell key={idx} fill={entry.color} />
+                                ))}
+                              </Pie>
+                              <Tooltip formatter={(v) => `₹${(v ?? 0).toLocaleString()}`} />
+                            </PieChart>
+                          </ResponsiveContainer>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8 }}>
+                            {expensePieData.map(e => (
+                              <div key={e.name} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <Space size={6}>
+                                  <div style={{ width: 9, height: 9, borderRadius: '50%', background: e.color }} />
+                                  <Text style={{ fontSize: 12, color: textColor }}>{e.name}</Text>
+                                </Space>
+                                <Text style={{ fontSize: 12, fontWeight: 600 }}>₹{(e.value ?? 0).toLocaleString()}</Text>
+                              </div>
+                            ))}
+                            <Divider style={{ margin: '4px 0' }} />
+                            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                              <Text style={{ fontSize: 12, fontWeight: 700 }}>Total</Text>
+                              <Text style={{ fontSize: 12, fontWeight: 700, color: '#B11E6A' }}>₹{(totalExpenses ?? 0).toLocaleString()}</Text>
+                            </div>
+                          </div>
+                        </>
+                      ) : (
+                        <div style={{ textAlign: 'center', padding: '40px 0', color: '#aaa', fontSize: 13 }}>No expense categories selected</div>
+                      )}
+                    </Card>
+                  </Col>
+                </Row>
+
+                {/* P&L Statement + Monthly Trend Line */}
+                <Row gutter={[14, 14]} style={{ marginBottom: 14 }}>
+                  <Col xs={24} lg={12}>
+                    <Card
+                      title={
+                        <Space>
+                          <Text strong style={{ color: textColor }}>Profit & Loss Statement</Text>
+                          {plProductFilter && <Tag style={{ background: '#B11E6A22', color: '#B11E6A', border: '1px solid #B11E6A44', borderRadius: 20 }}>{plProductFilter}</Tag>}
+                        </Space>
+                      }
+                      style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }}
+                      styles={{ body: { padding: '16px' } }}
+                    >
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                        {plGstMode === 'incl' ? (
+                          <>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0' }}>
+                              <Text>Gross Revenue (Incl. GST)</Text>
+                              <Text strong style={{ color: '#B11E6A' }}>₹{(totalSales ?? 0).toLocaleString()}</Text>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', paddingLeft: 14 }}>
+                              <Text type="secondary" style={{ fontSize: 12 }}>  Taxable Sales</Text>
+                              <Text style={{ fontSize: 12 }}>₹{(totalSalesExcl ?? 0).toLocaleString()}</Text>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', paddingLeft: 14 }}>
+                              <Text type="secondary" style={{ fontSize: 12 }}>  GST Collected</Text>
+                              <Text style={{ fontSize: 12, color: '#fa8c16' }}>₹{(totalSalesGst ?? 0).toLocaleString()}</Text>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0' }}>
+                              <Text>Gross Purchase Cost (Incl. GST)</Text>
+                              <Text strong style={{ color: '#8a1652' }}>- ₹{(totalCogs ?? 0).toLocaleString()}</Text>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', paddingLeft: 14 }}>
+                              <Text type="secondary" style={{ fontSize: 12 }}>  Taxable COGS</Text>
+                              <Text style={{ fontSize: 12 }}>₹{(totalCogsExcl ?? 0).toLocaleString()}</Text>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', paddingLeft: 14 }}>
+                              <Text type="secondary" style={{ fontSize: 12 }}>  Input Tax Credit</Text>
+                              <Text style={{ fontSize: 12, color: '#52c41a' }}>- ₹{(totalCogsGst ?? 0).toLocaleString()}</Text>
+                            </div>
+                          </>
+                        ) : (
+                          <>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0' }}>
+                              <Text>Total Sales Revenue</Text>
+                              <Text strong style={{ color: '#B11E6A' }}>₹{(totalSales ?? 0).toLocaleString()}</Text>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0' }}>
+                              <Text>Cost of Goods Sold (COGS)</Text>
+                              <Text strong style={{ color: '#8a1652' }}>- ₹{(totalCogs ?? 0).toLocaleString()}</Text>
+                            </div>
+                          </>
+                        )}
+                        <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 12px', background: '#52c41a10', borderRadius: 8, border: '1px solid #52c41a22' }}>
+                          <Text style={{ fontSize: 12, color: '#52c41a', fontWeight: 600 }}>Received Amount</Text>
+                          <Text style={{ fontSize: 13, color: '#52c41a', fontWeight: 700 }}>₹{(totalPaid ?? 0).toLocaleString()}</Text>
+                        </div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 12px', background: '#fa8c1610', borderRadius: 8, border: '1px solid #fa8c1622' }}>
+                          <Text style={{ fontSize: 12, color: '#fa8c16', fontWeight: 600 }}>Credit to be Collected</Text>
+                          <Text style={{ fontSize: 13, color: '#fa8c16', fontWeight: 700 }}>₹{(totalPending ?? 0).toLocaleString()}</Text>
+                        </div>
+                        <Divider style={{ margin: '2px 0' }} />
+                        <div style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 12px', background: '#B11E6A10', borderRadius: 8, border: '1px solid #B11E6A33' }}>
+                          <Text strong style={{ fontSize: 14 }}>Gross Profit</Text>
+                          <Text strong style={{ color: '#B11E6A', fontSize: 15 }}>₹{(totalGrossProfit ?? 0).toLocaleString()}</Text>
+                        </div>
+                        <Text style={{ fontSize: 11, color: '#aaa', paddingLeft: 2 }}>Less: Operating Expenses</Text>
+                        {expenseCategoryConfig.filter(c => plSelectedExpenses.includes(c.key)).map(cat => {
+                          const catTotal = plFilteredData.reduce((sum, d) => sum + (d.expenses[cat.key] || 0), 0);
+                          return catTotal > 0 ? (
+                            <div key={cat.key} style={{ display: 'flex', justifyContent: 'space-between', paddingLeft: 14, paddingRight: 4 }}>
+                              <Space size={6}>
+                                <div style={{ width: 7, height: 7, borderRadius: '50%', background: cat.color }} />
+                                <Text type="secondary" style={{ fontSize: 13 }}>{cat.label}</Text>
+                              </Space>
+                              <Text style={{ color: '#8a1652', fontSize: 13 }}>- ₹{(catTotal ?? 0).toLocaleString()}</Text>
+                            </div>
+                          ) : null;
+                        })}
+                        <Divider style={{ margin: '2px 0' }} />
+                        <div style={{ display: 'flex', justifyContent: 'space-between', padding: '12px 14px', background: '#6b124012', borderRadius: 10, border: '2px solid #6b124044' }}>
+                          <Title level={4} style={{ margin: 0, color: '#6b1240' }}>Net Profit</Title>
+                          <Title level={4} style={{ margin: 0, color: '#6b1240' }}>₹{(totalNetProfit ?? 0).toLocaleString()}</Title>
+                        </div>
+                        {totalSales > 0 && (
+                          <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 2px' }}>
+                            <Text type="secondary" style={{ fontSize: 12 }}>Net Profit Margin</Text>
+                            <Tag style={{ background: '#B11E6A15', color: '#B11E6A', border: '1px solid #B11E6A33', borderRadius: 20, fontWeight: 700 }}>
+                              {((totalNetProfit / (plGstMode === 'incl' ? totalSalesExcl : totalSales)) * 100).toFixed(1)}%
+                            </Tag>
+                          </div>
+                        )}
+                        {plGstMode === 'incl' && netGstPayable > 0 && (
+                          <div style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 14px', borderRadius: 8, background: '#fa8c1610', border: '1px solid #fa8c1633', marginTop: 4 }}>
+                            <Text style={{ fontSize: 12, color: '#fa8c16', fontWeight: 600 }}>Net GST Payable (to Govt.)</Text>
+                            <Text style={{ fontSize: 12, color: '#fa8c16', fontWeight: 700 }}>₹{(netGstPayable ?? 0).toLocaleString()}</Text>
+                          </div>
+                        )}
+                      </div>
+                    </Card>
+                  </Col>
+                  <Col xs={24} lg={12}>
+                    <Card
+                      title={
+                        <Space>
+                          <Text strong style={{ color: textColor }}>Monthly Profit Trend</Text>
+                          {plProductFilter && <Tag style={{ background: '#B11E6A22', color: '#B11E6A', border: '1px solid #B11E6A44', borderRadius: 20 }}>{plProductFilter}</Tag>}
+                        </Space>
+                      }
+                      style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }}
+                      styles={{ body: { padding: '12px 16px 16px' } }}
+                    >
+                      <ResponsiveContainer width="100%" height={260}>
+                        <LineChart data={plChartData}>
+                          <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />
+                          <XAxis dataKey="month" tick={{ fill: tickColor, fontSize: 12 }} />
+                          <YAxis tick={{ fill: tickColor, fontSize: 12 }} tickFormatter={v => `₹${(v ?? 0).toLocaleString()}`} />
+                          <Tooltip formatter={(v, name) => [`₹${(v ?? 0).toLocaleString()}`, name]} contentStyle={{ background: isDark ? '#1E1E2E' : '#fff', borderRadius: 8 }} />
+                          <Legend />
+                          <Line type="monotone" dataKey="grossProfit"   stroke="#B11E6A" strokeWidth={2.5} dot={{ fill: '#B11E6A', r: 4 }} name="Gross Profit" />
+                          <Line type="monotone" dataKey="netProfit"     stroke="#6b1240" strokeWidth={2.5} dot={{ fill: '#6b1240', r: 4 }} name="Net Profit" />
+                          <Line type="monotone" dataKey="totalExpenses" stroke="#C94F8A" strokeWidth={2}   strokeDasharray="5 5" dot={{ fill: '#C94F8A', r: 3 }} name="Expenses" />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    </Card>
+                  </Col>
+                </Row>
+
+                {/* Product-wise P&L */}
+                <Card
+                  title={
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
+                      <Space wrap>
+                        <Text strong style={{ color: textColor }}>
+                          {plProductFilter ? `${plProductFilter} — Monthly P&L Breakdown` : 'Product-wise Profit & Loss'}
+                        </Text>
+                        {plProductFilter && <Tag style={{ background: '#B11E6A22', color: '#B11E6A', border: '1px solid #B11E6A44', borderRadius: 20 }}>{plProductFilter}</Tag>}
+                        {plProductFilter && selectedProductStats && (
+                          <>
+                            <Tag style={{ background: '#B11E6A15', color: '#B11E6A', border: '1px solid #B11E6A33', borderRadius: 20, fontSize: 11, fontWeight: 700 }}>
+                              Sold Qty: {(selectedProductStats.soldQty ?? 0).toLocaleString()}
+                            </Tag>
+                            <Tag style={{
+                              background: (selectedProductStats.stockQty ?? 0) < 200 ? '#ff4d4f15' : '#52c41a15',
+                              color: (selectedProductStats.stockQty ?? 0) < 200 ? '#ff4d4f' : '#52c41a',
+                              border: `1px solid ${(selectedProductStats.stockQty ?? 0) < 200 ? '#ff4d4f33' : '#52c41a33'}`,
+                              borderRadius: 20, fontSize: 11, fontWeight: 700,
+                            }}>
+                              Stock Qty: {(selectedProductStats.stockQty ?? 0).toLocaleString()}
+                            </Tag>
+                          </>
+                        )}
+                      </Space>
+                      <Button icon={<DownloadOutlined />} size="small" style={{ color: '#B11E6A', borderColor: '#B11E6A44' }}>Download</Button>
+                    </div>
+                  }
+                  style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)', marginBottom: 14 }}
+                  styles={{ body: { padding: '0 16px 16px' } }}
+                >
+                  {plProductFilter && selectedProductMonthly ? (
+                    /* ── Single-product monthly detail ── */
+                    <Row gutter={[14, 14]} style={{ paddingTop: 4 }}>
+                      <Col xs={24} lg={14}>
+                        <ResponsiveContainer width="100%" height={220}>
+                          <BarChart data={selectedProductMonthly} barGap={4}>
+                            <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />
+                            <XAxis dataKey="month" tick={{ fill: tickColor, fontSize: 12 }} />
+                            <YAxis tick={{ fill: tickColor, fontSize: 12 }} tickFormatter={v => `₹${(v ?? 0).toLocaleString()}`} />
+                            <Tooltip formatter={(v, n) => [`₹${(v ?? 0).toLocaleString()}`, n]} contentStyle={{ background: isDark ? '#1E1E2E' : '#fff', borderRadius: 8 }} />
+                            <Legend />
+                            <Bar dataKey="sales"       fill="#D85C9E" name="Sales"        radius={[4, 4, 0, 0]} />
+                            <Bar dataKey="cogs"        fill="#8a1652" name="COGS"         radius={[4, 4, 0, 0]} />
+                            <Bar dataKey="grossProfit" fill="#B11E6A" name="Gross Profit" radius={[4, 4, 0, 0]} />
+                            <Bar dataKey="netProfit"   fill="#6b1240" name="Net Profit"   radius={[4, 4, 0, 0]} />
+                          </BarChart>
+                        </ResponsiveContainer>
+                      </Col>
+                      <Col xs={24} lg={10}>
+                        <Table
+                          size="small"
+                          dataSource={selectedProductMonthly}
+                          pagination={false}
+                          rowKey="month"
+                          scroll={{ x: 520 }}
+                          columns={[
+                            { title: 'Month', dataIndex: 'month', key: 'month', render: v => <Text strong style={{ fontSize: 12 }}>{v}</Text> },
+                            { title: 'Sold Qty', dataIndex: 'qty', key: 'qty', align: 'center', render: v => <Tag style={{ background: '#B11E6A15', color: '#B11E6A', border: '1px solid #B11E6A33', borderRadius: 20, fontSize: 11, fontWeight: 700 }}>{(v ?? 0).toLocaleString()}</Tag> },
+                            {
+                              title: 'Stock Qty', key: 'stockQty', align: 'center',
+                              render: () => {
+                                const sq = selectedProductStats?.stockQty ?? 0;
+                                return (
+                                  <Tag style={{ background: sq < 200 ? '#ff4d4f15' : '#52c41a15', color: sq < 200 ? '#ff4d4f' : '#52c41a', border: `1px solid ${sq < 200 ? '#ff4d4f33' : '#52c41a33'}`, borderRadius: 20, fontSize: 11, fontWeight: 700 }}>
+                                    {sq.toLocaleString()}
+                                  </Tag>
+                                );
+                              },
+                            },
+                            { title: 'Sales',    dataIndex: 'sales',       key: 'sales',       render: v => <Text style={{ fontSize: 12, color: '#D85C9E', fontWeight: 600 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                            { title: 'Gross P.', dataIndex: 'grossProfit', key: 'grossProfit', render: v => <Text style={{ fontSize: 12, color: '#B11E6A', fontWeight: 700 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                            { title: 'Net P.',   dataIndex: 'netProfit',   key: 'netProfit',   render: v => <Text style={{ fontSize: 12, color: '#6b1240',  fontWeight: 700 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                          ]}
+                          summary={(data) => {
+                            const tQ = data.reduce((s, r) => s + (r.qty || 0), 0);
+                            const tS = data.reduce((s, r) => s + r.sales, 0);
+                            const tG = data.reduce((s, r) => s + r.grossProfit, 0);
+                            const tN = data.reduce((s, r) => s + r.netProfit, 0);
+                            return (
+                              <Table.Summary.Row>
+                                <Table.Summary.Cell><Text strong style={{ fontSize: 12 }}>Total</Text></Table.Summary.Cell>
+                                <Table.Summary.Cell index={1}><Text strong style={{ color: '#B11E6A', fontSize: 12 }}>{tQ.toLocaleString()}</Text></Table.Summary.Cell>
+                                <Table.Summary.Cell index={2}><Text style={{ fontSize: 11, color: '#aaa' }}>—</Text></Table.Summary.Cell>
+                                <Table.Summary.Cell index={3}><Text strong style={{ color: '#D85C9E', fontSize: 12 }}>₹{tS.toLocaleString()}</Text></Table.Summary.Cell>
+                                <Table.Summary.Cell index={4}><Text strong style={{ color: '#B11E6A', fontSize: 12 }}>₹{tG.toLocaleString()}</Text></Table.Summary.Cell>
+                                <Table.Summary.Cell index={5}><Text strong style={{ color: '#6b1240',  fontSize: 12 }}>₹{tN.toLocaleString()}</Text></Table.Summary.Cell>
+                              </Table.Summary.Row>
+                            );
+                          }}
+                        />
+                      </Col>
+                    </Row>
+                  ) : (
+                    /* ── All-products comparison ── */
+                    <Row gutter={[14, 14]} style={{ paddingTop: 4 }}>
+                      <Col xs={24} lg={14}>
+                        <ResponsiveContainer width="100%" height={200}>
+                          <BarChart data={activeProductPLData} layout="vertical" barGap={4}>
+                            <CartesianGrid strokeDasharray="3 3" stroke={gridColor} horizontal={false} />
+                            <XAxis type="number" tick={{ fill: tickColor, fontSize: 11 }} tickFormatter={v => `₹${(v ?? 0).toLocaleString()}`} />
+                            <YAxis type="category" dataKey="product" tick={{ fill: tickColor, fontSize: 11 }} width={90} />
+                            <Tooltip formatter={(v) => `₹${(v ?? 0).toLocaleString()}`} contentStyle={{ background: isDark ? '#1E1E2E' : '#fff', borderRadius: 8 }} />
+                            <Legend />
+                            <Bar dataKey="sales"       fill="#D85C9E" name="Sales"        radius={[0, 4, 4, 0]} />
+                            <Bar dataKey="cogs"        fill="#8a1652" name="COGS"         radius={[0, 4, 4, 0]} />
+                            <Bar dataKey="grossProfit" fill="#B11E6A" name="Gross Profit" radius={[0, 4, 4, 0]} />
+                          </BarChart>
+                        </ResponsiveContainer>
+                      </Col>
+                      <Col xs={24} lg={10}>
+                        <Table
+                          size="small"
+                          dataSource={activeProductPLData}
+                          pagination={false}
+                          rowClassName={(r) => r.product === plProductFilter ? 'ant-table-row-selected' : ''}
+                          onRow={(r) => ({
+                            onClick: () => setPlProductFilter(plProductFilter === r.product ? null : r.product),
+                            style: {
+                              cursor: 'pointer',
+                              opacity: plProductFilter && r.product !== plProductFilter ? 0.45 : 1,
+                              background: r.product === plProductFilter ? '#B11E6A08' : undefined,
+                              transition: 'opacity 0.2s',
+                            },
+                          })}
+                          columns={[
+                            { title: 'Product', dataIndex: 'product', key: 'product', render: (v, r) => <Text style={{ fontSize: 12, fontWeight: 700, color: r.product === plProductFilter ? '#B11E6A' : textColor }}>{v}</Text> },
+                            { title: 'Sold Qty', dataIndex: 'soldQty', key: 'soldQty', align: 'center', render: v => <Tag style={{ background: '#B11E6A15', color: '#B11E6A', border: '1px solid #B11E6A33', borderRadius: 20, fontSize: 11, fontWeight: 700 }}>{v?.toLocaleString()}</Tag> },
+                            { title: 'Stock Qty', dataIndex: 'stockQty', key: 'stockQty', align: 'center', render: v => <Tag style={{ background: v < 200 ? '#ff4d4f15' : '#52c41a15', color: v < 200 ? '#ff4d4f' : '#52c41a', border: `1px solid ${v < 200 ? '#ff4d4f33' : '#52c41a33'}`, borderRadius: 20, fontSize: 11, fontWeight: 700 }}>{v?.toLocaleString()}</Tag> },
+                            { title: 'Sales',    dataIndex: 'sales',       key: 'sales',       render: v => <Text style={{ fontSize: 12, color: '#D85C9E', fontWeight: 600 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                            { title: 'Gross P.', dataIndex: 'grossProfit', key: 'grossProfit', render: v => <Text style={{ fontSize: 12, color: '#B11E6A', fontWeight: 700 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                            {
+                              title: 'Margin', key: 'margin',
+                              render: (_, r) => {
+                                const m = ((r.grossProfit / r.sales) * 100).toFixed(1);
+                                return <Tag style={{ background: '#B11E6A15', color: '#B11E6A', border: '1px solid #B11E6A33', borderRadius: 20, fontWeight: 700, fontSize: 11 }}>{m}%</Tag>;
+                              },
+                            },
+                          ]}
+                          summary={(data) => {
+                            const tS  = data.reduce((s, r) => s + r.sales, 0);
+                            const tG  = data.reduce((s, r) => s + r.grossProfit, 0);
+                            const tSq = data.reduce((s, r) => s + (r.soldQty || 0), 0);
+                            return (
+                              <Table.Summary.Row>
+                                <Table.Summary.Cell><Text strong style={{ fontSize: 12 }}>Total</Text></Table.Summary.Cell>
+                                <Table.Summary.Cell index={1}><Text strong style={{ color: '#B11E6A', fontSize: 12 }}>{(tSq ?? 0).toLocaleString()}</Text></Table.Summary.Cell>
+                                <Table.Summary.Cell index={2}><Text style={{ fontSize: 11, color: '#aaa' }}>—</Text></Table.Summary.Cell>
+                                <Table.Summary.Cell index={3}><Text strong style={{ color: '#D85C9E', fontSize: 12 }}>₹{(tS ?? 0).toLocaleString()}</Text></Table.Summary.Cell>
+                                <Table.Summary.Cell index={4}><Text strong style={{ color: '#B11E6A', fontSize: 12 }}>₹{(tG ?? 0).toLocaleString()}</Text></Table.Summary.Cell>
+                                <Table.Summary.Cell index={5}>
+                                  <Tag style={{ background: '#B11E6A15', color: '#B11E6A', border: '1px solid #B11E6A33', borderRadius: 20, fontWeight: 700, fontSize: 11 }}>
+                                    {((tG / tS) * 100).toFixed(1)}%
+                                  </Tag>
+                                </Table.Summary.Cell>
+                              </Table.Summary.Row>
+                            );
+                          }}
+                        />
+                        <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 6, textAlign: 'center' }}>
+                          Click a row to filter all charts by that product
+                        </Text>
+                      </Col>
+                    </Row>
+                  )}
+                </Card>
+                </div>
+              </div>
+            ),
+          },
+
+          /* ─────────── BILL-WISE P&L ─────────── */
+          {
+            key: 'bill_pl',
+            label: 'Bill-wise P&L',
+            children: (() => {
+              const filtered = activeBillPLData.filter(r => {
+                const q = billPlSearch.toLowerCase();
+                const matchSearch = !q || r.inv_no.toLowerCase().includes(q) || r.client.toLowerCase().includes(q) || r.product.toLowerCase().includes(q);
+                const matchProd = !billPlProductFilter || r.product === billPlProductFilter;
+                return matchSearch && matchProd;
+              });
+              const totSell = filtered.reduce((s, r) => s + r.sell_taxable, 0);
+              const totGst  = filtered.reduce((s, r) => s + r.gst_collected, 0);
+              const totCogs = filtered.reduce((s, r) => s + r.cogs, 0);
+              const totGP   = filtered.reduce((s, r) => s + r.gross_profit, 0);
+              const avgMargin = totSell > 0 ? ((totGP / totSell) * 100).toFixed(1) : 0;
+
+              return (
+                <div>
+                  {/* Summary cards */}
+                  <Row gutter={[12, 12]} style={{ marginBottom: 14 }}>
+                    {[
+                      { label: 'Total Taxable Sales', value: totSell,   color: '#B11E6A', sub: `${filtered.length} bills` },
+                      { label: 'GST Collected',        value: totGst,    color: '#fa8c16', sub: 'Output tax' },
+                      { label: 'Total COGS',           value: totCogs,   color: '#8a1652', sub: 'Purchase cost' },
+                      { label: 'Gross Profit',         value: totGP,     color: '#52c41a', sub: `Avg margin: ${avgMargin}%` },
+                    ].map((s, i) => (
+                      <Col xs={12} sm={6} key={s.label}>
+                        <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.07 }}>
+                          <Card style={{ borderRadius: 12, border: `1px solid ${s.color}22`, background: `linear-gradient(135deg,${s.color}22,${s.color}08)` }} styles={{ body: { padding: '14px 16px' } }}>
+                            <Text style={{ fontSize: 11, color: isDark ? '#aaa' : '#888', display: 'block', marginBottom: 4 }}>{s.label}</Text>
+                            <div style={{ fontSize: 19, fontWeight: 800, color: s.color }}>₹{(s.value ?? 0).toLocaleString()}</div>
+                            <Text style={{ fontSize: 11, color: '#aaa' }}>{s.sub}</Text>
+                          </Card>
+                        </motion.div>
+                      </Col>
+                    ))}
+                  </Row>
+
+                  {/* Filter bar */}
+                  <Card style={{ borderRadius: 12, border: 'none', background: cardBg, marginBottom: 14, boxShadow: '0 2px 12px rgba(177,30,106,0.06)' }} styles={{ body: { padding: '12px 16px' } }}>
+                    <Space wrap>
+                      <FilterOutlined style={{ color: '#B11E6A' }} />
+                      <Select allowClear placeholder="All Products" value={billPlProductFilter} onChange={setBillPlProductFilter} style={{ width: 180 }}>
+                        {billPlProductOptions.map(p => <Option key={p} value={p}>{p}</Option>)}
+                      </Select>
+                      <Input prefix={<SearchOutlined style={{ color: '#B11E6A' }} />} placeholder="Search invoice, client..." allowClear value={billPlSearch} onChange={e => setBillPlSearch(e.target.value)} style={{ width: 220, borderRadius: 8 }} />
+                      <Button icon={<FileExcelOutlined />} style={{ color: '#52c41a', borderColor: '#52c41a44' }} onClick={exportBillPlExcel}>Excel</Button>
+                      <Button icon={<FilePdfOutlined />} style={{ color: '#B11E6A', borderColor: '#B11E6A44' }} onClick={exportBillPlPdf}>PDF</Button>
+                    </Space>
+                  </Card>
+
+                  {/* Bill-wise P&L chart + table — wrapped in a ref for the PDF export button below,
+                      deliberately excluding the filter bar above it. */}
+                  <div ref={billPlRef}>
+                  <Row gutter={[14, 14]} style={{ marginBottom: 14 }}>
+                    <Col xs={24} lg={16}>
+                      <Card title={<Text strong style={{ color: textColor }}>Bill-wise Gross Profit</Text>} style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }} styles={{ body: { padding: '12px 16px 16px' } }}>
+                        <ResponsiveContainer width="100%" height={240}>
+                          <BarChart data={filtered} barGap={4}>
+                            <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />
+                            <XAxis dataKey="inv_no" tick={{ fill: tickColor, fontSize: 11 }} />
+                            <YAxis tick={{ fill: tickColor, fontSize: 11 }} tickFormatter={v => `₹${(v ?? 0).toLocaleString()}`} />
+                            <Tooltip formatter={(v, n) => [`₹${(v ?? 0).toLocaleString()}`, n]} contentStyle={{ background: isDark ? '#1E1E2E' : '#fff', borderRadius: 8 }} />
+                            <Legend />
+                            <Bar dataKey="sell_taxable" name="Taxable Sales" fill="#D85C9E" radius={[4,4,0,0]} />
+                            <Bar dataKey="cogs"         name="COGS"          fill="#8a1652" radius={[4,4,0,0]} />
+                            <Bar dataKey="gross_profit" name="Gross Profit"  fill="#B11E6A" radius={[4,4,0,0]} />
+                          </BarChart>
+                        </ResponsiveContainer>
+                      </Card>
+                    </Col>
+                    <Col xs={24} lg={8}>
+                      <Card title={<Text strong style={{ color: textColor }}>Profit by Client</Text>} style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)', height: '100%' }} styles={{ body: { padding: '16px' } }}>
+                        <ResponsiveContainer width="100%" height={180}>
+                          <PieChart>
+                            <Pie data={filtered.map((r, i) => ({ name: r.client, value: r.gross_profit, color: CHART_COLORS[i % CHART_COLORS.length] }))} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={70} label={false}>
+                              {filtered.map((_, idx) => <Cell key={idx} fill={CHART_COLORS[idx % CHART_COLORS.length]} />)}
+                            </Pie>
+                            <Tooltip formatter={v => `₹${(v ?? 0).toLocaleString()}`} />
+                          </PieChart>
+                        </ResponsiveContainer>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 5, marginTop: 4 }}>
+                          {filtered.map((r, i) => (
+                            <div key={r.key} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                              <Space size={6}>
+                                <div style={{ width: 8, height: 8, borderRadius: '50%', background: CHART_COLORS[i % CHART_COLORS.length] }} />
+                                <Text style={{ fontSize: 11, color: textColor }} ellipsis>{r.client}</Text>
+                              </Space>
+                              <Text style={{ fontSize: 11, fontWeight: 700, color: '#B11E6A' }}>₹{(r.gross_profit ?? 0).toLocaleString()}</Text>
+                            </div>
+                          ))}
+                        </div>
+                      </Card>
+                    </Col>
+                  </Row>
+
+                  {/* Bill-wise P&L table */}
+                  <Card style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }} styles={{ body: { padding: 16 } }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+                      <Title level={5} style={{ color: textColor, margin: 0 }}>Bill-wise Profit & Loss Statement</Title>
+                      <Text type="secondary" style={{ fontSize: 12 }}>{filtered.length} bills • Avg Margin: <Text strong style={{ color: '#B11E6A' }}>{avgMargin}%</Text></Text>
+                    </div>
+                    <Table
+                      size="small"
+                      scroll={{ x: 'max-content' }}
+                      dataSource={filtered}
+                      columns={[
+                        { title: 'Invoice #', dataIndex: 'inv_no', key: 'inv_no', width: 110, fixed: 'left', render: v => <Text strong style={{ color: '#B11E6A', fontSize: 12 }}>{v}</Text> },
+                        { title: 'Date', dataIndex: 'date', key: 'date', width: 110, render: v => <Text style={{ fontSize: 12 }}>{v}</Text> },
+                        { title: 'Client', dataIndex: 'client', key: 'client', width: 160, render: v => <Text style={{ fontSize: 12, fontWeight: 600 }}>{v}</Text> },
+                        { title: 'Product', dataIndex: 'product', key: 'product', width: 130, render: v => <Tag style={{ background: '#8a165215', color: '#8a1652', border: '1px solid #8a165233', borderRadius: 20 }}>{v}</Tag> },
+                        { title: 'Taxable Sales', dataIndex: 'sell_taxable', key: 'sell_taxable', width: 120, render: v => <Text style={{ fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                        { title: 'CGST', dataIndex: 'cgst', key: 'cgst', width: 100, render: v => <Text style={{ fontSize: 12, color: '#fa8c16' }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                        { title: 'SGST', dataIndex: 'sgst', key: 'sgst', width: 100, render: v => <Text style={{ fontSize: 12, color: '#fa8c16' }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                        { title: 'GST Collected', dataIndex: 'gst_collected', key: 'gst_collected', width: 120, render: v => <Text style={{ fontSize: 12, color: '#fa8c16' }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                        { title: 'Total Bill', dataIndex: 'sell_total', key: 'sell_total', width: 110, render: v => <Text strong style={{ fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                        { title: 'COGS (Purchase Cost)', dataIndex: 'cogs', key: 'cogs', width: 140, render: v => <Text style={{ fontSize: 12, color: '#8a1652' }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                        {
+                          title: 'Gross Profit', dataIndex: 'gross_profit', key: 'gross_profit', width: 120, fixed: 'right',
+                          render: v => <Text strong style={{ fontSize: 12, color: v >= 0 ? '#52c41a' : '#ff4d4f' }}>₹{(v ?? 0).toLocaleString()}</Text>,
+                        },
+                        {
+                          title: 'Margin %', key: 'margin', width: 90, fixed: 'right',
+                          render: (_, r) => {
+                            const m = r.sell_taxable > 0 ? ((r.gross_profit / r.sell_taxable) * 100).toFixed(1) : 0;
+                            return <Tag style={{ background: '#B11E6A15', color: '#B11E6A', border: '1px solid #B11E6A33', borderRadius: 20, fontWeight: 700, fontSize: 11 }}>{m}%</Tag>;
+                          },
+                        },
+                        { title: 'Status', dataIndex: 'status', key: 'status', width: 120, render: v => <Tag style={{ borderRadius: 20, fontSize: 11, fontWeight: 600, background: `${statusColor[v] || '#888'}22`, color: statusColor[v] || '#888', border: `1px solid ${statusColor[v] || '#888'}44` }}>{v}</Tag> },
+                      ]}
+                      expandable={{
+                        rowExpandable: (r) => Array.isArray(r.breakdown) && r.breakdown.length > 0,
+                        expandedRowRender: (r) => (
+                          <Table
+                            size="small"
+                            pagination={false}
+                            rowKey={(row, i) => `${r.key}-${i}`}
+                            dataSource={r.breakdown}
+                            columns={[
+                              { title: 'Product', dataIndex: 'name', key: 'name', render: v => <Text style={{ fontSize: 12, fontWeight: 600 }}>{v}</Text> },
+                              { title: 'Qty', dataIndex: 'qty', key: 'qty', render: v => <Text style={{ fontSize: 12 }}>{v}</Text> },
+                              { title: 'Sale Price', dataIndex: 'price', key: 'price', render: v => <Text style={{ fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                              { title: 'Sale Amount', dataIndex: 'lineTotal', key: 'lineTotal', render: v => <Text style={{ fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                              { title: 'Purchase Rate', dataIndex: 'costRate', key: 'costRate', render: v => <Text style={{ fontSize: 12, color: '#8a1652' }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                              { title: 'Purchase Cost', dataIndex: 'costAmount', key: 'costAmount', render: v => <Text strong style={{ fontSize: 12, color: '#8a1652' }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                            ]}
+                            summary={(rows) => {
+                              const tCost = rows.reduce((s, row) => s + (row.costAmount || 0), 0);
+                              return (
+                                <Table.Summary.Row>
+                                  <Table.Summary.Cell colSpan={5}><Text strong style={{ fontSize: 12 }}>Total Purchase Cost</Text></Table.Summary.Cell>
+                                  <Table.Summary.Cell><Text strong style={{ fontSize: 12, color: '#8a1652' }}>₹{tCost.toLocaleString()}</Text></Table.Summary.Cell>
+                                </Table.Summary.Row>
+                              );
+                            }}
+                          />
+                        ),
+                      }}
+                      summary={(data) => {
+                        const tS = data.reduce((s, r) => s + r.sell_taxable, 0);
+                        const tCgst = data.reduce((s, r) => s + (r.cgst ?? 0), 0);
+                        const tSgst = data.reduce((s, r) => s + (r.sgst ?? 0), 0);
+                        const tG = data.reduce((s, r) => s + r.gst_collected, 0);
+                        const tC = data.reduce((s, r) => s + r.cogs, 0);
+                        const tP = data.reduce((s, r) => s + r.gross_profit, 0);
+                        return (
+                          <Table.Summary.Row style={{ fontWeight: 700 }}>
+                            <Table.Summary.Cell colSpan={5}><Text strong style={{ fontSize: 12 }}>Total</Text></Table.Summary.Cell>
+                            <Table.Summary.Cell><Text strong style={{ fontSize: 12 }}>₹{(tS ?? 0).toLocaleString()}</Text></Table.Summary.Cell>
+                            <Table.Summary.Cell><Text strong style={{ color: '#fa8c16', fontSize: 12 }}>₹{(tCgst ?? 0).toLocaleString()}</Text></Table.Summary.Cell>
+                            <Table.Summary.Cell><Text strong style={{ color: '#fa8c16', fontSize: 12 }}>₹{(tSgst ?? 0).toLocaleString()}</Text></Table.Summary.Cell>
+                            <Table.Summary.Cell><Text strong style={{ color: '#fa8c16', fontSize: 12 }}>₹{(tG ?? 0).toLocaleString()}</Text></Table.Summary.Cell>
+                            <Table.Summary.Cell><Text strong style={{ fontSize: 12 }}>₹{(tS + tG).toLocaleString()}</Text></Table.Summary.Cell>
+                            <Table.Summary.Cell><Text strong style={{ color: '#8a1652', fontSize: 12 }}>₹{(tC ?? 0).toLocaleString()}</Text></Table.Summary.Cell>
+                            <Table.Summary.Cell><Text strong style={{ color: '#52c41a', fontSize: 12 }}>₹{(tP ?? 0).toLocaleString()}</Text></Table.Summary.Cell>
+                            <Table.Summary.Cell>
+                              <Tag style={{ background: '#B11E6A15', color: '#B11E6A', border: '1px solid #B11E6A33', borderRadius: 20, fontWeight: 700, fontSize: 11 }}>
+                                {tS > 0 ? ((tP / tS) * 100).toFixed(1) : 0}%
+                              </Tag>
+                            </Table.Summary.Cell>
+                            <Table.Summary.Cell />
+                          </Table.Summary.Row>
+                        );
+                      }}
+                      pagination={{ showSizeChanger: true, pageSizeOptions: ['10', '20', '50', '100'], defaultPageSize: 10 }}
+                    />
+                  </Card>
+                  </div>
+                </div>
+              );
+            })(),
+          },
+
+          /* ─────────── SALESPERSON PERFORMANCE REPORT ─────────── */
+          {
+            key: 'performance',
+            label: 'Performance',
+            children: (() => {
+              const topPerformer = [...activeSalesPersonData].sort((a, b) => b.revenue - a.revenue)[0];
+              const teamRevenue  = activeSalesPersonData.reduce((s, p) => s + (p.revenue || 0), 0);
+              const teamOrders   = activeSalesPersonData.reduce((s, p) => s + (p.orders || 0), 0);
+              const avgTarget    = activeSalesPersonData.length > 0
+                ? activeSalesPersonData.reduce((s, p) => s + Math.round(((p.revenue || 0) / (p.target || 1)) * 100), 0) / activeSalesPersonData.length
+                : 0;
+              const totalComplaints = activeSalesPersonData.reduce((s, p) => s + (p.complaints || 0), 0);
+              const latestMonthRow = activeSalesPersonMonthly[activeSalesPersonMonthly.length - 1] || null;
+              const prevMonthRow = activeSalesPersonMonthly[activeSalesPersonMonthly.length - 2] || null;
+
+              if (!topPerformer) return <Empty description="No performance data available" style={{ padding: 40 }} />;
+              return (
+                <div>
+                  {/* Export bar */}
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 14 }}>
+                    <Space>
+                      <Button icon={<FileExcelOutlined />} style={{ color: '#52c41a', borderColor: '#52c41a44' }} onClick={exportPerformanceExcel}>Excel</Button>
+                      <Button icon={<FilePdfOutlined />} style={{ color: '#B11E6A', borderColor: '#B11E6A44' }} onClick={exportPerformancePdf}>PDF</Button>
+                    </Space>
+                  </div>
+
+                  <div ref={performanceRef}>
+                  {/* KPI summary row */}
+                  <Row gutter={[12, 12]} style={{ marginBottom: 14 }}>
+                    {[
+                      { label: 'Top Performer',      value: (topPerformer.name || '—').split(' ')[0], color: '#B11E6A', sub: `₹${(topPerformer.revenue || 0).toLocaleString()} revenue` },
+                      { label: 'Team Revenue',        value: `₹${teamRevenue.toLocaleString()}`, color: '#C94F8A', sub: `${teamOrders} total orders` },
+                      { label: 'Avg Target Achieved', value: `${avgTarget.toFixed(0)}%`,      color: avgTarget >= 100 ? '#52c41a' : '#fa8c16', sub: 'Across all sales persons' },
+                      { label: 'Total Complaints',    value: totalComplaints,                  color: totalComplaints > 5 ? '#ff4d4f' : '#52c41a', sub: 'Assigned to team' },
+                    ].map((s, i) => (
+                      <Col xs={12} sm={6} key={s.label}>
+                        <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.07 }}>
+                          <Card style={{ borderRadius: 12, border: `1px solid ${s.color}22`, background: `linear-gradient(135deg,${s.color}22,${s.color}08)` }} styles={{ body: { padding: '14px 16px' } }}>
+                            <Text style={{ fontSize: 11, color: isDark ? '#aaa' : '#888', display: 'block', marginBottom: 4 }}>{s.label}</Text>
+                            <div style={{ fontSize: 20, fontWeight: 800, color: s.color }}>{s.value}</div>
+                            <Text style={{ fontSize: 11, color: '#aaa' }}>{s.sub}</Text>
+                          </Card>
+                        </motion.div>
+                      </Col>
+                    ))}
+                  </Row>
+
+                  {/* Sub-tab selector */}
+                  <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
+                    {[['leaderboard', 'Leaderboard'], ['target', 'Target vs Achievement'], ['monthly', 'Monthly Trend']].map(([k, lbl]) => (
+                      <button key={k} type="button" onClick={() => setPerfTab(k)} style={{
+                        padding: '6px 18px', borderRadius: 20, cursor: 'pointer', fontWeight: 600, fontSize: 13, transition: 'all 0.15s',
+                        border: `1.5px solid ${perfTab === k ? '#B11E6A' : borderColor}`,
+                        background: perfTab === k ? '#B11E6A18' : 'transparent',
+                        color: perfTab === k ? '#B11E6A' : isDark ? '#aaa' : '#666',
+                      }}>{lbl}</button>
+                    ))}
+                  </div>
+
+                  {/* ── Leaderboard ── */}
+                  {perfTab === 'leaderboard' && (
+                    <Row gutter={[14, 14]}>
+                      <Col xs={24} lg={14}>
+                        <Card title={<Text strong style={{ color: textColor }}>Revenue Leaderboard</Text>} style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }} styles={{ body: { padding: '12px 16px 16px' } }}>
+                          <ResponsiveContainer width="100%" height={270}>
+                            <BarChart data={[...activeSalesPersonData].sort((a, b) => b.revenue - a.revenue)} layout="vertical" barGap={4}>
+                              <CartesianGrid strokeDasharray="3 3" stroke={gridColor} horizontal={false} />
+                              <XAxis type="number" tick={{ fill: tickColor, fontSize: 11 }} tickFormatter={v => `₹${(v ?? 0).toLocaleString()}`} />
+                              <YAxis type="category" dataKey="name" tick={{ fill: tickColor, fontSize: 11 }} width={100} />
+                              <Tooltip formatter={v => `₹${(v ?? 0).toLocaleString()}`} contentStyle={{ background: isDark ? '#1E1E2E' : '#fff', borderRadius: 8 }} />
+                              <Bar dataKey="revenue" name="Revenue" radius={[0,4,4,0]}>
+                                {[...activeSalesPersonData].sort((a, b) => b.revenue - a.revenue).map((p, idx) => (
+                                  <Cell key={idx} fill={p.color} />
+                                ))}
+                              </Bar>
+                            </BarChart>
+                          </ResponsiveContainer>
+                        </Card>
+                      </Col>
+                      <Col xs={24} lg={10}>
+                        <Card title={<Text strong style={{ color: textColor }}>Sales Person Details</Text>} style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }} styles={{ body: { padding: 0 } }}>
+                          <Table
+                            size="small"
+                            dataSource={[...activeSalesPersonData].sort((a, b) => b.revenue - a.revenue)}
+                            pagination={false}
+                            rowKey="key"
+                            columns={[
+                              {
+                                title: '#', key: 'rank', width: 32, align: 'center',
+                                render: (_, __, idx) => (
+                                  <div style={{ width: 20, height: 20, borderRadius: '50%', background: idx === 0 ? '#faad14' : idx === 1 ? '#aaa' : idx === 2 ? '#cd7f32' : '#f0f0f0', color: idx < 3 ? '#fff' : '#666', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, fontWeight: 700 }}>{idx + 1}</div>
+                                ),
+                              },
+                              { title: 'Name', dataIndex: 'name', key: 'name', render: (v, r) => <div><Text style={{ fontSize: 12, fontWeight: 700 }}>{v}</Text><br /><Text style={{ fontSize: 10, color: '#aaa' }}>{r.role}</Text></div> },
+                              { title: 'Orders', dataIndex: 'orders', key: 'orders', align: 'center', width: 55, render: v => <Text style={{ fontSize: 12, fontWeight: 600 }}>{v}</Text> },
+                              { title: 'Revenue', dataIndex: 'revenue', key: 'revenue', width: 85, render: (v, r) => <Text style={{ fontSize: 12, fontWeight: 700, color: r.color }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                              { title: 'Conv.', dataIndex: 'conversion', key: 'conversion', align: 'center', width: 55, render: v => <Tag style={{ background: v >= 70 ? '#52c41a15' : '#fa8c1615', color: v >= 70 ? '#52c41a' : '#fa8c16', border: `1px solid ${v >= 70 ? '#52c41a33' : '#fa8c1633'}`, borderRadius: 20, fontSize: 10, fontWeight: 700 }}>{v}%</Tag> },
+                            ]}
+                          />
+                        </Card>
+                      </Col>
+                    </Row>
+                  )}
+
+                  {/* ── Target vs Achievement ── */}
+                  {perfTab === 'target' && (
+                    <Row gutter={[14, 14]}>
+                      <Col xs={24} lg={15}>
+                        <Card title={<Text strong style={{ color: textColor }}>Target vs Revenue Achieved</Text>} style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }} styles={{ body: { padding: '12px 16px 16px' } }}>
+                          <ResponsiveContainer width="100%" height={280}>
+                            <BarChart data={activeSalesPersonData} barGap={6}>
+                              <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />
+                              <XAxis dataKey="name" tick={{ fill: tickColor, fontSize: 11 }} tickFormatter={v => v.split(' ')[0]} />
+                              <YAxis tick={{ fill: tickColor, fontSize: 11 }} tickFormatter={v => `₹${(v ?? 0).toLocaleString()}`} />
+                              <Tooltip formatter={v => `₹${(v ?? 0).toLocaleString()}`} contentStyle={{ background: isDark ? '#1E1E2E' : '#fff', borderRadius: 8 }} />
+                              <Legend />
+                              <Bar dataKey="target"  name="Target"   fill={isDark ? '#444' : '#e0e0e0'} radius={[4,4,0,0]} />
+                              <Bar dataKey="revenue" name="Achieved" radius={[4,4,0,0]}>
+                                {activeSalesPersonData.map((p, idx) => <Cell key={idx} fill={p.revenue >= p.target ? '#52c41a' : '#B11E6A'} />)}
+                              </Bar>
+                            </BarChart>
+                          </ResponsiveContainer>
+                        </Card>
+                      </Col>
+                      <Col xs={24} lg={9}>
+                        <Card title={<Text strong style={{ color: textColor }}>Achievement Summary</Text>} style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }} styles={{ body: { padding: 0 } }}>
+                          <Table
+                            size="small"
+                            dataSource={activeSalesPersonData}
+                            pagination={false}
+                            rowKey="key"
+                            columns={[
+                              { title: 'Sales Person', dataIndex: 'name', key: 'name', render: v => <Text style={{ fontSize: 12, fontWeight: 600 }}>{v.split(' ')[0]}</Text> },
+                              { title: 'Target', dataIndex: 'target', key: 'target', width: 80, render: v => <Text style={{ fontSize: 12, color: '#888' }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                              { title: 'Achieved', dataIndex: 'revenue', key: 'revenue', width: 85, render: (v, r) => <Text style={{ fontSize: 12, fontWeight: 700, color: v >= r.target ? '#52c41a' : '#B11E6A' }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                              {
+                                title: '% Hit', key: 'hit', width: 65, align: 'center',
+                                render: (_, r) => {
+                                  const pct = Math.round((r.revenue / r.target) * 100);
+                                  return <Tag style={{ background: pct >= 100 ? '#52c41a15' : pct >= 80 ? '#fa8c1615' : '#ff4d4f15', color: pct >= 100 ? '#52c41a' : pct >= 80 ? '#fa8c16' : '#ff4d4f', border: `1px solid ${pct >= 100 ? '#52c41a33' : pct >= 80 ? '#fa8c1633' : '#ff4d4f33'}`, borderRadius: 20, fontSize: 11, fontWeight: 700 }}>{pct}%</Tag>;
+                                },
+                              },
+                              { title: 'Compl.', dataIndex: 'complaints', key: 'complaints', align: 'center', width: 60, render: v => <Tag style={{ background: v === 0 ? '#52c41a15' : v > 2 ? '#ff4d4f15' : '#fa8c1615', color: v === 0 ? '#52c41a' : v > 2 ? '#ff4d4f' : '#fa8c16', border: `1px solid ${v === 0 ? '#52c41a33' : v > 2 ? '#ff4d4f33' : '#fa8c1633'}`, borderRadius: 20, fontSize: 11 }}>{v}</Tag> },
+                            ]}
+                          />
+                        </Card>
+                      </Col>
+                    </Row>
+                  )}
+
+                  {/* ── Monthly Trend ── */}
+                  {perfTab === 'monthly' && (
+                    activeSalesPersonMonthly.length === 0 ? (
+                      <Empty description="No monthly trend data available" style={{ padding: 40 }} />
+                    ) : (
+                    <Row gutter={[14, 14]}>
+                      <Col xs={24} lg={16}>
+                        <Card title={<Text strong style={{ color: textColor }}>Month-wise Revenue per Sales Person</Text>} style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }} styles={{ body: { padding: '12px 16px 16px' } }}>
+                          <ResponsiveContainer width="100%" height={280}>
+                            <LineChart data={activeSalesPersonMonthly}>
+                              <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />
+                              <XAxis dataKey="month" tick={{ fill: tickColor, fontSize: 12 }} />
+                              <YAxis tick={{ fill: tickColor, fontSize: 11 }} tickFormatter={v => `₹${(v ?? 0).toLocaleString()}`} />
+                              <Tooltip formatter={v => `₹${(v ?? 0).toLocaleString()}`} contentStyle={{ background: isDark ? '#1E1E2E' : '#fff', borderRadius: 8 }} />
+                              <Legend />
+                              {activeSalesPersonData.map(p => (
+                                <Line key={p.name} type="monotone" dataKey={p.name} stroke={p.color} strokeWidth={2} dot={{ fill: p.color, r: 3 }} name={p.name.split(' ')[0]} />
+                              ))}
+                            </LineChart>
+                          </ResponsiveContainer>
+                        </Card>
+                      </Col>
+                      <Col xs={24} lg={8}>
+                        <Card title={<Text strong style={{ color: textColor }}>Latest Month ({latestMonthRow?.month || '—'})</Text>} style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)', height: '100%' }} styles={{ body: { padding: 0 } }}>
+                          <Table
+                            size="small"
+                            dataSource={activeSalesPersonData.map(p => ({ ...p, febRevenue: latestMonthRow?.[p.name] || 0 }))}
+                            pagination={false}
+                            rowKey="key"
+                            columns={[
+                              { title: 'Name', dataIndex: 'name', key: 'name', render: (v, r) => <Text style={{ fontSize: 12, fontWeight: 700, color: r.color }}>{v.split(' ')[0]}</Text> },
+                              { title: 'Latest Rev.', dataIndex: 'febRevenue', key: 'febRevenue', width: 85, render: v => <Text style={{ fontSize: 12, fontWeight: 600 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                              {
+                                title: 'vs Prev', key: 'mom', width: 70, align: 'center',
+                                render: (_, r) => {
+                                  const prev = prevMonthRow?.[r.name] || 0;
+                                  const latest = latestMonthRow?.[r.name] || 0;
+                                  const diff = prev > 0 ? (((latest - prev) / prev) * 100).toFixed(0) : 0;
+                                  return <Tag style={{ background: diff >= 0 ? '#52c41a15' : '#ff4d4f15', color: diff >= 0 ? '#52c41a' : '#ff4d4f', border: `1px solid ${diff >= 0 ? '#52c41a33' : '#ff4d4f33'}`, borderRadius: 20, fontSize: 10, fontWeight: 700 }}>{diff >= 0 ? '+' : ''}{diff}%</Tag>;
+                                },
+                              },
+                            ]}
+                          />
+                        </Card>
+                      </Col>
+                    </Row>
+                    )
+                  )}
+                  </div>
+                </div>
+              );
+            })(),
+          },
+          /* ─────────── TASK MANAGEMENT PERFORMANCE REPORT ─────────── */
+          {
+            key: 'task_performance',
+            label: 'Task Management Performance',
+            children: <TaskPerformanceReport />,
+          },
+          /* ─────────── MONTHLY GST REPORT ─────────── */
+          {
+            key: 'monthly_gst',
+            label: 'Monthly GST',
+            children: (() => {
+              const filteredGst = gstMonthFilter === 'all'
+                ? activeGstData
+                : activeGstData.filter(r => r.month === gstMonthFilter);
+
+              const totSalesTaxable = filteredGst.reduce((s, r) => s + r.sales_taxable, 0);
+              const totSalesCgst    = filteredGst.reduce((s, r) => s + r.sales_cgst, 0);
+              const totSalesSgst    = filteredGst.reduce((s, r) => s + r.sales_sgst, 0);
+              const totSalesIgst    = filteredGst.reduce((s, r) => s + r.sales_igst, 0);
+              const totOutputGst    = filteredGst.reduce((s, r) => s + r.sales_total_gst, 0);
+              const totPurTaxable   = filteredGst.reduce((s, r) => s + r.pur_taxable, 0);
+              const totPurCgst      = filteredGst.reduce((s, r) => s + r.pur_cgst, 0);
+              const totPurSgst      = filteredGst.reduce((s, r) => s + r.pur_sgst, 0);
+              const totPurIgst      = filteredGst.reduce((s, r) => s + r.pur_igst, 0);
+              const totInputGst     = filteredGst.reduce((s, r) => s + r.pur_total_gst, 0);
+              const netGstPayable   = totOutputGst - totInputGst;
+
+              const chartData = filteredGst.map(r => ({
+                month: r.month,
+                'Output GST (Sales)': r.sales_total_gst,
+                'Input GST / ITC (Purchase)': r.pur_total_gst,
+                'Net Payable': r.sales_total_gst - r.pur_total_gst,
+              }));
+
+              return (
+                <div>
+                  {/* Filter bar */}
+                  <Card style={{ borderRadius: 12, border: 'none', background: cardBg, marginBottom: 14, boxShadow: '0 2px 12px rgba(177,30,106,0.06)' }} styles={{ body: { padding: '12px 16px' } }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
+                      <Space wrap>
+                        <FilterOutlined style={{ color: '#B11E6A' }} />
+                        <Text strong style={{ color: textColor, fontSize: 13 }}>Month:</Text>
+                        <Select value={gstMonthFilter} onChange={setGstMonthFilter} style={{ width: 130 }}>
+                          <Option value="all">All Months</Option>
+                          {activeGstData.map(r => (
+                            <Option key={r.month} value={r.month}>{r.month} {r.year}</Option>
+                          ))}
+                        </Select>
+                        <Text strong style={{ color: textColor, fontSize: 13 }}>View:</Text>
+                        {/* GST Out = sales/output GST, GST In = purchase/input GST (ITC). Both checked
+                            shows the combined report; unchecking one isolates the other as its own
+                            standalone report (same gstViewMode values 'combined'/'sales'/'purchase'
+                            every KPI/chart/table/export below already branches on). At least one
+                            stays checked at all times. */}
+                        <Checkbox
+                          checked={gstViewMode !== 'purchase'}
+                          onChange={(e) => {
+                            const salesOn = e.target.checked;
+                            const purchaseOn = gstViewMode !== 'sales';
+                            if (!salesOn && !purchaseOn) return;
+                            setGstViewMode(salesOn && purchaseOn ? 'combined' : salesOn ? 'sales' : 'purchase');
+                          }}
+                        >
+                          <Text style={{ fontSize: 12, color: textColor }}>GST Out (Sales)</Text>
+                        </Checkbox>
+                        <Checkbox
+                          checked={gstViewMode !== 'sales'}
+                          onChange={(e) => {
+                            const purchaseOn = e.target.checked;
+                            const salesOn = gstViewMode !== 'purchase';
+                            if (!salesOn && !purchaseOn) return;
+                            setGstViewMode(salesOn && purchaseOn ? 'combined' : salesOn ? 'sales' : 'purchase');
+                          }}
+                        >
+                          <Text style={{ fontSize: 12, color: textColor }}>GST In (Purchase)</Text>
+                        </Checkbox>
+                      </Space>
+                      <Button icon={<FileExcelOutlined />} style={{ color: '#52c41a', borderColor: '#52c41a44' }} onClick={exportGstExcel}>Excel</Button>
+                      <Button icon={<FilePdfOutlined />} style={{ color: '#B11E6A', borderColor: '#B11E6A44' }} onClick={exportGstPdf}>PDF</Button>
+                    </div>
+                  </Card>
+
+                  <div ref={monthlyGstRef}>
+                  {/* KPI cards — scoped to the selected view so Sales Only / Purchase Only read as their own separate report */}
+                  <Row gutter={[12, 12]} style={{ marginBottom: 14 }}>
+                    {[
+                      ...(gstViewMode !== 'purchase' ? [
+                        { label: 'Total Sales Taxable Value', value: totSalesTaxable, color: '#B11E6A', sub: 'Output base' },
+                        { label: 'Total Output GST (Sales)', value: totOutputGst, color: '#fa8c16', sub: `CGST ₹${(totSalesCgst ?? 0).toLocaleString()} + SGST ₹${(totSalesSgst ?? 0).toLocaleString()} + IGST ₹${(totSalesIgst ?? 0).toLocaleString()}` },
+                      ] : []),
+                      ...(gstViewMode !== 'sales' ? [
+                        { label: 'Total Purchase Taxable Value', value: totPurTaxable, color: '#8a1652', sub: 'Input base' },
+                        { label: 'Total Input GST / ITC (Purchase)', value: totInputGst, color: '#7c3aed', sub: `CGST ₹${(totPurCgst ?? 0).toLocaleString()} + SGST ₹${(totPurSgst ?? 0).toLocaleString()} + IGST ₹${(totPurIgst ?? 0).toLocaleString()}` },
+                      ] : []),
+                      ...(gstViewMode === 'combined' ? [
+                        // sub line also carries the inter-state reconciliation: output IGST (on sales)
+                        // minus input IGST / ITC (on inter-state purchase bills) — negative = IGST credit.
+                        { label: 'Net GST Payable', value: Math.max(netGstPayable, 0), color: netGstPayable > 0 ? '#ff4d4f' : '#52c41a', sub: `${netGstPayable > 0 ? 'Amount due to govt.' : 'Credit / No liability'} · Net IGST ₹${(totSalesIgst - totPurIgst).toLocaleString()}` },
+                      ] : []),
+                    ].map((s, i) => (
+                      <Col xs={12} sm={8} lg={24 / 5} key={s.label}>
+                        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.07 }}>
+                          <Card style={{ borderRadius: 12, border: `1px solid ${s.color}22`, background: `linear-gradient(135deg,${s.color}22,${s.color}08)` }} styles={{ body: { padding: '12px 14px' } }}>
+                            <Text style={{ fontSize: 10, color: isDark ? '#aaa' : '#888', display: 'block', marginBottom: 3 }}>{s.label}</Text>
+                            <div style={{ fontSize: 17, fontWeight: 800, color: s.color }}>₹{(s.value ?? 0).toLocaleString()}</div>
+                            <Text style={{ fontSize: 10, color: '#aaa' }}>{s.sub}</Text>
+                          </Card>
+                        </motion.div>
+                      </Col>
+                    ))}
+                  </Row>
+
+                  {/* Bar Chart — Output vs Input vs Net */}
+                  <Card
+                    title={<Text strong style={{ color: textColor }}>Month-wise GST: Output vs Input vs Net Payable</Text>}
+                    style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)', marginBottom: 14 }}
+                    styles={{ body: { padding: '12px 16px 16px' } }}
+                  >
+                    <ResponsiveContainer width="100%" height={260}>
+                      <BarChart data={chartData} barGap={4}>
+                        <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />
+                        <XAxis dataKey="month" tick={{ fill: tickColor, fontSize: 12 }} />
+                        <YAxis tick={{ fill: tickColor, fontSize: 12 }} tickFormatter={v => `₹${(v ?? 0).toLocaleString()}`} />
+                        <Tooltip formatter={(v, n) => [`₹${(v ?? 0).toLocaleString()}`, n]} contentStyle={{ background: isDark ? '#1E1E2E' : '#fff', borderRadius: 8 }} />
+                        <Legend />
+                        {(gstViewMode === 'combined' || gstViewMode === 'sales') && (
+                          <Bar dataKey="Output GST (Sales)" fill="#B11E6A" radius={[4, 4, 0, 0]} />
+                        )}
+                        {(gstViewMode === 'combined' || gstViewMode === 'purchase') && (
+                          <Bar dataKey="Input GST / ITC (Purchase)" fill="#7c3aed" radius={[4, 4, 0, 0]} />
+                        )}
+                        {gstViewMode === 'combined' && (
+                          <Bar dataKey="Net Payable" fill="#fa8c16" radius={[4, 4, 0, 0]} />
+                        )}
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </Card>
+
+                  {/* Line chart — GST trend */}
+                  <Card
+                    title={<Text strong style={{ color: textColor }}>GST Trend Line</Text>}
+                    style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)', marginBottom: 14 }}
+                    styles={{ body: { padding: '12px 16px 16px' } }}
+                  >
+                    <ResponsiveContainer width="100%" height={220}>
+                      <LineChart data={chartData}>
+                        <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />
+                        <XAxis dataKey="month" tick={{ fill: tickColor, fontSize: 12 }} />
+                        <YAxis tick={{ fill: tickColor, fontSize: 12 }} tickFormatter={v => `₹${(v ?? 0).toLocaleString()}`} />
+                        <Tooltip formatter={(v, n) => [`₹${(v ?? 0).toLocaleString()}`, n]} contentStyle={{ background: isDark ? '#1E1E2E' : '#fff', borderRadius: 8 }} />
+                        <Legend />
+                        {(gstViewMode === 'combined' || gstViewMode === 'sales') && (
+                          <Line type="monotone" dataKey="Output GST (Sales)" stroke="#B11E6A" strokeWidth={2.5} dot={{ fill: '#B11E6A', r: 4 }} />
+                        )}
+                        {(gstViewMode === 'combined' || gstViewMode === 'purchase') && (
+                          <Line type="monotone" dataKey="Input GST / ITC (Purchase)" stroke="#7c3aed" strokeWidth={2.5} dot={{ fill: '#7c3aed', r: 4 }} />
+                        )}
+                        {gstViewMode === 'combined' && (
+                          <Line type="monotone" dataKey="Net Payable" stroke="#fa8c16" strokeWidth={2.5} strokeDasharray="5 4" dot={{ fill: '#fa8c16', r: 4 }} />
+                        )}
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </Card>
+
+                  {/* Monthly GST table */}
+                  <Card style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }} styles={{ body: { padding: 16 } }}>
+                    <Title level={5} style={{ color: textColor, margin: '0 0 14px 0' }}>Month-wise GST Records</Title>
+                    <Table
+                      size="small"
+                      bordered
+                      scroll={{ x: 'max-content' }}
+                      dataSource={filteredGst}
+                      rowKey="key"
+                      pagination={false}
+                      columns={[
+                        { title: 'Month', key: 'month', width: 90, fixed: 'left', render: (_, r) => <Text strong style={{ fontSize: 12 }}>{r.month} {r.year}</Text> },
+
+                        ...(gstViewMode !== 'purchase' ? [{
+                          title: 'Sales (Output GST)',
+                          children: [
+                            { title: 'Taxable Value', dataIndex: 'sales_taxable', key: 'sales_taxable', width: 120, render: v => <Text style={{ fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                            { title: 'CGST', dataIndex: 'sales_cgst', key: 'sales_cgst', width: 95, render: v => <Text style={{ color: '#fa8c16', fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                            { title: 'SGST', dataIndex: 'sales_sgst', key: 'sales_sgst', width: 95, render: v => <Text style={{ color: '#7c3aed', fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                            { title: 'IGST', dataIndex: 'sales_igst', key: 'sales_igst', width: 95, render: v => <Text style={{ color: '#1890ff', fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                            { title: 'Total Output', dataIndex: 'sales_total_gst', key: 'sales_total_gst', width: 110, render: v => <Text strong style={{ color: '#B11E6A', fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                          ],
+                        }] : []),
+
+                        ...(gstViewMode !== 'sales' ? [{
+                          title: 'Purchase (Input GST / ITC)',
+                          children: [
+                            { title: 'Taxable Value', dataIndex: 'pur_taxable', key: 'pur_taxable', width: 120, render: v => <Text style={{ fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                            { title: 'CGST', dataIndex: 'pur_cgst', key: 'pur_cgst', width: 95, render: v => <Text style={{ color: '#fa8c16', fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                            { title: 'SGST', dataIndex: 'pur_sgst', key: 'pur_sgst', width: 95, render: v => <Text style={{ color: '#7c3aed', fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                            { title: 'IGST', dataIndex: 'pur_igst', key: 'pur_igst', width: 95, render: v => <Text style={{ color: '#1890ff', fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                            { title: 'Total Input', dataIndex: 'pur_total_gst', key: 'pur_total_gst', width: 110, render: v => <Text strong style={{ color: '#7c3aed', fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                          ],
+                        }] : []),
+
+                        ...(gstViewMode === 'combined' ? [{
+                          title: 'Net GST Payable', key: 'net', width: 120, fixed: 'right',
+                          render: (_, r) => {
+                            const net = r.sales_total_gst - r.pur_total_gst;
+                            const netDisplay = Math.max(net, 0);
+                            return <Text strong style={{ color: net > 0 ? '#ff4d4f' : '#52c41a', fontSize: 12 }}>₹{netDisplay.toLocaleString()}</Text>;
+                          },
+                        }] : []),
+                      ]}
+                      summary={(data) => {
+                        const tST = data.reduce((s, r) => s + r.sales_taxable, 0);
+                        const tSC = data.reduce((s, r) => s + r.sales_cgst, 0);
+                        const tSS = data.reduce((s, r) => s + r.sales_sgst, 0);
+                        const tSI = data.reduce((s, r) => s + r.sales_igst, 0);
+                        const tSOG = data.reduce((s, r) => s + r.sales_total_gst, 0);
+                        const tPT = data.reduce((s, r) => s + r.pur_taxable, 0);
+                        const tPC = data.reduce((s, r) => s + r.pur_cgst, 0);
+                        const tPS = data.reduce((s, r) => s + r.pur_sgst, 0);
+                        const tPI = data.reduce((s, r) => s + r.pur_igst, 0);
+                        const tPIG = data.reduce((s, r) => s + r.pur_total_gst, 0);
+                        const net = tSOG - tPIG;
+                        const netDisplay = Math.max(net, 0);
+                        return (
+                          <Table.Summary.Row style={{ fontWeight: 700, background: isDark ? '#2a1a2e' : '#fdf5fa' }}>
+                            <Table.Summary.Cell><Text strong style={{ fontSize: 12 }}>Total</Text></Table.Summary.Cell>
+                            {gstViewMode !== 'purchase' && <>
+                              <Table.Summary.Cell><Text strong style={{ fontSize: 12 }}>₹{(tST ?? 0).toLocaleString()}</Text></Table.Summary.Cell>
+                              <Table.Summary.Cell><Text strong style={{ color: '#fa8c16', fontSize: 12 }}>₹{(tSC ?? 0).toLocaleString()}</Text></Table.Summary.Cell>
+                              <Table.Summary.Cell><Text strong style={{ color: '#7c3aed', fontSize: 12 }}>₹{(tSS ?? 0).toLocaleString()}</Text></Table.Summary.Cell>
+                              <Table.Summary.Cell><Text strong style={{ color: '#1890ff', fontSize: 12 }}>₹{(tSI ?? 0).toLocaleString()}</Text></Table.Summary.Cell>
+                              <Table.Summary.Cell><Text strong style={{ color: '#B11E6A', fontSize: 12 }}>₹{(tSOG ?? 0).toLocaleString()}</Text></Table.Summary.Cell>
+                            </>}
+                            {gstViewMode !== 'sales' && <>
+                              <Table.Summary.Cell><Text strong style={{ fontSize: 12 }}>₹{(tPT ?? 0).toLocaleString()}</Text></Table.Summary.Cell>
+                              <Table.Summary.Cell><Text strong style={{ color: '#fa8c16', fontSize: 12 }}>₹{(tPC ?? 0).toLocaleString()}</Text></Table.Summary.Cell>
+                              <Table.Summary.Cell><Text strong style={{ color: '#7c3aed', fontSize: 12 }}>₹{(tPS ?? 0).toLocaleString()}</Text></Table.Summary.Cell>
+                              <Table.Summary.Cell><Text strong style={{ color: '#1890ff', fontSize: 12 }}>₹{(tPI ?? 0).toLocaleString()}</Text></Table.Summary.Cell>
+                              <Table.Summary.Cell><Text strong style={{ color: '#7c3aed', fontSize: 12 }}>₹{(tPIG ?? 0).toLocaleString()}</Text></Table.Summary.Cell>
+                            </>}
+                            {gstViewMode === 'combined' && (
+                              <Table.Summary.Cell>
+                                <Text strong style={{ color: net > 0 ? '#ff4d4f' : '#52c41a', fontSize: 12 }}>₹{netDisplay.toLocaleString()}</Text>
+                              </Table.Summary.Cell>
+                            )}
+                          </Table.Summary.Row>
+                        );
+                      }}
+                    />
+                  </Card>
+                  </div>
+                </div>
+              );
+            })(),
+          },
+
+          /* ─────────── FORWARDING & COURIER CHARGES REPORT ─────────── */
+          {
+            key: 'forwarding_courier',
+            label: 'Forwarding & Courier Charges',
+            children: (() => {
+              const monthlyHotelRows = apiForwardingCourier.monthlyHotelData || [];
+              const monthOptions = Array.from(new Set(monthlyHotelRows.map(r => `${r.month}-${r.year}`)));
+              const fcScopeOptions = Array.from(new Set(monthlyHotelRows.map(r => r.transportCostScope))).filter(Boolean);
+
+              const filteredFcRows = monthlyHotelRows.filter(r => {
+                const q = fcSearch.toLowerCase();
+                const matchSearch = !q || (r.hotel || '').toLowerCase().includes(q);
+                const matchMonth = fcMonthFilter === 'all' || `${r.month}-${r.year}` === fcMonthFilter;
+                const matchScope = fcScopeFilter === 'all' || r.transportCostScope === fcScopeFilter;
+                return matchSearch && matchMonth && matchScope;
+              });
+
+              const totalForwarding = filteredFcRows.reduce((s, r) => s + r.forwardingCharge, 0);
+              const totalCourier = filteredFcRows.reduce((s, r) => s + r.courierCharge, 0);
+              const totalCharges = filteredFcRows.reduce((s, r) => s + r.totalCharge, 0);
+
+              // Scope-level totals (Client/HNG/Unspecified) — a standing Client-vs-HNG comparison:
+              // always the full breakdown, independent of the Scope filter above (which narrows
+              // the table).
+              const fcScopeRows = apiForwardingCourier.scopeData || [];
+
+              // fcViewMode: 'combined' | 'forwarding' | 'courier' — driven by the Forwarding/Courier
+              // checkboxes in the filter bar, same pattern as Monthly GST's gstViewMode above, so
+              // either charge type can be reviewed as its own standalone report.
+              const fcColumns = [
+                { title: 'S.No', key: 'sno', width: 55, align: 'center', fixed: 'left', render: (_, __, i) => <Text style={{ fontSize: 12 }}>{i + 1}</Text> },
+                { title: 'Month', key: 'month', width: 110, render: (_, r) => <Text style={{ fontSize: 12 }}>{r.month} {r.year}</Text> },
+                { title: 'Hotel', dataIndex: 'hotel', key: 'hotel', width: 180, render: v => <Text strong style={{ fontSize: 12 }}>{v}</Text> },
+                {
+                  title: 'Transport Cost Scope', dataIndex: 'transportCostScope', key: 'transportCostScope', width: 140,
+                  render: v => <Tag color={v === 'CLIENT' ? 'blue' : v === 'HNG' ? 'purple' : 'default'} style={{ borderRadius: 20 }}>{v}</Tag>,
+                },
+                { title: 'Invoices', dataIndex: 'invoiceCount', key: 'invoiceCount', width: 90, align: 'center', render: v => <Text style={{ fontSize: 12 }}>{v}</Text> },
+                ...(fcViewMode !== 'courier' ? [
+                  { title: 'Forwarding Charge', dataIndex: 'forwardingCharge', key: 'forwardingCharge', width: 150, render: v => <Text style={{ color: '#fa8c16', fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                ] : []),
+                ...(fcViewMode !== 'forwarding' ? [
+                  { title: 'Courier Charge', dataIndex: 'courierCharge', key: 'courierCharge', width: 150, render: v => <Text style={{ color: '#1890ff', fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                ] : []),
+                ...(fcViewMode === 'combined' ? [
+                  { title: 'Total Charge', dataIndex: 'totalCharge', key: 'totalCharge', width: 150, fixed: 'right', render: v => <Text strong style={{ color: '#52c41a', fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                ] : []),
+              ];
+
+              return (
+                <div>
+                  {/* Filter & Search bar */}
+                  <Card style={{ borderRadius: 12, border: 'none', background: cardBg, marginBottom: 14, boxShadow: '0 2px 12px rgba(177,30,106,0.06)' }} styles={{ body: { padding: '12px 16px' } }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
+                      <Space wrap>
+                        <FilterOutlined style={{ color: '#B11E6A' }} />
+                        <Text strong style={{ color: textColor, fontSize: 13 }}>Month:</Text>
+                        <Select value={fcMonthFilter} onChange={setFcMonthFilter} style={{ width: 140 }}>
+                          <Option value="all">All Months</Option>
+                          {monthOptions.map(m => <Option key={m} value={m}>{m}</Option>)}
+                        </Select>
+                        <Text strong style={{ color: textColor, fontSize: 13 }}>Scope:</Text>
+                        <Select value={fcScopeFilter} onChange={setFcScopeFilter} style={{ width: 130 }}>
+                          <Option value="all">All Scopes</Option>
+                          {fcScopeOptions.map(s => <Option key={s} value={s}>{s}</Option>)}
+                        </Select>
+                        <Input
+                          prefix={<SearchOutlined style={{ color: '#B11E6A' }} />}
+                          placeholder="Search hotel…"
+                          allowClear
+                          value={fcSearch}
+                          onChange={e => setFcSearch(e.target.value)}
+                          style={{ width: 220, borderRadius: 8 }}
+                        />
+                        <Text strong style={{ color: textColor, fontSize: 13 }}>View:</Text>
+                        {/* Both checked shows the combined report; unchecking one isolates the other
+                            as its own standalone Forwarding/Courier report. At least one stays
+                            checked at all times. */}
+                        <Checkbox
+                          checked={fcViewMode !== 'courier'}
+                          onChange={(e) => {
+                            const fwdOn = e.target.checked;
+                            const courOn = fcViewMode !== 'forwarding';
+                            if (!fwdOn && !courOn) return;
+                            setFcViewMode(fwdOn && courOn ? 'combined' : fwdOn ? 'forwarding' : 'courier');
+                          }}
+                        >
+                          <Text style={{ fontSize: 12, color: textColor }}>Forwarding Charge</Text>
+                        </Checkbox>
+                        <Checkbox
+                          checked={fcViewMode !== 'forwarding'}
+                          onChange={(e) => {
+                            const courOn = e.target.checked;
+                            const fwdOn = fcViewMode !== 'courier';
+                            if (!fwdOn && !courOn) return;
+                            setFcViewMode(fwdOn && courOn ? 'combined' : fwdOn ? 'forwarding' : 'courier');
+                          }}
+                        >
+                          <Text style={{ fontSize: 12, color: textColor }}>Courier Charge</Text>
+                        </Checkbox>
+                      </Space>
+                      <Space>
+                        <Button icon={<FileExcelOutlined />} style={{ color: '#52c41a', borderColor: '#52c41a44' }} onClick={exportFcExcel}>Excel</Button>
+                        <Button icon={<FilePdfOutlined />} style={{ color: '#B11E6A', borderColor: '#B11E6A44' }} onClick={exportFcPdf}>PDF</Button>
+                      </Space>
+                    </div>
+                  </Card>
+
+                  <div ref={forwardingCourierRef}>
+                  {/* Summary KPI cards — scoped to the selected view so Forwarding/Courier read as their own separate report */}
+                  <Row gutter={[12, 12]} style={{ marginBottom: 14 }}>
+                    {[
+                      ...(fcViewMode !== 'courier' ? [
+                        { label: 'Total Forwarding Charges', value: `₹${(totalForwarding ?? 0).toLocaleString()}`, color: '#fa8c16', sub: `${filteredFcRows.length} groups` },
+                      ] : []),
+                      ...(fcViewMode !== 'forwarding' ? [
+                        { label: 'Total Courier Charges', value: `₹${(totalCourier ?? 0).toLocaleString()}`, color: '#1890ff', sub: 'From invoice payments' },
+                      ] : []),
+                      ...(fcViewMode === 'combined' ? [
+                        { label: 'Total Charges', value: `₹${(totalCharges ?? 0).toLocaleString()}`, color: '#52c41a', sub: 'Forwarding + Courier' },
+                      ] : []),
+                    ].map((s, i) => (
+                      <Col xs={24} sm={8} key={s.label}>
+                        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.06 }}>
+                          <Card style={{ borderRadius: 12, border: `1px solid ${s.color}22`, background: `linear-gradient(135deg,${s.color}22,${s.color}08)` }} styles={{ body: { padding: '12px 14px' } }}>
+                            <Text style={{ fontSize: 10, color: isDark ? '#aaa' : '#888', display: 'block', marginBottom: 3 }}>{s.label}</Text>
+                            <div style={{ fontSize: 16, fontWeight: 800, color: s.color }}>{s.value}</div>
+                            <Text style={{ fontSize: 10, color: '#aaa' }}>{s.sub}</Text>
+                          </Card>
+                        </motion.div>
+                      </Col>
+                    ))}
+                  </Row>
+
+                  {/* By Transport Cost Scope — Client-billed vs HNG-borne, independent of the Scope
+                      filter above (which narrows the table/chart below). */}
+                  <Card
+                    title={<Text strong style={{ color: textColor }}>Forwarding &amp; Courier Charges — by Transport Cost Scope</Text>}
+                    style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)', marginBottom: 14 }}
+                    styles={{ body: { padding: 16 } }}
+                  >
+                    <Table
+                      size="small"
+                      bordered
+                      scroll={{ x: 'max-content' }}
+                      pagination={false}
+                      rowKey="scope"
+                      dataSource={fcScopeRows}
+                      locale={{ emptyText: <Empty description="No forwarding/courier charges found" /> }}
+                      columns={[
+                        {
+                          title: 'Transport Cost Scope', dataIndex: 'scope', key: 'scope', width: 160, fixed: 'left',
+                          render: v => <Tag color={v === 'CLIENT' ? 'blue' : v === 'HNG' ? 'purple' : 'default'} style={{ borderRadius: 20 }}>{v}</Tag>,
+                        },
+                        { title: 'Invoices', dataIndex: 'invoiceCount', key: 'invoiceCount', width: 100, align: 'center', render: v => <Text style={{ fontSize: 12 }}>{v}</Text> },
+                        ...(fcViewMode !== 'courier' ? [
+                          { title: 'Forwarding Charge', dataIndex: 'forwardingCharge', key: 'forwardingCharge', width: 160, render: v => <Text style={{ color: '#fa8c16', fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                        ] : []),
+                        ...(fcViewMode !== 'forwarding' ? [
+                          { title: 'Courier Charge', dataIndex: 'courierCharge', key: 'courierCharge', width: 160, render: v => <Text style={{ color: '#1890ff', fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                        ] : []),
+                        {
+                          title: 'Total', dataIndex: 'totalCharge', key: 'totalCharge', width: 160, fixed: 'right',
+                          render: v => <Text strong style={{ color: '#52c41a', fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text>,
+                        },
+                      ]}
+                    />
+                  </Card>
+
+                  {/* Month-wise chart */}
+                  <Card
+                    title={<Text strong style={{ color: textColor }}>Forwarding vs Courier Charges (Month &amp; Hotel wise)</Text>}
+                    style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)', marginBottom: 14 }}
+                    styles={{ body: { padding: '12px 16px 16px' } }}
+                  >
+                    <ResponsiveContainer width="100%" height={220}>
+                      <BarChart data={filteredFcRows.map(r => ({
+                        name: `${r.hotel} (${r.month} ${r.year})`,
+                        Forwarding: r.forwardingCharge,
+                        Courier: r.courierCharge,
+                      }))}>
+                        <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />
+                        <XAxis dataKey="name" tick={{ fill: tickColor, fontSize: 10 }} interval={0} angle={-20} textAnchor="end" height={70} />
+                        <YAxis tick={{ fill: tickColor, fontSize: 11 }} tickFormatter={v => `₹${(v ?? 0).toLocaleString()}`} />
+                        <Tooltip formatter={v => `₹${(v ?? 0).toLocaleString()}`} contentStyle={{ background: isDark ? '#1E1E2E' : '#fff', borderRadius: 8 }} />
+                        <Legend />
+                        {fcViewMode !== 'courier' && <Bar dataKey="Forwarding" fill="#fa8c16" name="Forwarding Charge" radius={[4, 4, 0, 0]} />}
+                        {fcViewMode !== 'forwarding' && <Bar dataKey="Courier" fill="#1890ff" name="Courier Charge" radius={[4, 4, 0, 0]} />}
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </Card>
+
+                  {/* Month-wise, hotel-wise table */}
+                  <Card style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }} styles={{ body: { padding: 16 } }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+                      <Title level={5} style={{ color: textColor, margin: 0 }}>Forwarding &amp; Courier Charges — Month wise, Hotel wise</Title>
+                      <Text type="secondary" style={{ fontSize: 12 }}>{filteredFcRows.length} records</Text>
+                    </div>
+                    <Table
+                      size="small"
+                      bordered
+                      scroll={{ x: 'max-content' }}
+                      dataSource={filteredFcRows}
+                      columns={fcColumns}
+                      rowKey="key"
+                      pagination={{ showSizeChanger: true, pageSizeOptions: ['10', '20', '50', '100'], defaultPageSize: 10 }}
+                      locale={{ emptyText: <Empty description="No forwarding or courier charges found" /> }}
+                      summary={(data) => {
+                        const tFwd = data.reduce((s, r) => s + r.forwardingCharge, 0);
+                        const tCour = data.reduce((s, r) => s + r.courierCharge, 0);
+                        const tTot = data.reduce((s, r) => s + r.totalCharge, 0);
+                        return (
+                          <Table.Summary.Row style={{ fontWeight: 700, background: isDark ? '#2a1a2e' : '#fdf5fa' }}>
+                            <Table.Summary.Cell colSpan={4}>
+                              <Text strong style={{ fontSize: 12 }}>Grand Total</Text>
+                            </Table.Summary.Cell>
+                            {fcViewMode !== 'courier' && (
+                              <Table.Summary.Cell><Text strong style={{ color: '#fa8c16', fontSize: 12 }}>₹{(tFwd ?? 0).toLocaleString()}</Text></Table.Summary.Cell>
+                            )}
+                            {fcViewMode !== 'forwarding' && (
+                              <Table.Summary.Cell><Text strong style={{ color: '#1890ff', fontSize: 12 }}>₹{(tCour ?? 0).toLocaleString()}</Text></Table.Summary.Cell>
+                            )}
+                            {fcViewMode === 'combined' && (
+                              <Table.Summary.Cell><Text strong style={{ color: '#52c41a', fontSize: 12 }}>₹{(tTot ?? 0).toLocaleString()}</Text></Table.Summary.Cell>
+                            )}
+                          </Table.Summary.Row>
+                        );
+                      }}
+                    />
+                  </Card>
+                  </div>
+                </div>
+              );
+            })(),
+          },
+
+          /* ─────────── AUDITOR TAX REPORT ─────────── */
+          {
+            key: 'auditor_tax',
+            label: 'Auditor Tax Report',
+            children: (() => {
+              // GST/Non-GST bucket keys off Invoice.invoiceType (the statutory distinction —
+              // same field the backend's dedicated /reports/auditor-tax endpoint filters on),
+              // not the computed tax amount — a GST-type invoice with a 0%-rated line item
+              // would otherwise be miscategorized as "without GST" by amount alone.
+              const salesGstData = salesRawData.filter(r => {
+                const matchGst = auditorGstFilter === 'all' ? true : auditorGstFilter === 'with_gst' ? r.invoiceType === 'GST' : r.invoiceType !== 'GST';
+                const q = auditorSearch.toLowerCase();
+                const matchSearch = !q || r.customer.toLowerCase().includes(q) || r.inv_no.toLowerCase().includes(q) || r.gst_no.toLowerCase().includes(q);
+                return matchGst && matchSearch;
+              });
+              const purchaseGstData = purchaseRawData.filter(r => {
+                const matchGst = auditorGstFilter === 'all' ? true : auditorGstFilter === 'with_gst' ? r.total_tax > 0 : r.total_tax === 0;
+                const q = auditorSearch.toLowerCase();
+                const matchSearch = !q || r.supplier.toLowerCase().includes(q) || r.inv_no.toLowerCase().includes(q) || r.vendor_gst.toLowerCase().includes(q);
+                return matchGst && matchSearch;
+              });
+
+              const activeData = auditorSubTab === 'sales' ? salesGstData : purchaseGstData;
+              const totalTaxable = activeData.reduce((s, r) => s + r.taxable, 0);
+              const totalCgst    = activeData.reduce((s, r) => s + r.cgst, 0);
+              const totalSgst    = activeData.reduce((s, r) => s + r.sgst, 0);
+              const totalIgst    = activeData.reduce((s, r) => s + r.igst, 0);
+              const totalTax     = activeData.reduce((s, r) => s + r.total_tax, 0);
+              const totalValue   = activeData.reduce((s, r) => s + r.inv_value, 0);
+
+              const salesColumns = [
+                { title: 'S.No', key: 'sno', width: 55, align: 'center', fixed: 'left', render: (_, __, i) => <Text style={{ fontSize: 12 }}>{i + 1}</Text> },
+                { title: 'GSTIN / UIN', dataIndex: 'gst_no', key: 'gst_no', width: 160, render: v => <Text style={{ fontSize: 11, fontFamily: 'monospace', color: '#7c3aed' }}>{v}</Text> },
+                { title: 'Receiver Name', dataIndex: 'customer', key: 'customer', width: 160, render: v => <Text strong style={{ fontSize: 12 }}>{v}</Text> },
+                { title: 'Invoice No', dataIndex: 'inv_no', key: 'inv_no', width: 110, render: v => <Text style={{ color: '#B11E6A', fontSize: 12 }}>{v}</Text> },
+                { title: 'Invoice Date', dataIndex: 'inv_date', key: 'inv_date', width: 110, render: v => <Text style={{ fontSize: 12 }}>{v}</Text> },
+                { title: 'Invoice Value', dataIndex: 'inv_value', key: 'inv_value', width: 120, render: v => <Text strong style={{ fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                { title: 'Place of Supply', key: 'pos', width: 150, render: (_, r) => <Text style={{ fontSize: 12 }}>{r.state_code} - {r.state_name}</Text> },
+                { title: 'Taxable Value', dataIndex: 'taxable', key: 'taxable', width: 120, render: v => <Text style={{ fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                {
+                  title: 'Central Tax',
+                  children: [
+                    { title: 'Rate (%)', key: 'cgst_rate', width: 80, align: 'center', render: (_, r) => <Text style={{ fontSize: 11 }}>{r.cgst > 0 ? ((r.cgst / r.taxable) * 100).toFixed(0) : 0}%</Text> },
+                    { title: 'Amount (₹)', dataIndex: 'cgst', key: 'cgst', width: 110, render: v => <Text style={{ color: '#fa8c16', fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                  ],
+                },
+                {
+                  title: 'State/UT Tax',
+                  children: [
+                    { title: 'Rate (%)', key: 'sgst_rate', width: 80, align: 'center', render: (_, r) => <Text style={{ fontSize: 11 }}>{r.sgst > 0 ? ((r.sgst / r.taxable) * 100).toFixed(0) : 0}%</Text> },
+                    { title: 'Amount (₹)', dataIndex: 'sgst', key: 'sgst', width: 110, render: v => <Text style={{ color: '#7c3aed', fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                  ],
+                },
+                {
+                  title: 'Integrated Tax',
+                  children: [
+                    { title: 'Rate (%)', key: 'igst_rate', width: 80, align: 'center', render: (_, r) => <Text style={{ fontSize: 11 }}>{r.igst > 0 ? ((r.igst / r.taxable) * 100).toFixed(0) : 0}%</Text> },
+                    { title: 'Amount (₹)', dataIndex: 'igst', key: 'igst', width: 110, render: v => <Text style={{ color: '#1890ff', fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                  ],
+                },
+                { title: 'Cess Amount', key: 'cess', width: 100, align: 'center', render: () => <Text style={{ fontSize: 12 }}>₹0</Text> },
+                { title: 'Total Tax', dataIndex: 'total_tax', key: 'total_tax', width: 110, fixed: 'right', render: v => <Text strong style={{ color: v > 0 ? '#52c41a' : '#aaa', fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+              ];
+
+              const purchaseColumns = [
+                { title: 'S.No', key: 'sno', width: 55, align: 'center', fixed: 'left', render: (_, __, i) => <Text style={{ fontSize: 12 }}>{i + 1}</Text> },
+                { title: 'Vendor GSTIN', dataIndex: 'vendor_gst', key: 'vendor_gst', width: 160, render: v => <Text style={{ fontSize: 11, fontFamily: 'monospace', color: '#7c3aed' }}>{v}</Text> },
+                { title: 'Supplier Name', dataIndex: 'supplier', key: 'supplier', width: 140, render: v => <Text strong style={{ fontSize: 12 }}>{v}</Text> },
+                { title: 'Product', dataIndex: 'product', key: 'product', width: 160, render: v => <Tag style={{ background: '#B11E6A15', color: '#B11E6A', border: '1px solid #B11E6A33', borderRadius: 20 }}>{v}</Tag> },
+                { title: 'HSN Code', dataIndex: 'hsn', key: 'hsn', width: 100, align: 'center', render: v => <Text style={{ fontSize: 12, fontFamily: 'monospace', color: '#7c3aed' }}>{v}</Text> },
+                { title: 'Invoice No', dataIndex: 'inv_no', key: 'inv_no', width: 110, render: v => <Text style={{ color: '#B11E6A', fontSize: 12 }}>{v}</Text> },
+                { title: 'Invoice Date', dataIndex: 'inv_date', key: 'inv_date', width: 110, render: v => <Text style={{ fontSize: 12 }}>{v}</Text> },
+                { title: 'Invoice Value', dataIndex: 'inv_value', key: 'inv_value', width: 120, render: v => <Text strong style={{ fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                { title: 'Place of Supply', key: 'pos', width: 150, render: (_, r) => <Text style={{ fontSize: 12 }}>{r.state_code} - {r.state_name}</Text> },
+                { title: 'Taxable Value', dataIndex: 'taxable', key: 'taxable', width: 120, render: v => <Text style={{ fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                {
+                  title: 'Central Tax',
+                  children: [
+                    { title: 'Rate (%)', key: 'cgst_rate', width: 80, align: 'center', render: (_, r) => <Text style={{ fontSize: 11 }}>{r.cgst > 0 ? ((r.cgst / r.taxable) * 100).toFixed(0) : 0}%</Text> },
+                    { title: 'Amount (₹)', dataIndex: 'cgst', key: 'cgst', width: 110, render: v => <Text style={{ color: '#fa8c16', fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                  ],
+                },
+                {
+                  title: 'State/UT Tax',
+                  children: [
+                    { title: 'Rate (%)', key: 'sgst_rate', width: 80, align: 'center', render: (_, r) => <Text style={{ fontSize: 11 }}>{r.sgst > 0 ? ((r.sgst / r.taxable) * 100).toFixed(0) : 0}%</Text> },
+                    { title: 'Amount (₹)', dataIndex: 'sgst', key: 'sgst', width: 110, render: v => <Text style={{ color: '#7c3aed', fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                  ],
+                },
+                {
+                  title: 'Integrated Tax',
+                  children: [
+                    { title: 'Rate (%)', key: 'igst_rate', width: 80, align: 'center', render: (_, r) => <Text style={{ fontSize: 11 }}>{r.igst > 0 ? ((r.igst / r.taxable) * 100).toFixed(0) : 0}%</Text> },
+                    { title: 'Amount (₹)', dataIndex: 'igst', key: 'igst', width: 110, render: v => <Text style={{ color: '#1890ff', fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+                  ],
+                },
+                { title: 'Cess Amount', key: 'cess', width: 100, align: 'center', render: () => <Text style={{ fontSize: 12 }}>₹0</Text> },
+                { title: 'Total Tax', dataIndex: 'total_tax', key: 'total_tax', width: 110, fixed: 'right', render: v => <Text strong style={{ color: v > 0 ? '#52c41a' : '#aaa', fontSize: 12 }}>₹{(v ?? 0).toLocaleString()}</Text> },
+              ];
+
+              return (
+                <div>
+                  {/* Sub-tab toggle: Sales / Purchase */}
+                  <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap', alignItems: 'center' }}>
+                    {[['sales', 'Sales Tax (Output GST)'], ['purchase', 'Purchase Tax (Input GST)']].map(([k, lbl]) => (
+                      <button key={k} type="button" onClick={() => { setAuditorSubTab(k); setAuditorSearch(''); }} style={{
+                        padding: '7px 20px', borderRadius: 20, cursor: 'pointer', fontWeight: 700, fontSize: 13, transition: 'all 0.15s',
+                        border: `1.5px solid ${auditorSubTab === k ? '#B11E6A' : borderColor}`,
+                        background: auditorSubTab === k ? 'linear-gradient(135deg,#B11E6A22,#D85C9E18)' : 'transparent',
+                        color: auditorSubTab === k ? '#B11E6A' : isDark ? '#aaa' : '#666',
+                      }}>{lbl}</button>
+                    ))}
+                  </div>
+
+                  {/* Filter & Search bar */}
+                  <Card style={{ borderRadius: 12, border: 'none', background: cardBg, marginBottom: 14, boxShadow: '0 2px 12px rgba(177,30,106,0.06)' }} styles={{ body: { padding: '12px 16px' } }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
+                      <Space wrap>
+                        <FilterOutlined style={{ color: '#B11E6A' }} />
+                        <Text strong style={{ color: textColor, fontSize: 13 }}>GST Filter:</Text>
+                        {[['all', 'All'], ['with_gst', 'With GST'], ['without_gst', 'Without GST']].map(([k, lbl]) => (
+                          <div key={k} onClick={() => setAuditorGstFilter(k)} style={{
+                            padding: '4px 14px', borderRadius: 20, cursor: 'pointer', fontSize: 12, fontWeight: 600, transition: 'all 0.15s',
+                            border: `1.5px solid ${auditorGstFilter === k ? '#B11E6A' : borderColor}`,
+                            background: auditorGstFilter === k ? '#B11E6A18' : 'transparent',
+                            color: auditorGstFilter === k ? '#B11E6A' : isDark ? '#aaa' : '#666',
+                          }}>{lbl}</div>
+                        ))}
+                        <Input
+                          prefix={<SearchOutlined style={{ color: '#B11E6A' }} />}
+                          placeholder={auditorSubTab === 'sales' ? 'Search customer, invoice, GSTIN…' : 'Search supplier, invoice, GSTIN…'}
+                          allowClear
+                          value={auditorSearch}
+                          onChange={e => setAuditorSearch(e.target.value)}
+                          style={{ width: 240, borderRadius: 8 }}
+                        />
+                      </Space>
+                      <Space>
+                        <Button icon={<FileExcelOutlined />} style={{ color: '#52c41a', borderColor: '#52c41a44' }} onClick={exportAuditorExcel}>Excel</Button>
+                        <Button icon={<FilePdfOutlined />} style={{ color: '#B11E6A', borderColor: '#B11E6A44' }} onClick={exportAuditorPdf}>PDF</Button>
+                      </Space>
+                    </div>
+                  </Card>
+
+                  <div ref={auditorTaxRef}>
+                  {/* Summary KPI cards */}
+                  <Row gutter={[12, 12]} style={{ marginBottom: 14 }}>
+                    {[
+                      { label: 'Total Taxable Value', value: `₹${(totalTaxable ?? 0).toLocaleString()}`, color: '#B11E6A', sub: `${activeData.length} invoices` },
+                      { label: 'Central Tax (CGST)', value: `₹${(totalCgst ?? 0).toLocaleString()}`, color: '#fa8c16', sub: 'Intra-state' },
+                      { label: 'State/UT Tax (SGST)', value: `₹${(totalSgst ?? 0).toLocaleString()}`, color: '#7c3aed', sub: 'Intra-state' },
+                      { label: 'Integrated Tax (IGST)', value: `₹${(totalIgst ?? 0).toLocaleString()}`, color: '#1890ff', sub: 'Inter-state' },
+                      { label: 'Total Tax Amount', value: `₹${(totalTax ?? 0).toLocaleString()}`, color: '#52c41a', sub: 'CGST + SGST + IGST' },
+                      { label: 'Total Invoice Value', value: `₹${(totalValue ?? 0).toLocaleString()}`, color: '#8a1652', sub: 'Taxable + Tax' },
+                    ].map((s, i) => (
+                      <Col xs={12} sm={8} lg={4} key={s.label}>
+                        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.06 }}>
+                          <Card style={{ borderRadius: 12, border: `1px solid ${s.color}22`, background: `linear-gradient(135deg,${s.color}22,${s.color}08)` }} styles={{ body: { padding: '12px 14px' } }}>
+                            <Text style={{ fontSize: 10, color: isDark ? '#aaa' : '#888', display: 'block', marginBottom: 3 }}>{s.label}</Text>
+                            <div style={{ fontSize: 16, fontWeight: 800, color: s.color }}>{s.value}</div>
+                            <Text style={{ fontSize: 10, color: '#aaa' }}>{s.sub}</Text>
+                          </Card>
+                        </motion.div>
+                      </Col>
+                    ))}
+                  </Row>
+
+                  {/* GST breakdown bar chart */}
+                  <Card
+                    title={<Text strong style={{ color: textColor }}>{auditorSubTab === 'sales' ? 'Output GST Breakdown (Sales)' : 'Input GST Breakdown (Purchase)'}</Text>}
+                    style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)', marginBottom: 14 }}
+                    styles={{ body: { padding: '12px 16px 16px' } }}
+                  >
+                    <ResponsiveContainer width="100%" height={200}>
+                      <BarChart data={activeData.map(r => ({
+                        name: auditorSubTab === 'sales' ? r.inv_no : r.inv_no,
+                        CGST: r.cgst, SGST: r.sgst, IGST: r.igst,
+                      }))}>
+                        <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />
+                        <XAxis dataKey="name" tick={{ fill: tickColor, fontSize: 11 }} />
+                        <YAxis tick={{ fill: tickColor, fontSize: 11 }} tickFormatter={v => `₹${(v ?? 0).toLocaleString()}`} />
+                        <Tooltip formatter={v => `₹${(v ?? 0).toLocaleString()}`} contentStyle={{ background: isDark ? '#1E1E2E' : '#fff', borderRadius: 8 }} />
+                        <Legend />
+                        <Bar dataKey="CGST" fill="#fa8c16" name="Central Tax (CGST)" radius={[4, 4, 0, 0]} />
+                        <Bar dataKey="SGST" fill="#7c3aed" name="State Tax (SGST)" radius={[4, 4, 0, 0]} />
+                        <Bar dataKey="IGST" fill="#1890ff" name="Integrated Tax (IGST)" radius={[4, 4, 0, 0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </Card>
+
+                  {/* Auditor Tax Table */}
+                  <Card style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }} styles={{ body: { padding: 16 } }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+                      <Title level={5} style={{ color: textColor, margin: 0 }}>
+                        {auditorSubTab === 'sales' ? 'Auditor Tax Report — Sales (Output GST)' : 'Auditor Tax Report — Purchase (Input GST)'}
+                        {auditorGstFilter !== 'all' && (
+                          <Tag style={{ marginLeft: 10, background: '#B11E6A15', color: '#B11E6A', border: '1px solid #B11E6A33', borderRadius: 20, fontSize: 11 }}>
+                            {auditorGstFilter === 'with_gst' ? 'With GST' : 'Without GST'}
+                          </Tag>
+                        )}
+                      </Title>
+                      <Text type="secondary" style={{ fontSize: 12 }}>{activeData.length} records</Text>
+                    </div>
+                    <Table
+                      size="small"
+                      bordered
+                      scroll={{ x: 'max-content' }}
+                      dataSource={auditorSubTab === 'sales' ? salesGstData : purchaseGstData}
+                      columns={auditorSubTab === 'sales' ? salesColumns : purchaseColumns}
+                      rowKey="key"
+                      pagination={{ showSizeChanger: true, pageSizeOptions: ['10', '20', '50', '100'], defaultPageSize: 10 }}
+                      summary={(data) => {
+                        const tTaxable = data.reduce((s, r) => s + r.taxable, 0);
+                        const tCgst    = data.reduce((s, r) => s + r.cgst, 0);
+                        const tSgst    = data.reduce((s, r) => s + r.sgst, 0);
+                        const tIgst    = data.reduce((s, r) => s + r.igst, 0);
+                        const tTax     = data.reduce((s, r) => s + r.total_tax, 0);
+                        return (
+                          <Table.Summary.Row style={{ fontWeight: 700, background: isDark ? '#2a1a2e' : '#fdf5fa' }}>
+                            <Table.Summary.Cell colSpan={auditorSubTab === 'sales' ? 7 : 9}>
+                              <Text strong style={{ fontSize: 12 }}>Grand Total</Text>
+                            </Table.Summary.Cell>
+                            <Table.Summary.Cell><Text strong style={{ fontSize: 12 }}>₹{(tTaxable ?? 0).toLocaleString()}</Text></Table.Summary.Cell>
+                            <Table.Summary.Cell />
+                            <Table.Summary.Cell><Text strong style={{ color: '#fa8c16', fontSize: 12 }}>₹{(tCgst ?? 0).toLocaleString()}</Text></Table.Summary.Cell>
+                            <Table.Summary.Cell />
+                            <Table.Summary.Cell><Text strong style={{ color: '#7c3aed', fontSize: 12 }}>₹{(tSgst ?? 0).toLocaleString()}</Text></Table.Summary.Cell>
+                            <Table.Summary.Cell />
+                            <Table.Summary.Cell><Text strong style={{ color: '#1890ff', fontSize: 12 }}>₹{(tIgst ?? 0).toLocaleString()}</Text></Table.Summary.Cell>
+                            <Table.Summary.Cell><Text style={{ fontSize: 12 }}>₹0</Text></Table.Summary.Cell>
+                            <Table.Summary.Cell><Text strong style={{ color: '#52c41a', fontSize: 12 }}>₹{(tTax ?? 0).toLocaleString()}</Text></Table.Summary.Cell>
+                          </Table.Summary.Row>
+                        );
+                      }}
+                    />
+                  </Card>
+                  </div>
+                </div>
+              );
+            })(),
+          },
+
+          /* ─────────── EMERGENCY APPROVAL REPORT ─────────── */
+          {
+            key: 'emergency_approvals',
+            label: 'Approval Report',
+            children: (() => {
+              const typeMeta = {
+                emergency: { label: 'Emergency Dispatch / Payment', color: '#B11E6A' },
+                design: { label: 'Design / Sticker / Printing', color: '#7c3aed' },
+                transport_mismatch: { label: 'Transport Mismatch', color: '#fa8c16' },
+                lr_mismatch: { label: 'Packages/Destination Mismatch', color: '#1890ff' },
+                invoice_mismatch: { label: 'Dispatch Mismatch', color: '#eb2f96' },
+                dispatch_approval: { label: 'Dispatch Approval (Confirm Dispatch)', color: '#13c2c2' },
+              };
+              const eaStatusColor = { Pending: '#fa8c16', Approved: '#52c41a', Rejected: '#ff4d4f', 'Sent Back for Change': '#7c3aed' };
+              const summary = apiEmergencyApprovals.summary || {};
+
+              const columns = [
+                {
+                  title: 'Type', dataIndex: 'module', key: 'module', width: 190, fixed: 'left',
+                  render: (v) => (
+                    <Tag style={{ background: `${typeMeta[v]?.color}18`, color: typeMeta[v]?.color, border: `1px solid ${typeMeta[v]?.color}44`, borderRadius: 20, fontSize: 11 }}>
+                      {typeMeta[v]?.label || v}
+                    </Tag>
+                  ),
+                },
+                {
+                  title: 'Order', key: 'order', width: 170,
+                  render: (_, r) => (
+                    <div>
+                      <Text strong style={{ fontSize: 12, color: '#B11E6A' }}>{r.orderCode || '—'}</Text>
+                      <div style={{ fontSize: 11, color: isDark ? '#aaa' : '#888' }}>{r.clientName || ''}</div>
+                    </div>
+                  ),
+                },
+                {
+                  title: 'Sent (Date / Time)', key: 'sent', width: 140,
+                  render: (_, r) => (
+                    <div>
+                      <div style={{ fontSize: 12 }}>{r.sentDate || '—'}</div>
+                      <div style={{ fontSize: 11, color: isDark ? '#aaa' : '#888' }}>{r.sentTime || ''}</div>
+                    </div>
+                  ),
+                },
+                {
+                  title: 'Sent By', key: 'sentBy', width: 150,
+                  render: (_, r) => (
+                    <div>
+                      <Text style={{ fontSize: 12 }}>{r.sentBy || '—'}</Text>
+                      <div style={{ fontSize: 11, color: isDark ? '#aaa' : '#888' }}>{r.sentByRole || r.raisedByTeam}</div>
+                    </div>
+                  ),
+                },
+                { title: 'Sent Reason', dataIndex: 'reason', key: 'reason', width: 220, render: (v) => <Text style={{ fontSize: 12 }}>{v || '—'}</Text> },
+                {
+                  title: 'Approved (Date / Time)', key: 'approved', width: 150,
+                  render: (_, r) => (r.approvedDate || r.approvedTime) ? (
+                    <div>
+                      <div style={{ fontSize: 12 }}>{r.approvedDate || '—'}</div>
+                      <div style={{ fontSize: 11, color: isDark ? '#aaa' : '#888' }}>{r.approvedTime || ''}</div>
+                    </div>
+                  ) : <Text style={{ fontSize: 12, color: '#aaa' }}>—</Text>,
+                },
+                {
+                  title: 'Approver 1', key: 'approver1', width: 180,
+                  render: (_, r) => r.approver1Role ? (
+                    <div>
+                      <Text style={{ fontSize: 12 }}>{r.approver1Name || '—'}</Text>
+                      <div style={{ fontSize: 11, color: isDark ? '#aaa' : '#888' }}>{r.approver1Role}</div>
+                      <Tag style={{ marginTop: 2, fontSize: 10, background: `${eaStatusColor[r.approver1Decision] || '#888'}18`, color: eaStatusColor[r.approver1Decision] || '#888', border: 'none' }}>
+                        {r.approver1Decision}{r.approver1Date ? ` · ${r.approver1Date}` : ''}
+                      </Tag>
+                      {r.approver1Reason && (
+                        <div style={{ fontSize: 11, color: '#ff4d4f', maxWidth: 220, whiteSpace: 'normal', marginTop: 2 }}>Reason: {r.approver1Reason}</div>
+                      )}
+                    </div>
+                  ) : <Text style={{ fontSize: 12, color: '#aaa' }}>—</Text>,
+                },
+                {
+                  title: 'Approver 2', key: 'approver2', width: 180,
+                  render: (_, r) => r.approver2Role ? (
+                    <div>
+                      <Text style={{ fontSize: 12 }}>{r.approver2Name || '—'}</Text>
+                      <div style={{ fontSize: 11, color: isDark ? '#aaa' : '#888' }}>{r.approver2Role}</div>
+                      <Tag style={{ marginTop: 2, fontSize: 10, background: `${eaStatusColor[r.approver2Decision] || '#888'}18`, color: eaStatusColor[r.approver2Decision] || '#888', border: 'none' }}>
+                        {r.approver2Decision}{r.approver2Date ? ` · ${r.approver2Date}` : ''}
+                      </Tag>
+                      {r.approver2Reason && (
+                        <div style={{ fontSize: 11, color: '#ff4d4f', maxWidth: 220, whiteSpace: 'normal', marginTop: 2 }}>Reason: {r.approver2Reason}</div>
+                      )}
+                    </div>
+                  ) : <Text style={{ fontSize: 12, color: '#aaa' }}>—</Text>,
+                },
+                {
+                  title: 'Status', dataIndex: 'status', key: 'status', width: 110, fixed: 'right',
+                  render: (v) => <Tag style={{ background: `${eaStatusColor[v] || '#888'}18`, color: eaStatusColor[v] || '#888', border: `1px solid ${eaStatusColor[v] || '#888'}44`, borderRadius: 20, fontWeight: 700, fontSize: 11 }}>{v}</Tag>,
+                },
+              ];
+
+              return (
+                <div>
+                  <Card style={{ borderRadius: 12, border: 'none', background: cardBg, marginBottom: 14, boxShadow: '0 2px 12px rgba(177,30,106,0.06)' }} styles={{ body: { padding: '12px 16px' } }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
+                      <Space wrap>
+                        <FilterOutlined style={{ color: '#B11E6A' }} />
+                        <Text strong style={{ color: textColor, fontSize: 13 }}>Filter by:</Text>
+                        <Select value={eaTypeFilter} onChange={setEaTypeFilter} style={{ width: 230 }}>
+                          <Option value="all">All Approval Types</Option>
+                          {Object.entries(typeMeta).map(([k, m]) => <Option key={k} value={k}>{m.label}</Option>)}
+                        </Select>
+                        <Select value={eaStatusFilter} onChange={setEaStatusFilter} style={{ width: 160 }}>
+                          <Option value="all">All Statuses</Option>
+                          <Option value="Pending">Pending</Option>
+                          <Option value="Approved">Approved</Option>
+                          <Option value="Rejected">Rejected</Option>
+                        </Select>
+                        <Input
+                          prefix={<SearchOutlined style={{ color: '#B11E6A' }} />}
+                          placeholder="Search order, client, sender, reason…"
+                          allowClear
+                          value={eaSearch}
+                          onChange={(e) => setEaSearch(e.target.value)}
+                          style={{ width: 240, borderRadius: 8 }}
+                        />
+                      </Space>
+                      <Space>
+                        <Button icon={<FileExcelOutlined />} style={{ color: '#52c41a', borderColor: '#52c41a44' }} onClick={exportEaExcel}>Excel</Button>
+                        <Button icon={<FilePdfOutlined />} style={{ color: '#B11E6A', borderColor: '#B11E6A44' }} onClick={exportEaPdf}>PDF</Button>
+                      </Space>
+                    </div>
+                  </Card>
+
+                  <div ref={emergencyApprovalsRef}>
+                    <Row gutter={[12, 12]} style={{ marginBottom: 14 }}>
+                      {[
+                        { label: 'Total Approvals', value: summary.total ?? 0, color: '#B11E6A', sub: 'Across Sales, Ops & Dispatch' },
+                        { label: 'Pending', value: summary.pending ?? 0, color: '#fa8c16', sub: 'Awaiting decision' },
+                        { label: 'Approved', value: summary.approved ?? 0, color: '#52c41a', sub: 'Fully approved' },
+                        { label: 'Rejected', value: summary.rejected ?? 0, color: '#ff4d4f', sub: 'Rejected / declined' },
+                      ].map((s, i) => (
+                        <Col xs={12} sm={6} key={s.label}>
+                          <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.06 }}>
+                            <Card style={{ borderRadius: 12, border: `1px solid ${s.color}22`, background: `linear-gradient(135deg,${s.color}22,${s.color}08)` }} styles={{ body: { padding: '12px 14px' } }}>
+                              <Text style={{ fontSize: 10, color: isDark ? '#aaa' : '#888', display: 'block', marginBottom: 3 }}>{s.label}</Text>
+                              <div style={{ fontSize: 20, fontWeight: 800, color: s.color }}>{s.value}</div>
+                              <Text style={{ fontSize: 10, color: '#aaa' }}>{s.sub}</Text>
+                            </Card>
+                          </motion.div>
+                        </Col>
+                      ))}
+                    </Row>
+
+                    <Row gutter={[12, 12]} style={{ marginBottom: 14 }}>
+                      {(summary.byType || []).map((t) => (
+                        <Col xs={12} sm={8} md={4} key={t.module}>
+                          <Card style={{ borderRadius: 10, border: `1px solid ${typeMeta[t.module]?.color}22`, background: cardBg }} styles={{ body: { padding: '10px 12px' } }}>
+                            <Text style={{ fontSize: 10, color: typeMeta[t.module]?.color, fontWeight: 700, display: 'block' }}>{typeMeta[t.module]?.label}</Text>
+                            <div style={{ fontSize: 16, fontWeight: 800, color: textColor }}>{t.count}</div>
+                          </Card>
+                        </Col>
+                      ))}
+                    </Row>
+
+                    <Card style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }} styles={{ body: { padding: 16 } }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+                        <Title level={5} style={{ color: textColor, margin: 0 }}>Approval Report — Sales · Operations · Dispatch</Title>
+                        <Text type="secondary" style={{ fontSize: 12 }}>{eaFilteredRows.length} records</Text>
+                      </div>
+                      <Table
+                        size="small"
+                        bordered
+                        scroll={{ x: 'max-content' }}
+                        dataSource={eaFilteredRows}
+                        columns={columns}
+                        rowKey="key"
+                        pagination={{ showSizeChanger: true, pageSizeOptions: ['10', '20', '50', '100'], defaultPageSize: 10 }}
+                        locale={{ emptyText: <Empty description="No emergency, payment, design or dispatch approvals found for this range" /> }}
+                      />
+                    </Card>
+                  </div>
+                </div>
+              );
+            })(),
+          },
+
+          /* ─────────── SWITCH REPORT ─────────── */
+          {
+            key: 'switch_report',
+            label: 'Switch Report',
+            children: (() => {
+              const swTypeMeta = {
+                task: { label: 'Task Reassignment', color: '#1890ff', sub: 'Task Management · before start' },
+                task_mid: { label: 'Mid-task Switch', color: '#fa8c16', sub: 'Task Management · in progress' },
+                vendor: { label: 'Printing Supplier Switch', color: '#7c3aed', sub: 'Operations Design/Vendors' },
+              };
+              const summary = apiSwitchReport.summary || {};
+
+              const columns = [
+                {
+                  title: 'Type', dataIndex: 'module', key: 'module', width: 190, fixed: 'left',
+                  render: (v) => (
+                    <Tag style={{ background: `${swTypeMeta[v]?.color}18`, color: swTypeMeta[v]?.color, border: `1px solid ${swTypeMeta[v]?.color}44`, borderRadius: 20, fontSize: 11 }}>
+                      {swTypeMeta[v]?.label || v}
+                    </Tag>
+                  ),
+                },
+                {
+                  title: 'Reference', key: 'reference', width: 200,
+                  render: (_, r) => (
+                    <div>
+                      <Text strong style={{ fontSize: 12 }}>{r.reference || '—'}</Text>
+                      <div style={{ fontSize: 11, color: isDark ? '#aaa' : '#888' }}>
+                        {r.orderCode ? `${r.orderCode}${r.clientName ? ' · ' + r.clientName : ''}` : (r.clientName || '')}
+                      </div>
+                    </div>
+                  ),
+                },
+                {
+                  title: 'Switch From', dataIndex: 'switchFrom', key: 'switchFrom', width: 160,
+                  render: (v) => <Tag style={{ background: '#ff4d4f18', color: '#ff4d4f', border: '1px solid #ff4d4f44', borderRadius: 20, fontSize: 11 }}>{v || '—'}</Tag>,
+                },
+                {
+                  title: 'Switch To', dataIndex: 'switchTo', key: 'switchTo', width: 160,
+                  render: (v) => <Tag style={{ background: '#52c41a18', color: '#52c41a', border: '1px solid #52c41a44', borderRadius: 20, fontSize: 11 }}>{v || '—'}</Tag>,
+                },
+                {
+                  // Mid-task switches only — how the task's qty was split between the two people.
+                  title: 'Completed / Remaining', key: 'qtySplit', width: 170,
+                  render: (_, r) => (r.module === 'task_mid' ? (
+                    <div>
+                      <Text style={{ fontSize: 12 }}>
+                        <Text strong style={{ color: '#52c41a' }}>{r.completedQty ?? '—'}</Text> done · <Text strong style={{ color: '#fa8c16' }}>{r.remainingQty ?? '—'}</Text> moved
+                      </Text>
+                      <div style={{ fontSize: 11, color: isDark ? '#aaa' : '#888' }}>
+                        of {r.totalQty ?? '—'}{r.newTaskCode ? ` → ${r.newTaskCode}` : ''}
+                      </div>
+                    </div>
+                  ) : <Text type="secondary" style={{ fontSize: 11 }}>—</Text>),
+                },
+                {
+                  title: 'Switch Date / Time', key: 'switchAt', width: 150,
+                  render: (_, r) => (
+                    <div>
+                      <div style={{ fontSize: 12 }}>{r.switchDate || '—'}</div>
+                      <div style={{ fontSize: 11, color: isDark ? '#aaa' : '#888' }}>{r.switchTime || ''}</div>
+                    </div>
+                  ),
+                },
+                {
+                  title: 'Switch By', dataIndex: 'switchBy', key: 'switchBy', width: 160, fixed: 'right',
+                  render: (v) => <Text style={{ fontSize: 12 }}>{v || '—'}</Text>,
+                },
+              ];
+
+              return (
+                <div>
+                  <Card style={{ borderRadius: 12, border: 'none', background: cardBg, marginBottom: 14, boxShadow: '0 2px 12px rgba(177,30,106,0.06)' }} styles={{ body: { padding: '12px 16px' } }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
+                      <Space wrap>
+                        <FilterOutlined style={{ color: '#B11E6A' }} />
+                        <Text strong style={{ color: textColor, fontSize: 13 }}>Filter by:</Text>
+                        <Select value={swTypeFilter} onChange={setSwTypeFilter} style={{ width: 230 }}>
+                          <Option value="all">All Switch Types</Option>
+                          {Object.entries(swTypeMeta).map(([k, m]) => <Option key={k} value={k}>{m.label}</Option>)}
+                        </Select>
+                        <Input
+                          prefix={<SearchOutlined style={{ color: '#B11E6A' }} />}
+                          placeholder="Search reference, order, client, from/to, switched by…"
+                          allowClear
+                          value={swSearch}
+                          onChange={(e) => setSwSearch(e.target.value)}
+                          style={{ width: 260, borderRadius: 8 }}
+                        />
+                      </Space>
+                      <Space>
+                        <Button icon={<FileExcelOutlined />} style={{ color: '#52c41a', borderColor: '#52c41a44' }} onClick={exportSwExcel}>Excel</Button>
+                        <Button icon={<FilePdfOutlined />} style={{ color: '#B11E6A', borderColor: '#B11E6A44' }} onClick={exportSwPdf}>PDF</Button>
+                      </Space>
+                    </div>
+                  </Card>
+
+                  <div ref={switchReportRef}>
+                    <Row gutter={[12, 12]} style={{ marginBottom: 14 }}>
+                      {[
+                        { label: 'Total Switches', value: summary.total ?? 0, color: '#B11E6A', sub: 'Task + Vendor switches' },
+                        ...(summary.byType || []).map((t) => ({
+                          label: swTypeMeta[t.module]?.label || t.module,
+                          value: t.count,
+                          color: swTypeMeta[t.module]?.color || '#888',
+                          sub: swTypeMeta[t.module]?.sub || '',
+                        })),
+                      ].map((s, i) => (
+                        <Col xs={12} sm={6} key={s.label}>
+                          <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.06 }}>
+                            <Card style={{ borderRadius: 12, border: `1px solid ${s.color}22`, background: `linear-gradient(135deg,${s.color}22,${s.color}08)` }} styles={{ body: { padding: '12px 14px' } }}>
+                              <Text style={{ fontSize: 10, color: isDark ? '#aaa' : '#888', display: 'block', marginBottom: 3 }}>{s.label}</Text>
+                              <div style={{ fontSize: 20, fontWeight: 800, color: s.color }}>{s.value}</div>
+                              <Text style={{ fontSize: 10, color: '#aaa' }}>{s.sub}</Text>
+                            </Card>
+                          </motion.div>
+                        </Col>
+                      ))}
+                    </Row>
+
+                    <Card style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }} styles={{ body: { padding: 16 } }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+                        <Title level={5} style={{ color: textColor, margin: 0 }}>Switch Report — Task Management · Operations</Title>
+                        <Text type="secondary" style={{ fontSize: 12 }}>{swFilteredRows.length} records</Text>
+                      </div>
+                      <Table
+                        size="small"
+                        bordered
+                        scroll={{ x: 'max-content' }}
+                        dataSource={swFilteredRows}
+                        columns={columns}
+                        rowKey="key"
+                        pagination={{ showSizeChanger: true, pageSizeOptions: ['10', '20', '50', '100'], defaultPageSize: 10 }}
+                        locale={{ emptyText: <Empty description="No task or vendor switches found for this range" /> }}
+                      />
+                    </Card>
+                  </div>
+                </div>
+              );
+            })(),
+          },
+
+          /* ─────────── DAMAGED REPORT ─────────── */
+          {
+            key: 'damaged_report',
+            label: 'Damaged Report',
+            children: <DamagedReport />,
+          },
+
+          /* ─────────── PAYMENT BANK DETAILS ─────────── */
+          {
+            key: 'payment_bank_report',
+            label: 'Payment Bank Details',
+            children: <PaymentBankReport ref={paymentBankReportRef} headerDateRange={headerDateRange} />,
+          },
+
+          /* ─────────── LEAD FOLLOW-UP REPORT ─────────── */
+          {
+            key: 'lead_followup_report',
+            label: 'Lead Follow-up Report',
+            children: <LeadFollowupReport ref={leadFollowupReportRef} headerDateRange={headerDateRange} />,
+          },
+
+          /* ─────────── ASSIGNEE TASK REPORT ─────────── */
+          {
+            key: 'assignee_task_report',
+            label: 'Assignee Task Report',
+            children: <AssigneeTaskReport ref={assigneeTaskReportRef} headerDateRange={headerDateRange} />,
+          },
+        ])}
+      />
+    </div>
+  );
+}

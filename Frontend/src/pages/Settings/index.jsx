@@ -1,0 +1,1813 @@
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { useCloudinaryUpload } from '../../hooks/useCloudinaryUpload';
+import {
+  Row, Col, Card, Form, Input, Select, Switch, Button, Typography,
+  Tabs, Tag, Space, Avatar, Modal, Checkbox, Badge, Upload, Divider, Table, Collapse, Tooltip, InputNumber, Empty, Spin,
+  Radio, Popconfirm,
+} from 'antd';
+import { enqueueSnackbar } from 'notistack';
+import {
+  SaveOutlined, PlusOutlined, EditOutlined, DeleteOutlined,
+  UserOutlined, UploadOutlined, CheckOutlined, CloseOutlined,
+  FileTextOutlined, BgColorsOutlined, FontColorsOutlined, NotificationOutlined,
+  ClockCircleOutlined,
+} from '@ant-design/icons';
+import { useSelector } from 'react-redux';
+import { motion } from 'framer-motion';
+import PageBreadcrumb from '../../components/common/PageBreadcrumb';
+import PhoneInput from '../../components/common/PhoneInput';
+import { emailRules, normalizeEmail, phoneValidator } from '../../utils/validation';
+import { newBankAccountId } from '../../utils/bankAccounts';
+import useTabAccess from '../../hooks/useTabAccess';
+import { MODULE_TAB_DEFS } from '../../constants/moduleTabs';
+import AlertConfigurationTab from './AlertConfigurationTab';
+import {
+  useGetUsersQuery,
+  useCreateUserMutation,
+  useUpdateUserMutation,
+  useDeleteUserMutation,
+  useUpdatePermissionsMutation,
+  useGetDeletedRecordsQuery,
+  useGetCompanySettingsQuery,
+  useUpdateCompanySettingsMutation,
+  useUploadLogoMutation,
+  useUploadSignatureMutation,
+  useUploadQrCodeMutation,
+  useRestoreRecordMutation,
+  useGetSnoozedAlertsQuery,
+  useClearSnoozedAlertMutation,
+} from '../../store/api/apiSlice';
+
+const { Title, Text } = Typography;
+const { Option } = Select;
+
+const MODULES = [
+  'Dashboard', 'Sales Team', 'Operations', 'Task Management', 'Dispatch Team',
+  'Staff Management', 'HRMS Geo', 'Inventory', 'Purchase', 'Vendors & Suppliers', 'Billing', 'Ledgers',
+  'Financial', 'Expenses', 'Reports', 'Notifications', 'Integration', 'Settings',
+];
+
+const MODULE_PERM_TYPES = {
+  Dashboard: ['read'],
+  'Sales Team': ['read', 'add', 'edit', 'delete'],
+  Operations: ['read', 'add', 'edit', 'delete'],
+  'Task Management': ['read', 'add', 'edit', 'delete'],
+  'Dispatch Team': ['read', 'add', 'edit', 'delete'],
+  'Staff Management': ['read', 'add', 'edit', 'delete'],
+  'HRMS Geo': ['read'],
+  Inventory: ['read', 'add', 'edit', 'delete'],
+  Purchase: ['read', 'add', 'edit', 'delete'],
+  'Vendors & Suppliers': ['read', 'add', 'edit', 'delete'],
+  Billing: ['read', 'add', 'edit', 'delete'],
+  Ledgers: ['read', 'add', 'edit', 'delete'],
+  Financial: ['read', 'add', 'edit', 'delete'],
+  Expenses: ['read', 'add', 'edit', 'delete'],
+  Reports: ['read'],
+  Notifications: ['read'],
+  Integration: ['read', 'add', 'edit', 'delete'],
+  Settings: ['read', 'add', 'edit', 'delete'],
+};
+
+// Per-module sub-tabs for the "Tab Access" checkboxes. Sourced from the shared
+// definition so the keys stored here match what each page's <Tabs> actually
+// renders (and what useTabAccess() enforces).
+const MODULE_TABS = MODULE_TAB_DEFS;
+
+const VENDOR_ROLES = ['Sticker', 'Box', 'Ziplock', 'Butter Paper', 'Wooden Brush', 'Other'];
+
+const DEPT_ROLES = {
+  Admin: ['Admin'],
+  Management: ['Admin'],
+  Sales: ['Sales Executive', 'Sales Manager', 'Sales Head'],
+  Operations: ['Operations Executive', 'Operations Manager', 'Operations Head'],
+  'Task Management': ['Task Management Executive', 'Task Management Manager', 'Task Management Head'],
+  Dispatch: ['Dispatch Executive', 'Dispatch Manager', 'Dispatch Head'],
+  Finance: ['Finance Executive', 'Finance Manager', 'Finance Head'],
+  Vendors: ['Sticker', 'Box', 'Ziplock', 'Butter Paper', 'Wooden Brush', 'Other'],
+  Purchase: ['Purchase Executive', 'Purchase Manager', 'Purchase Head'],
+};
+
+const ALL_PERMS = { read: true, add: true, edit: true, delete: true };
+const NO_PERMS  = { read: false, add: false, edit: false, delete: false };
+
+const INVOICE_THEMES = [
+  { key: 'classic',      name: 'Classic',      desc: 'Clean & minimal',       headerBg: '#ffffff', headerText: '#1a1a2e', accent: '#1a1a2e',  border: '#e0e0e0' },
+  { key: 'brand',        name: 'Brand Pink',   desc: 'Company brand color',   headerBg: '#B11E6A', headerText: '#ffffff', accent: '#B11E6A',  border: '#B11E6A33' },
+  { key: 'professional', name: 'Professional', desc: 'Dark executive style',  headerBg: '#1a1a2e', headerText: '#ffffff', accent: '#1a1a2e',  border: '#1a1a2e33' },
+  { key: 'ocean',        name: 'Ocean Blue',   desc: 'Corporate blue look',   headerBg: '#1e3a5f', headerText: '#ffffff', accent: '#1e3a5f',  border: '#1e3a5f33' },
+  { key: 'forest',       name: 'Forest',       desc: 'Trustworthy green',     headerBg: '#1a4731', headerText: '#ffffff', accent: '#1a4731',  border: '#1a473133' },
+  { key: 'minimal',      name: 'Minimal',      desc: 'Light & airy layout',   headerBg: '#f5f5f5', headerText: '#555555', accent: '#888888',  border: '#eeeeee' },
+];
+
+const INVOICE_FONTS = [
+  { key: 'Inter',              name: 'Inter',           sample: 'Aa' },
+  { key: 'Roboto',             name: 'Roboto',          sample: 'Aa' },
+  { key: 'Poppins',            name: 'Poppins',         sample: 'Aa' },
+  { key: "'Open Sans'",        name: 'Open Sans',       sample: 'Aa' },
+  { key: 'Montserrat',         name: 'Montserrat',      sample: 'Aa' },
+  { key: "'Playfair Display'", name: 'Playfair',        sample: 'Aa' },
+  { key: "'Times New Roman'",  name: 'Times New Roman', sample: 'Aa' },
+  { key: 'Arial',              name: 'Arial',           sample: 'Aa' },
+];
+
+const GST_OPTIONS = [
+  { value: 'none',      label: 'None',           desc: 'Do not show any tax on invoice' },
+  { value: 'cgst',      label: 'CGST Only',      desc: 'Central GST — intra-state (half rate)' },
+  { value: 'sgst',      label: 'SGST Only',      desc: 'State GST — intra-state (half rate)' },
+  { value: 'cgst_sgst', label: 'CGST + SGST',    desc: 'Both components for intra-state' },
+  // IGST Only routes the whole tax to IGST on invoices AND treats every GST sale as
+  // inter-state across the Sales / Monthly GST / GST reports (see reports.controller
+  // splitSalesGst). Use when the business bills primarily out-of-state customers.
+  { value: 'igst',      label: 'IGST Only',      desc: 'Integrated GST — inter-state (full rate)' },
+];
+
+const buildPerms = (mods, overrides = {}) =>
+  Object.fromEntries(MODULES.map(m => [m, mods.includes(m) ? { ...ALL_PERMS, ...overrides[m] } : { ...NO_PERMS, ...overrides[m] }]));
+
+const initRoles = [
+  { key: 1, role: 'Admin',            color: '#B11E6A', users: 1, status: 'Active',
+    perms: buildPerms(MODULES) },
+  { key: 2, role: 'Sales Manager',    color: '#8a1652', users: 3, status: 'Active',
+    perms: buildPerms(['Dashboard','Sales Team','Reports'], { 'Sales Team': { read:true,add:true,edit:true,delete:false }, Reports: { read:true,add:false,edit:false,delete:false } }) },
+  { key: 3, role: 'Operations Head',  color: '#C94F8A', users: 2, status: 'Active',
+    perms: buildPerms(['Dashboard','Operations','Task Management','Inventory'], { Inventory: { read:true,add:true,edit:true,delete:false } }) },
+  { key: 4, role: 'Dispatch Manager', color: '#D85C9E', users: 2, status: 'Active',
+    perms: buildPerms(['Dashboard','Dispatch Team']) },
+  { key: 5, role: 'Finance Manager',  color: '#6b1240', users: 1, status: 'Active',
+    perms: buildPerms(['Dashboard','Billing','Reports']) },
+  { key: 6, role: 'Sticker',          color: '#B11E6A', users: 0, status: 'Active',
+    perms: buildPerms(['Dashboard','Task Management']) },
+  { key: 7, role: 'Box',              color: '#8a1652', users: 0, status: 'Active',
+    perms: buildPerms(['Dashboard','Task Management']) },
+  { key: 8, role: 'Ziplock',          color: '#C94F8A', users: 0, status: 'Active',
+    perms: buildPerms(['Dashboard','Task Management']) },
+];
+
+
+export default function Settings() {
+  const makeUpload = useCloudinaryUpload();
+  const handleProfilePhotoUpload = useMemo(() => makeUpload('settings/profiles'), [makeUpload]);
+  const { filterTabs } = useTabAccess('Settings');
+  const isDark = useSelector((s) => s.theme.isDark);
+  const currentUser = useSelector((s) => s.auth.user);
+  // Real admin-gate idiom used elsewhere (mirrors the backend's isAdminOrManagement
+  // in modules/alerts/alerts.controller.js) — Snoozed Alerts shows cross-user data,
+  // so it's excluded from the tab list entirely for anyone else, not just hidden
+  // via the (default-open) per-user Tab Access checkboxes.
+  const isAdminOrManagement = !!currentUser && (
+    currentUser.role === 'Super Admin' || currentUser.department === 'Admin' || currentUser.department === 'Management'
+  );
+  const cardBg     = isDark ? '#1E1E2E' : '#ffffff';
+  const textColor  = isDark ? '#e0e0e0' : '#1a1a2e';
+  const borderColor= isDark ? '#2a2a3a' : '#f0f0f0';
+  const subBg      = isDark ? '#2a2a3a' : '#fafafa';
+
+  // Roles
+  const [roles, setRoles]       = useState(initRoles);
+  const [newRole, setNewRole]   = useState('');
+  // Extra custom roles added per-department via the "Add" button in the role dropdown
+  const [customDeptRoles, setCustomDeptRoles] = useState({});
+
+  // Departments (fixed list — no user-facing add option)
+  const departments = ['Sales', 'Operations', 'Task Management', 'Dispatch', 'Finance', 'Vendors', 'Purchase', 'Admin', 'Management'];
+
+  // Users — RTK Query
+  const { data: usersData, isLoading: usersLoading } = useGetUsersQuery({ limit: 500 });
+  const [createUserMutation] = useCreateUserMutation();
+  const [updateUserMutation] = useUpdateUserMutation();
+  const [deleteUserMutation] = useDeleteUserMutation();
+  const [updatePermissionsMutation] = useUpdatePermissionsMutation();
+
+  const users = (usersData?.data || []).map((u) => ({
+    key: u._id,
+    name: u.fullName,
+    email: u.email,
+    mobile: u.mobile,
+    role: u.role,
+    department: u.department,
+    status: u.status,
+    avatar: u.fullName?.[0]?.toUpperCase() || 'U',
+    avatarUrl: u.avatarUrl || null,
+    color: '#B11E6A',
+    perms: u.permissions
+      ? (u.permissions instanceof Map || Array.isArray(u.permissions)
+          ? Object.fromEntries(u.permissions)
+          : u.permissions)
+      : {},
+    tabAccess: u.tabAccess || {},
+    targets: {
+      oldHotel: u.targetOldHotel,
+      newHotel: u.targetNewHotel,
+      payment: u.targetPayment,
+      software: u.targetSoftware,
+      people: u.targetPeople,
+      rewards: { q1: u.rewardQuarter, q2: u.rewardHalf, q3: u.rewardThreeQtr, full: u.rewardFull },
+    },
+  }));
+
+  const [addUserOpen, setAddUserOpen] = useState(false);
+
+  // Deleted records — RTK Query
+  const { data: deletedData } = useGetDeletedRecordsQuery();
+  const [restoreRecordMutation] = useRestoreRecordMutation();
+  const deletedRecordsFromApi = (deletedData?.data?.records || []).map((p) => ({
+    key: p._id,
+    module: p.module,
+    name: p.name,
+    type: p.type,
+    deletedBy: p.deletedBy || 'System',
+    deletedAt: p.deletedAt,
+  }));
+
+  // Company settings — RTK Query
+  const { data: companyData } = useGetCompanySettingsQuery();
+  const [updateCompanyMutation] = useUpdateCompanySettingsMutation();
+  const [uploadLogoMutation] = useUploadLogoMutation();
+  const [uploadSignatureMutation] = useUploadSignatureMutation();
+  const [uploadQrCodeMutation] = useUploadQrCodeMutation();
+
+  // Snoozed Alerts — RTK Query (Admin/Management only; the query is still safe to
+  // mount for anyone since the backend 403s, we just don't render the tab for them)
+  const { data: snoozedData, isLoading: snoozedLoading } = useGetSnoozedAlertsQuery(undefined, { skip: !isAdminOrManagement });
+  const [clearSnoozedAlertMutation] = useClearSnoozedAlertMutation();
+  const [snoozedSearch, setSnoozedSearch] = useState('');
+  const [snoozedActionFilter, setSnoozedActionFilter] = useState('all');
+  const snoozedAlerts = snoozedData?.data || [];
+
+  // Form instance for the General tab (so its Save button can persist)
+  const [generalForm] = Form.useForm();
+  const [notifPrefs, setNotifPrefs] = useState({ pay: true, stock: true, dispatch: true, task: true });
+  // Invoice Settings → Bank Accounts. The dirty flag keeps unsaved edits from being overwritten
+  // when company settings refetch (e.g. after a QR upload).
+  const [bankAccounts, setBankAccounts] = useState([]);
+  const [invoiceBankAccountId, setInvoiceBankAccountId] = useState(null);
+  const bankAccountsDirtyRef = useRef(false);
+
+  useEffect(() => {
+    const s = companyData?.data;
+    if (s) {
+      if (s.logoUrl) setLogoUrl(s.logoUrl);
+      if (s.invoiceTheme) setInvoiceTheme(s.invoiceTheme);
+      if (s.invoiceFontStyle) setInvoiceFont(s.invoiceFontStyle);
+      if (s.invoiceTerms) setInvoiceTerms(s.invoiceTerms);
+      if (s.invoiceFooter) setInvoiceFooter(s.invoiceFooter);
+      if (s.gstComponent) setInvoiceGstConfig(s.gstComponent);
+      // Unsaved bank account edits survive a settings refetch (e.g. after a QR upload).
+      if (!bankAccountsDirtyRef.current) {
+        setBankAccounts(Array.isArray(s.bankAccounts) ? s.bankAccounts.map((a) => ({ ...a })) : []);
+        setInvoiceBankAccountId(s.invoiceBankAccountId || null);
+      }
+      if (s.signatureUrl) setSignatureUrl(s.signatureUrl);
+      setInvoiceCompanyDetails((p) => ({
+        address: s.address ?? p.address,
+        gstNumber: s.gstNumber ?? p.gstNumber,
+        pan: s.panNumber ?? p.pan,
+        mobile: s.mobile ?? p.mobile,
+        email: s.email ?? p.email,
+      }));
+      if (s.notifPrefs) setNotifPrefs((p) => ({ ...p, ...s.notifPrefs }));
+      if (s.invoiceToggles) {
+        const t = s.invoiceToggles instanceof Map ? Object.fromEntries(s.invoiceToggles) : s.invoiceToggles;
+        if (t.gstin !== undefined) setInvoiceShowGstin(t.gstin);
+        if (t.taxRate !== undefined) setInvoiceShowTaxRate(t.taxRate);
+        if (t.logo !== undefined) setInvoiceShowLogo(t.logo);
+        if (t.bank !== undefined) setInvoiceShowBank(t.bank);
+        if (t.terms !== undefined) setInvoiceShowTerms(t.terms);
+        if (t.sign !== undefined) setInvoiceShowSign(t.sign);
+      }
+      generalForm.setFieldsValue({
+        companyName: s.companyName,
+        gstNumber: s.gstNumber,
+        currency: s.currency || 'INR',
+        dateFormat: s.dateFormat || 'DD/MM/YYYY',
+        address: s.address,
+      });
+    }
+  }, [companyData, generalForm]);
+
+  // ─── Save handlers (persist via updateCompanySettings) ───
+  const persistCompany = async (patch, label) => {
+    try {
+      await updateCompanyMutation(patch).unwrap();
+      enqueueSnackbar(label || 'Settings saved', { variant: 'success' });
+    } catch (e) {
+      enqueueSnackbar(e?.data || 'Failed to save settings', { variant: 'error' });
+    }
+  };
+
+  const saveGeneral = () => generalForm.validateFields().then((v) => persistCompany(v, 'General settings saved'));
+  const saveNotifications = () => persistCompany({ notifPrefs }, 'Notification settings saved');
+  const saveInvoiceSettings = async () => {
+    // Every account needs a name for the dropdowns and something to pay into.
+    const incomplete = bankAccounts.findIndex((a) => !(a.label || a.bank || '').trim() || !(a.account || a.upiId || '').trim());
+    if (incomplete !== -1) {
+      enqueueSnackbar(`Bank account ${incomplete + 1}: enter a Bank Name (or Nickname) and an Account Number or UPI ID`, { variant: 'error' });
+      return;
+    }
+    try {
+      await updateCompanyMutation({
+        invoiceTheme,
+        invoiceFontStyle: invoiceFont,
+        gstComponent: invoiceGstConfig,
+        invoiceTerms,
+        invoiceFooter,
+        // The server mirrors the invoice account onto the legacy bankDetails object.
+        bankAccounts,
+        invoiceBankAccountId,
+        address: invoiceCompanyDetails.address,
+        gstNumber: invoiceCompanyDetails.gstNumber,
+        panNumber: invoiceCompanyDetails.pan,
+        mobile: invoiceCompanyDetails.mobile,
+        email: invoiceCompanyDetails.email,
+        invoiceToggles: {
+          gstin: invoiceShowGstin, taxRate: invoiceShowTaxRate,
+          logo: invoiceShowLogo, bank: invoiceShowBank, terms: invoiceShowTerms, sign: invoiceShowSign,
+        },
+      }).unwrap();
+      bankAccountsDirtyRef.current = false;
+      enqueueSnackbar('Invoice settings saved', { variant: 'success' });
+    } catch (e) {
+      enqueueSnackbar(e?.data?.message || e?.data || 'Failed to save settings', { variant: 'error' });
+    }
+  };
+
+  // ─── Bank accounts (Invoice Settings) ───
+  const updateBankAccounts = (fn) => {
+    bankAccountsDirtyRef.current = true;
+    setBankAccounts(fn);
+  };
+  const updateBankAccount = (accountId, patch) => updateBankAccounts((list) => list.map((a) => (a.accountId === accountId ? { ...a, ...patch } : a)));
+  const addBankAccount = () => {
+    const accountId = newBankAccountId();
+    updateBankAccounts((list) => [...list, { accountId, label: '', name: '', bank: '', account: '', ifsc: '', upiId: '', qrCodeUrl: '', active: true }]);
+    // The first account is the one printed on invoices until another is chosen.
+    if (!bankAccounts.some((a) => a.active !== false)) setInvoiceBankAccountId(accountId);
+  };
+  // When the invoice account is removed/deactivated, the next active account takes its place.
+  const nextInvoiceAccount = (list, excludeId) => list.find((a) => a.accountId !== excludeId && a.active !== false)?.accountId || null;
+  const removeBankAccount = (accountId) => {
+    if (invoiceBankAccountId === accountId) setInvoiceBankAccountId(nextInvoiceAccount(bankAccounts, accountId));
+    updateBankAccounts((list) => list.filter((a) => a.accountId !== accountId));
+  };
+  const setBankAccountActive = (accountId, active) => {
+    if (!active && invoiceBankAccountId === accountId) setInvoiceBankAccountId(nextInvoiceAccount(bankAccounts, accountId));
+    if (active && !bankAccounts.some((a) => a.active !== false)) setInvoiceBankAccountId(accountId);
+    updateBankAccount(accountId, { active });
+  };
+  const chooseInvoiceBankAccount = (accountId) => {
+    bankAccountsDirtyRef.current = true;
+    setInvoiceBankAccountId(accountId);
+  };
+
+  const handleLogoUpload = async (file) => {
+    // Local preview immediately, then persist to the server.
+    const reader = new FileReader();
+    reader.onload = (e) => setLogoUrl(e.target.result);
+    reader.readAsDataURL(file);
+    try {
+      const fd = new FormData();
+      fd.append('logo', file);
+      const res = await uploadLogoMutation(fd).unwrap();
+      if (res?.logoUrl) setLogoUrl(res.logoUrl);
+      enqueueSnackbar('Logo uploaded', { variant: 'success' });
+    } catch (e) {
+      enqueueSnackbar(e?.data || 'Logo upload failed', { variant: 'error' });
+    }
+    return false;
+  };
+
+  const handleSignatureUpload = async (file) => {
+    const reader = new FileReader();
+    reader.onload = (e) => setSignatureUrl(e.target.result);
+    reader.readAsDataURL(file);
+    try {
+      const fd = new FormData();
+      fd.append('signature', file);
+      const res = await uploadSignatureMutation(fd).unwrap();
+      if (res?.signatureUrl) setSignatureUrl(res.signatureUrl);
+      enqueueSnackbar('Signature uploaded', { variant: 'success' });
+    } catch (e) {
+      enqueueSnackbar(e?.data || 'Signature upload failed', { variant: 'error' });
+    }
+    return false;
+  };
+
+  // Per-account UPI QR: previewed at once, then uploaded. The server stores it on an already-saved
+  // account straight away; for a new account it stays in the form until Save.
+  const handleQrCodeUpload = async (accountId, file) => {
+    const reader = new FileReader();
+    reader.onload = (e) => updateBankAccount(accountId, { qrCodeUrl: e.target.result });
+    reader.readAsDataURL(file);
+    try {
+      const fd = new FormData();
+      fd.append('accountId', accountId);
+      fd.append('qrcode', file);
+      const res = await uploadQrCodeMutation(fd).unwrap();
+      if (res?.qrCodeUrl) updateBankAccount(accountId, { qrCodeUrl: res.qrCodeUrl });
+      enqueueSnackbar('QR code uploaded', { variant: 'success' });
+    } catch (e) {
+      enqueueSnackbar(e?.data || 'QR code upload failed', { variant: 'error' });
+    }
+    return false;
+  };
+
+  const [editingUser, setEditingUser] = useState(null);
+  const [userProfilePhotoUrl, setUserProfilePhotoUrl] = useState(null);
+  const [userForm] = Form.useForm();
+  const watchedDept = Form.useWatch('department', userForm);
+  const watchedRole = Form.useWatch('role', userForm);
+  const watchedOldHotel = Form.useWatch('targetOldHotel', userForm) || 0;
+  const watchedNewHotel = Form.useWatch('targetNewHotel', userForm) || 0;
+  const watchedPayment = Form.useWatch('targetPayment', userForm) || 0;
+  const watchedSoftware = Form.useWatch('targetSoftware', userForm) || 0;
+  const computedOverallTarget = watchedOldHotel + watchedNewHotel + watchedPayment + watchedSoftware;
+
+  // Logo
+  const [logoUrl, setLogoUrl] = useState('/hnglogonew.png');
+
+  // Invoice Settings
+  const [invoiceTheme, setInvoiceTheme]             = useState('classic');
+  const [invoiceFont, setInvoiceFont]               = useState('Inter');
+  const [invoiceGstConfig, setInvoiceGstConfig]     = useState('cgst_sgst');
+  const [invoiceShowGstin, setInvoiceShowGstin]     = useState(true);
+  const [invoiceShowTaxRate, setInvoiceShowTaxRate] = useState(true);
+  const [invoiceShowLogo, setInvoiceShowLogo]       = useState(true);
+  const [invoiceShowBank, setInvoiceShowBank]       = useState(true);
+  const [invoiceShowTerms, setInvoiceShowTerms]     = useState(true);
+  const [invoiceShowSign, setInvoiceShowSign]       = useState(false);
+  const [invoiceFooter, setInvoiceFooter]           = useState('Thank you for your business!');
+  const [invoiceTerms, setInvoiceTerms]             = useState(
+    '1. Goods once sold will not be taken back or exchanged.\n2. All disputes are subject to local jurisdiction only.\n3. Payment should be made within the due date mentioned on the invoice.\n4. Interest @ 18% p.a. will be charged on overdue payments.\n5. E. & O.E.'
+  );
+  const [signatureUrl, setSignatureUrl] = useState(null);
+  const [invoiceCompanyDetails, setInvoiceCompanyDetails] = useState({ address: '', gstNumber: '', pan: '', mobile: '', email: '' });
+
+  const deletedRecords = deletedRecordsFromApi;
+  const [deletedSearch, setDeletedSearch] = useState('');
+  const [deletedModuleFilter, setDeletedModuleFilter] = useState('all');
+
+  const getRolesForDept = (dept) => {
+    if (!dept) return [];
+    const defaults = DEPT_ROLES[dept] || [];
+    const allUsers = usersData?.data || [];
+    const dbRoles = allUsers
+      .filter(u => u.department === dept)
+      .map(u => u.role)
+      .filter(Boolean);
+    const custom = customDeptRoles[dept] || [];
+    return Array.from(new Set([...defaults, ...dbRoles, ...custom]));
+  };
+
+  const addRole = (e) => {
+    e.preventDefault();
+    if (!newRole || !watchedDept) return;
+    const existing = getRolesForDept(watchedDept);
+    if (!existing.includes(newRole)) {
+      setCustomDeptRoles(prev => ({
+        ...prev,
+        [watchedDept]: [...(prev[watchedDept] || []), newRole],
+      }));
+    }
+    setNewRole('');
+  };
+
+  const editUser = (user) => {
+    // Load the existing photo so it previews in the form and is preserved on save
+    // (re-sent unchanged) unless the admin uploads a replacement.
+    setUserProfilePhotoUrl(user.avatarUrl || null);
+    setEditingUser(user);
+    setAddUserOpen(true);
+  };
+
+  // Populate the user form AFTER the modal (and its Form) has mounted.
+  // Calling setFieldsValue before the Form is connected (the modal is lazily
+  // rendered) silently drops the values — including page & tab access — so the
+  // edit form would open blank. Running it in an effect keyed on the open state
+  // guarantees the form is connected when we write to it.
+  useEffect(() => {
+    if (!addUserOpen) return;
+    if (editingUser) {
+      userForm.setFieldsValue({
+        name: editingUser.name,
+        email: editingUser.email,
+        mobile: editingUser.mobile,
+        role: editingUser.role,
+        department: editingUser.department,
+        status: editingUser.status,
+        targetOldHotel: editingUser.targets?.oldHotel,
+        targetNewHotel: editingUser.targets?.newHotel,
+        targetPayment: editingUser.targets?.payment,
+        targetSoftware: editingUser.targets?.software,
+        targetPeople: editingUser.targets?.people,
+        reward14: editingUser.targets?.rewards?.q1,
+        reward12: editingUser.targets?.rewards?.q2,
+        reward34: editingUser.targets?.rewards?.q3,
+        rewardFull: editingUser.targets?.rewards?.full,
+        perms: editingUser.perms || {},
+        tabAccess: editingUser.tabAccess || {},
+      });
+    } else {
+      userForm.resetFields();
+    }
+  }, [addUserOpen, editingUser, userForm]);
+
+  // Auto-populate page & tab access when role changes (new user only)
+  useEffect(() => {
+    if (!addUserOpen || editingUser || !watchedRole) return;
+    if (watchedRole === 'Admin') {
+      const allPerms = Object.fromEntries(MODULES.map(m => [m, { ...ALL_PERMS }]));
+      const allTabs = {};
+      MODULES.forEach(m => {
+        if (MODULE_TABS[m]?.length) {
+          allTabs[m] = Object.fromEntries(MODULE_TABS[m].map(tab => [tab.key, true]));
+        }
+      });
+      userForm.setFieldsValue({ perms: allPerms, tabAccess: allTabs });
+    } else {
+      // Clear permissions so admin manually selects access for this user
+      const emptyPerms = Object.fromEntries(MODULES.map(m => [m, { ...NO_PERMS }]));
+      if (watchedDept === 'Vendors') {
+        // Design vendors (Sticker/Box/Ziplock/Butter Paper) live entirely inside the
+        // Operations sticker queue. Without at least read access here they're routed
+        // and marked "Auto" correctly but the login itself can't open the page to see
+        // any of it, so grant it by default instead of leaving it for the admin to remember.
+        emptyPerms['Operations'] = { ...NO_PERMS, read: true };
+      }
+      userForm.setFieldsValue({ perms: emptyPerms, tabAccess: {} });
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [watchedRole, watchedDept, addUserOpen]);
+
+  // Show all modules whenever a role is selected so access can be fully configured
+  const visibleModules = watchedRole ? MODULES : [];
+
+  const addUser = () => {
+    userForm.validateFields().then(async (vals) => {
+      // perms & tabAccess live inside a lazy Collapse: validateFields() only
+      // returns values for module panels that were expanded (mounted). Pull the
+      // full store (incl. values set on edit but never expanded) so saving never
+      // wipes permissions for modules the admin didn't open.
+      const allValues = userForm.getFieldsValue(true);
+      const payload = {
+        fullName: vals.name,
+        email: vals.email,
+        mobile: vals.mobile,
+        role: vals.role,
+        status: vals.status || 'Active',
+        department: vals.department,
+        password: vals.password,
+        targetOldHotel: vals.targetOldHotel,
+        targetNewHotel: vals.targetNewHotel,
+        targetPayment: vals.targetPayment,
+        targetSoftware: vals.targetSoftware,
+        targetPeople: vals.targetPeople,
+        rewardQuarter: vals.reward14,
+        rewardHalf: vals.reward12,
+        rewardThreeQtr: vals.reward34,
+        rewardFull: vals.rewardFull,
+        permissions: allValues.perms || vals.perms || {},
+        tabAccess: allValues.tabAccess || vals.tabAccess || {},
+        ...(userProfilePhotoUrl ? { avatarUrl: userProfilePhotoUrl } : {}),
+      };
+      try {
+        if (editingUser) {
+          await updateUserMutation({ id: editingUser.key, ...payload }).unwrap();
+          enqueueSnackbar('User updated', { variant: 'success' });
+        } else {
+          await createUserMutation(payload).unwrap();
+          enqueueSnackbar('User created', { variant: 'success' });
+        }
+        // RTK Query invalidates the Users tag and refetches automatically.
+      } catch (e) {
+        enqueueSnackbar(e?.data || 'Failed to save user', { variant: 'error' });
+        return;
+      }
+      userForm.resetFields();
+      setEditingUser(null);
+      setUserProfilePhotoUrl(null);
+      setAddUserOpen(false);
+    });
+  };
+
+  const removeUser = async (key) => {
+    try {
+      await deleteUserMutation(key).unwrap();
+      enqueueSnackbar('User deleted', { variant: 'success' });
+    } catch {
+      enqueueSnackbar('Failed to delete user', { variant: 'error' });
+    }
+  };
+
+  const saveFooter = (onCancel) => (
+    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, paddingTop: 8, borderTop: `1px solid ${borderColor}`, marginTop: 8 }}>
+      <Button onClick={onCancel}>Cancel</Button>
+      <Button type="primary" icon={<SaveOutlined />} style={{ background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none' }}>Save</Button>
+    </div>
+  );
+
+  return (
+    <div className="page-container fade-in">
+      <PageBreadcrumb title="Settings" items={[{ label: 'Settings' }]} />
+
+      <Tabs
+        defaultActiveKey="general"
+        items={filterTabs([
+          {
+            key: 'general',
+            label: 'General',
+            children: (
+              <Card style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }}>
+                <Form layout="vertical" form={generalForm}>
+                  <Form.Item label={<Text strong style={{ color: textColor }}>Company Logo</Text>} style={{ marginBottom: 20 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 20, flexWrap: 'wrap' }}>
+                      <div style={{ width: 100, height: 100, borderRadius: 12, border: `2px dashed ${isDark ? '#444' : '#ddd'}`, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', background: subBg }}>
+                        {logoUrl
+                          ? <img src={logoUrl} alt="logo" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+                          : <UserOutlined style={{ fontSize: 32, color: '#ccc' }} />}
+                      </div>
+                      <div>
+                        <Upload
+                          accept="image/*"
+                          showUploadList={false}
+                          beforeUpload={handleLogoUpload}
+                        >
+                          <Button icon={<UploadOutlined />} style={{ marginBottom: 8, display: 'block', color: '#B11E6A', borderColor: '#B11E6A55' }}>Upload Logo</Button>
+                        </Upload>
+                        <Text style={{ fontSize: 12, color: '#aaa', display: 'block' }}>PNG, JPG up to 2MB</Text>
+                        <Text style={{ fontSize: 12, color: '#aaa' }}>Recommended: 200×200px</Text>
+                      </div>
+                    </div>
+                  </Form.Item>
+                  <Divider style={{ margin: '4px 0 20px' }} />
+                  <Row gutter={16}>
+                    <Col xs={24} sm={12}><Form.Item label="Company Name" name="companyName"><Input placeholder="Company name" /></Form.Item></Col>
+                    <Col xs={24} sm={12}><Form.Item label="GST Number" name="gstNumber"><Input placeholder="GST number" /></Form.Item></Col>
+                    <Col xs={24} sm={12}><Form.Item label="Primary Currency" name="currency"><Select><Option value="INR">₹ Indian Rupee</Option><Option value="USD">$ US Dollar</Option></Select></Form.Item></Col>
+                    <Col xs={24} sm={12}><Form.Item label="Date Format" name="dateFormat"><Select><Option value="DD/MM/YYYY">DD/MM/YYYY</Option><Option value="MM/DD/YYYY">MM/DD/YYYY</Option></Select></Form.Item></Col>
+                    <Col xs={24}><Form.Item label="Business Address" name="address"><Input.TextArea rows={3} placeholder="Business address" /></Form.Item></Col>
+                  </Row>
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, borderTop: `1px solid ${borderColor}`, paddingTop: 16 }}>
+                    <Button onClick={() => generalForm.resetFields()}>Cancel</Button>
+                    <Button type="primary" icon={<SaveOutlined />} onClick={saveGeneral} style={{ background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none' }}>Save Settings</Button>
+                  </div>
+                </Form>
+              </Card>
+            ),
+          },
+          {
+            key: 'users',
+            label: 'User Management',
+            children: (
+              <>
+                <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
+                  <Button type="primary" icon={<PlusOutlined />} onClick={() => { setEditingUser(null); setUserProfilePhotoUrl(null); setAddUserOpen(true); }} style={{ background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none' }}>Add User</Button>
+                </div>
+                <Card style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }} styles={{ body: { padding: 0 } }}>
+                  <Table
+                    dataSource={users}
+                    rowKey="key"
+                    size="small"
+                    pagination={{ showSizeChanger: true, pageSizeOptions: ['10', '20', '50', '100'], defaultPageSize: 10, size: 'small' }}
+                    style={{ borderRadius: 14, overflow: 'hidden' }}
+                    columns={[
+                      {
+                        title: 'User',
+                        key: 'user',
+                        render: (_, user) => (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                            <Avatar size={36} src={user.avatarUrl || undefined} style={{ background: `linear-gradient(135deg,${user.color},${user.color}99)`, fontSize: 15, fontWeight: 700, flexShrink: 0 }}>{user.avatar}</Avatar>
+                            <div>
+                              <Text strong style={{ color: textColor, display: 'block', fontSize: 14 }}>{user.name}</Text>
+                              <Text style={{ fontSize: 12, color: '#aaa' }}>{user.email}</Text>
+                            </div>
+                          </div>
+                        ),
+                      },
+                      {
+                        title: 'Department',
+                        dataIndex: 'department',
+                        key: 'department',
+                        render: (dept) => <Text style={{ fontSize: 13, color: textColor }}>{dept || '-'}</Text>,
+                      },
+                      {
+                        title: 'Role',
+                        dataIndex: 'role',
+                        key: 'role',
+                        render: (role) => {
+                          const color = roles.find(r => r.role === role)?.color || '#B11E6A';
+                          return <Tag style={{ borderRadius: 20, fontSize: 11, background: `${color}18`, color, border: `1px solid ${color}33`, margin: 0 }}>{role}</Tag>;
+                        },
+                      },
+                      {
+                        title: 'Status',
+                        dataIndex: 'status',
+                        key: 'status',
+                        render: (status) => <Badge status={status === 'Active' ? 'success' : 'default'} text={<Text style={{ fontSize: 13, color: textColor }}>{status}</Text>} />,
+                      },
+                      {
+                        title: '',
+                        key: 'actions',
+                        width: 80,
+                        render: (_, user) => (
+                          <Space>
+                            <Button type="text" size="small" icon={<EditOutlined />} onClick={() => editUser(user)} style={{ color: '#B11E6A' }} />
+                            <Button type="text" size="small" icon={<DeleteOutlined />} onClick={() => removeUser(user.key)} style={{ color: '#ff4d4f' }} />
+                          </Space>
+                        ),
+                      },
+                    ]}
+                  />
+                </Card>
+
+                <Modal
+                  open={addUserOpen}
+                  onCancel={() => { setAddUserOpen(false); setEditingUser(null); userForm.resetFields(); setUserProfilePhotoUrl(null); }}
+                  footer={null}
+                  width={Math.min(760, window.innerWidth - 24)}
+                  centered
+                  style={{ top: 20 }}
+                  title={<Text strong style={{ fontSize: 18 }}>{editingUser ? 'Edit User' : 'Add New User'}</Text>}
+                >
+                  <div style={{ maxHeight: 'calc(100vh - 150px)', overflowY: 'auto', paddingRight: 10, paddingBottom: 10 }}>
+                    <Form form={userForm} layout="vertical" style={{ marginTop: 16 }}>
+                      <Row gutter={16}>
+                        <Col xs={24} sm={12}>
+                          <Form.Item label="Full Name" name="name" rules={[{ required: true, message: 'Required' }]}>
+                            <Input placeholder="Enter full name" style={{ borderRadius: 8, height: 40 }} />
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} sm={12}>
+                          <Form.Item label="Email Address" name="email" rules={emailRules(true)} normalize={normalizeEmail}>
+                            <Input
+                              placeholder="Enter email"
+                              inputMode="email"
+                              autoCapitalize="none"
+                              autoCorrect="off"
+                              spellCheck={false}
+                              style={{ borderRadius: 8, height: 40 }}
+                            />
+                          </Form.Item>
+                        </Col>
+                      </Row>
+
+                      <Row gutter={16}>
+                        <Col xs={24} sm={8}>
+                          <Form.Item label="Mobile" name="mobile" rules={[{ required: true, message: 'Required' }, phoneValidator(true)]}>
+                            <PhoneInput placeholder="Mobile number" />
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} sm={8}>
+                          <Form.Item label="Department" name="department" rules={[{ required: true, message: 'Required' }]}>
+                            <Select
+                              placeholder="Select Dept"
+                              style={{ width: '100%', height: 40 }}
+                              onChange={() => userForm.setFieldValue('role', undefined)}
+                            >
+                              {departments.map(d => <Option key={d} value={d}>{d}</Option>)}
+                            </Select>
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} sm={8}>
+                          <Form.Item label="Role" name="role" rules={[{ required: true, message: 'Required' }]}>
+                            <Select
+                              placeholder={watchedDept ? 'Select role' : 'Select department first'}
+                              disabled={!watchedDept}
+                              style={{ width: '100%', height: 40 }}
+                              dropdownRender={(menu) => (
+                                <div style={{ padding: '4px 0' }}>
+                                  {menu}
+                                  <Divider style={{ margin: '4px 0' }} />
+                                  <div style={{ display: 'flex', gap: 4, padding: '4px 8px' }}>
+                                    <Input
+                                      placeholder="New Role"
+                                      value={newRole}
+                                      size="small"
+                                      onChange={(e) => setNewRole(e.target.value)}
+                                      onKeyDown={(e) => e.stopPropagation()}
+                                      style={{ flex: 1 }}
+                                    />
+                                    <Button type="text" size="small" icon={<PlusOutlined />} onClick={addRole} style={{ color: '#B11E6A' }}>
+                                      Add
+                                    </Button>
+                                  </div>
+                                </div>
+                              )}
+                            >
+                              {getRolesForDept(watchedDept).map(r => <Option key={r} value={r}>{r}</Option>)}
+                            </Select>
+                          </Form.Item>
+                        </Col>
+                      </Row>
+
+
+                      {watchedDept === 'Sales' && (
+                        <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} style={{ background: subBg, padding: 16, borderRadius: 12, marginBottom: 20, border: '1px solid #B11E6A22' }}>
+                          <Text strong style={{ color: '#B11E6A', display: 'block', marginBottom: 12 }}>Performance Targets & Rewards</Text>
+                          <Row gutter={16}>
+                            <Col xs={24} sm={12}>
+                              <Form.Item label="Old Hotel Sales Target (₹)" name="targetOldHotel">
+                                <InputNumber prefix="₹" style={{ width: '100%', height: 40, borderRadius: 8 }} placeholder="500,000" min={0} />
+                              </Form.Item>
+                            </Col>
+                            <Col xs={24} sm={12}>
+                              <Form.Item label="New Hotel Sales Target (₹)" name="targetNewHotel">
+                                <InputNumber prefix="₹" style={{ width: '100%', height: 40, borderRadius: 8 }} placeholder="1,000,000" min={0} />
+                              </Form.Item>
+                            </Col>
+                            <Col xs={24} sm={12}>
+                              <Form.Item label="Payment Target (₹)" name="targetPayment">
+                                <InputNumber prefix="₹" style={{ width: '100%', height: 40, borderRadius: 8 }} placeholder="800,000" min={0} />
+                              </Form.Item>
+                            </Col>
+                            <Col xs={24} sm={12}>
+                              <Form.Item label="Software Target — New (₹)" name="targetSoftware">
+                                <InputNumber prefix="₹" style={{ width: '100%', height: 40, borderRadius: 8 }} placeholder="200,000" min={0} />
+                              </Form.Item>
+                            </Col>
+                          </Row>
+
+                          {/* Overall computed target */}
+                          <div style={{ background: '#B11E6A12', borderRadius: 10, padding: '12px 16px', marginBottom: 16, border: '1px solid #B11E6A33', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <Text strong style={{ color: '#B11E6A', fontSize: 13 }}>Overall Target (Auto-Computed)</Text>
+                            <Text strong style={{ fontSize: 20, color: '#B11E6A' }}>₹{computedOverallTarget.toLocaleString()}</Text>
+                          </div>
+
+                          {watchedDept === 'Sales' && (
+                            <Form.Item label="Target People (Leads/Parties)" name="targetPeople" style={{ marginBottom: 12 }}>
+                              <InputNumber style={{ width: '100%', height: 40, borderRadius: 8 }} placeholder="50" min={0} />
+                            </Form.Item>
+                          )}
+
+                          <Divider style={{ margin: '8px 0 16px' }} />
+                          <Text style={{ fontSize: 12, color: '#888', display: 'block', marginBottom: 8 }}>Price Rewards based on Target Completion milestones:</Text>
+                          <Row gutter={12}>
+                            <Col xs={12} sm={6}><Form.Item label="1/4 Target Reward" name="reward14"><Input placeholder="Reward Name" size="small" /></Form.Item></Col>
+                            <Col xs={12} sm={6}><Form.Item label="1/2 Target Reward" name="reward12"><Input placeholder="Reward Name" size="small" /></Form.Item></Col>
+                            <Col xs={12} sm={6}><Form.Item label="3/4 Target Reward" name="reward34"><Input placeholder="Reward Name" size="small" /></Form.Item></Col>
+                            <Col xs={12} sm={6}><Form.Item label="Full Target Reward" name="rewardFull"><Input placeholder="Reward Name" size="small" /></Form.Item></Col>
+                          </Row>
+                        </motion.div>
+                      )}
+
+                      <Row gutter={16}>
+                        <Col xs={24} sm={12}>
+                          <Form.Item
+                            label={editingUser ? 'New Password (leave blank to keep current)' : 'Password'}
+                            name="password"
+                            validateTrigger="onChange"
+                            rules={editingUser
+                              ? [{ min: 6, message: 'Min 6 characters' }]
+                              : [{ required: true, min: 6, message: 'Min 6 characters' }]}
+                          >
+                            <Input.Password
+                              placeholder={editingUser ? 'Leave blank to keep current' : 'Min 6 characters'}
+                              style={{ borderRadius: 8, height: 40 }}
+                              onChange={() => userForm.validateFields(['confirm']).catch(() => {})}
+                            />
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} sm={12}>
+                          <Form.Item
+                            label="Confirm Password"
+                            name="confirm"
+                            validateTrigger="onChange"
+                            dependencies={['password']}
+                            rules={[
+                              ({ getFieldValue }) => ({
+                                validator(_, value) {
+                                  const pwd = getFieldValue('password');
+                                  if (!pwd && !value) {
+                                    return editingUser
+                                      ? Promise.resolve()
+                                      : Promise.reject(new Error('Please confirm your password'));
+                                  }
+                                  if (pwd && !value) {
+                                    return Promise.reject(new Error('Please confirm your password'));
+                                  }
+                                  if (value && pwd !== value) {
+                                    return Promise.reject(new Error('Passwords do not match'));
+                                  }
+                                  return Promise.resolve();
+                                },
+                              }),
+                            ]}
+                          >
+                            <Input.Password placeholder="Confirm password" style={{ borderRadius: 8, height: 40 }} />
+                          </Form.Item>
+                        </Col>
+                      </Row>
+
+                      <Row gutter={16}>
+                        <Col xs={24} sm={12}>
+                          <Form.Item label="Status" name="status" initialValue="Active" rules={[{ required: true, message: 'Required' }]}>
+                            <Select style={{ height: 40 }}>
+                              <Option value="Active">Active</Option>
+                              <Option value="Inactive">Inactive</Option>
+                            </Select>
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} sm={12}>
+                          <Form.Item label="Profile Photo">
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                              <Avatar
+                                size={40}
+                                src={userProfilePhotoUrl || undefined}
+                                icon={<UserOutlined />}
+                                style={{ background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', flexShrink: 0 }}
+                              />
+                              <Upload
+                                showUploadList={false}
+                                accept="image/*"
+                                customRequest={handleProfilePhotoUpload}
+                                onChange={(info) => {
+                                  // customRequest stores the Cloudinary URL on the file (and its
+                                  // response). Read both so the URL is captured reliably.
+                                  const url = info.file.response?.url || info.file.url;
+                                  if (info.file.status === 'done' && url) {
+                                    setUserProfilePhotoUrl(url);
+                                    enqueueSnackbar('Photo uploaded', { variant: 'success' });
+                                  } else if (info.file.status === 'error') {
+                                    enqueueSnackbar('Photo upload failed', { variant: 'error' });
+                                  }
+                                }}
+                              >
+                                <Button icon={<UploadOutlined />} style={{ borderRadius: 8, flex: 1, height: 40 }}>
+                                  {userProfilePhotoUrl ? 'Change Photo' : 'Upload Image'}
+                                </Button>
+                              </Upload>
+                            </div>
+                          </Form.Item>
+                        </Col>
+                      </Row>
+
+                      <div style={{ marginBottom: 16 }}>
+                        <Text strong style={{ display: 'block', marginBottom: 8 }}>Page &amp; Tab Access Permissions</Text>
+                        {watchedRole === 'Admin' && (
+                          <div style={{ background: '#B11E6A12', borderRadius: 8, padding: '8px 12px', marginBottom: 8, border: '1px solid #B11E6A33' }}>
+                            <Text style={{ fontSize: 12, color: '#B11E6A' }}>Admin has full access to all pages and tabs (cannot be restricted)</Text>
+                          </div>
+                        )}
+                        {!watchedRole && (
+                          <div style={{ background: subBg, borderRadius: 8, padding: '12px 16px', border: `1px solid ${borderColor}`, textAlign: 'center' }}>
+                            <Text style={{ fontSize: 12, color: '#aaa' }}>Select a role above to configure page & tab access</Text>
+                          </div>
+                        )}
+                        {visibleModules.length > 0 && (
+                          <Collapse
+                            ghost
+                            expandIconPosition="end"
+                            style={{ background: subBg, borderRadius: 8, border: `1px solid ${borderColor}` }}
+                            items={visibleModules.map(mod => ({
+                              key: mod,
+                              label: <Text strong style={{ fontSize: 13 }}>{mod}</Text>,
+                              children: (
+                                <div>
+                                  {/* Page-level CRUD permissions */}
+                                  <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
+                                    {MODULE_PERM_TYPES[mod].includes('read') && (
+                                      <Form.Item name={['perms', mod, 'read']} valuePropName="checked" style={{ margin: 0 }}>
+                                        <Checkbox disabled={watchedRole === 'Admin'}>Read</Checkbox>
+                                      </Form.Item>
+                                    )}
+                                    {MODULE_PERM_TYPES[mod].includes('add') && (
+                                      <Form.Item name={['perms', mod, 'add']} valuePropName="checked" style={{ margin: 0 }}>
+                                        <Checkbox disabled={watchedRole === 'Admin'}>Add</Checkbox>
+                                      </Form.Item>
+                                    )}
+                                    {MODULE_PERM_TYPES[mod].includes('edit') && (
+                                      <Form.Item name={['perms', mod, 'edit']} valuePropName="checked" style={{ margin: 0 }}>
+                                        <Checkbox disabled={watchedRole === 'Admin'}>Edit</Checkbox>
+                                      </Form.Item>
+                                    )}
+                                    {MODULE_PERM_TYPES[mod].includes('delete') && (
+                                      <Form.Item name={['perms', mod, 'delete']} valuePropName="checked" style={{ margin: 0 }}>
+                                        <Checkbox disabled={watchedRole === 'Admin'}>Delete</Checkbox>
+                                      </Form.Item>
+                                    )}
+                                  </div>
+                                  {/* Tab-level access */}
+                                  {MODULE_TABS[mod]?.length > 0 && (
+                                    <div style={{ marginTop: 10, paddingTop: 8, borderTop: `1px solid ${borderColor}` }}>
+                                      <Text style={{ fontSize: 11, color: '#888', display: 'block', marginBottom: 6 }}>Tab Access:</Text>
+                                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                                        {MODULE_TABS[mod].map(tab => (
+                                          <Form.Item key={tab.key} name={['tabAccess', mod, tab.key]} valuePropName="checked" style={{ margin: 0 }}>
+                                            <Checkbox disabled={watchedRole === 'Admin'} style={{ fontSize: 12 }}>{tab.label}</Checkbox>
+                                          </Form.Item>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              ),
+                            }))}
+                          />
+                        )}
+                      </div>
+
+                      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12, borderTop: `1px solid ${borderColor}`, paddingTop: 16 }}>
+                        <Button onClick={() => { setAddUserOpen(false); setEditingUser(null); userForm.resetFields(); }} style={{ borderRadius: 8 }}>Cancel</Button>
+                        <Button type="primary" onClick={addUser} style={{ background: '#b91c1c', border: 'none', borderRadius: 8 }}>{editingUser ? 'Save Changes' : 'Add User'}</Button>
+                      </div>
+                    </Form>
+                  </div>
+                </Modal>
+              </>
+            ),
+          },
+          {
+            key: 'notifications',
+            label: 'Notifications',
+            children: (
+              <Card style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }}>
+                <Form layout="vertical">
+                  {[
+                    { label: 'Payment Reminders',    desc: 'Alert when invoices are overdue or due soon', key: 'pay',      default: true  },
+                    { label: 'Low Stock Alerts',     desc: 'Notify when inventory falls below minimum',   key: 'stock',    default: true  },
+                    { label: 'Dispatch Reminders',   desc: 'Remind team when orders are ready to ship',   key: 'dispatch', default: true  },
+                    { label: 'Task Notifications',   desc: 'Updates when tasks are assigned or completed', key: 'task',    default: true  },
+                  ].map((n, i) => (
+                    <div key={n.key} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 0', borderBottom: i < 3 ? `1px solid ${borderColor}` : 'none' }}>
+                      <div>
+                        <Text strong style={{ color: textColor, display: 'block', fontSize: 14 }}>{n.label}</Text>
+                        <Text style={{ fontSize: 12, color: '#aaa' }}>{n.desc}</Text>
+                      </div>
+                      <Switch checked={notifPrefs[n.key]} onChange={(v) => setNotifPrefs((p) => ({ ...p, [n.key]: v }))} style={{ background: notifPrefs[n.key] ? '#B11E6A' : undefined, flexShrink: 0, marginLeft: 16 }} />
+                    </div>
+                  ))}
+
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, borderTop: `1px solid ${borderColor}`, paddingTop: 16, marginTop: 8 }}>
+                    <Button>Cancel</Button>
+                    <Button type="primary" icon={<SaveOutlined />} onClick={saveNotifications} style={{ background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none' }}>Save</Button>
+                  </div>
+                </Form>
+              </Card>
+            ),
+          },
+          {
+            key: 'invoice_settings',
+            label: <Space><FileTextOutlined />Invoice Settings</Space>,
+            children: (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+
+                {/* ── Company Details (shown on Invoice) ── */}
+                <Card
+                  style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }}
+                  title={<Text strong style={{ color: textColor }}>Company Details (shown on Invoice)</Text>}
+                >
+                  <Text style={{ fontSize: 13, color: '#aaa', display: 'block', marginBottom: 16 }}>
+                    These details are printed in the invoice header — fill them in and save to update every quotation and invoice
+                  </Text>
+                  <Row gutter={16}>
+                    <Col xs={24}>
+                      <Form.Item label="Address">
+                        <Input.TextArea
+                          value={invoiceCompanyDetails.address}
+                          onChange={e => setInvoiceCompanyDetails(p => ({ ...p, address: e.target.value }))}
+                          autoSize={{ minRows: 2, maxRows: 6 }}
+                          placeholder="Business address (each line break shows as a new line on the invoice)"
+                          style={{ borderRadius: 8 }}
+                        />
+                      </Form.Item>
+                    </Col>
+                    <Col xs={24} sm={12}>
+                      <Form.Item label="GST Number">
+                        <Input
+                          value={invoiceCompanyDetails.gstNumber}
+                          onChange={e => setInvoiceCompanyDetails(p => ({ ...p, gstNumber: e.target.value }))}
+                          placeholder="e.g. 33AAHCH2128J1ZR"
+                          style={{ borderRadius: 8 }}
+                        />
+                      </Form.Item>
+                    </Col>
+                    <Col xs={24} sm={12}>
+                      <Form.Item label="PAN Number">
+                        <Input
+                          value={invoiceCompanyDetails.pan}
+                          onChange={e => setInvoiceCompanyDetails(p => ({ ...p, pan: e.target.value }))}
+                          placeholder="e.g. AAHCH2128J"
+                          style={{ borderRadius: 8 }}
+                        />
+                      </Form.Item>
+                    </Col>
+                    <Col xs={24} sm={12}>
+                      <Form.Item label="Phone Number">
+                        <Input
+                          value={invoiceCompanyDetails.mobile}
+                          onChange={e => setInvoiceCompanyDetails(p => ({ ...p, mobile: e.target.value }))}
+                          placeholder="e.g. 8248093571"
+                          style={{ borderRadius: 8 }}
+                        />
+                      </Form.Item>
+                    </Col>
+                    <Col xs={24} sm={12}>
+                      <Form.Item label="Email" style={{ marginBottom: 0 }}>
+                        <Input
+                          value={invoiceCompanyDetails.email}
+                          onChange={e => setInvoiceCompanyDetails(p => ({ ...p, email: e.target.value }))}
+                          placeholder="e.g. admin@healnglow.co.in"
+                          style={{ borderRadius: 8 }}
+                        />
+                      </Form.Item>
+                    </Col>
+                  </Row>
+                </Card>
+
+                {/* ── Theme ── */}
+                <Card
+                  style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }}
+                  title={
+                    <Space>
+                      <BgColorsOutlined style={{ color: '#B11E6A' }} />
+                      <Text strong style={{ color: textColor }}>Invoice Theme</Text>
+                    </Space>
+                  }
+                >
+                  <Text style={{ fontSize: 13, color: '#aaa', display: 'block', marginBottom: 16 }}>
+                    Select the visual style for your generated invoices
+                  </Text>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14 }}>
+                    {INVOICE_THEMES.map(theme => {
+                      const selected = invoiceTheme === theme.key;
+                      return (
+                        <div
+                          key={theme.key}
+                          onClick={() => setInvoiceTheme(theme.key)}
+                          style={{
+                            cursor: 'pointer',
+                            borderRadius: 12,
+                            border: selected ? '2px solid #B11E6A' : `2px solid ${borderColor}`,
+                            overflow: 'hidden',
+                            width: 148,
+                            flexShrink: 0,
+                            transition: 'all 0.2s',
+                            boxShadow: selected ? '0 4px 16px rgba(177,30,106,0.22)' : '0 2px 8px rgba(0,0,0,0.06)',
+                            background: '#fff',
+                          }}
+                        >
+                          {/* Mini invoice header */}
+                          <div style={{ background: theme.headerBg, padding: '8px 10px', borderBottom: `1px solid ${theme.border}` }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                              <div>
+                                <div style={{ width: 32, height: 5, background: theme.headerText, borderRadius: 3, opacity: 0.85, marginBottom: 3 }} />
+                                <div style={{ width: 22, height: 3, background: theme.headerText, borderRadius: 2, opacity: 0.45 }} />
+                              </div>
+                              <div style={{ width: 22, height: 22, borderRadius: 4, background: `${theme.headerText}22` }} />
+                            </div>
+                          </div>
+                          {/* Mini invoice body */}
+                          <div style={{ padding: '8px 10px', background: '#fff' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 5 }}>
+                              <div style={{ width: 38, height: 3, background: '#e8e8e8', borderRadius: 2 }} />
+                              <div style={{ width: 22, height: 3, background: theme.accent, borderRadius: 2, opacity: 0.65 }} />
+                            </div>
+                            {[36, 48, 28].map((w, i) => (
+                              <div key={i} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
+                                <div style={{ width: w, height: 2.5, background: '#f0f0f0', borderRadius: 2 }} />
+                                <div style={{ width: 18, height: 2.5, background: '#f0f0f0', borderRadius: 2 }} />
+                              </div>
+                            ))}
+                            <div style={{ borderTop: `1px solid ${theme.accent}33`, marginTop: 6, paddingTop: 5, display: 'flex', justifyContent: 'flex-end' }}>
+                              <div style={{ width: 38, height: 5, background: theme.accent, borderRadius: 3, opacity: 0.75 }} />
+                            </div>
+                          </div>
+                          {/* Label */}
+                          <div style={{ padding: '6px 10px', background: isDark ? '#1a1a2e' : '#fafafa', borderTop: `1px solid ${borderColor}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <div>
+                              <Text style={{ fontSize: 12, fontWeight: 600, color: selected ? '#B11E6A' : textColor, display: 'block', lineHeight: 1.3 }}>{theme.name}</Text>
+                              <Text style={{ fontSize: 10, color: '#aaa' }}>{theme.desc}</Text>
+                            </div>
+                            {selected && <CheckOutlined style={{ fontSize: 11, color: '#B11E6A' }} />}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </Card>
+
+                {/* ── Font ── */}
+                <Card
+                  style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }}
+                  title={
+                    <Space>
+                      <FontColorsOutlined style={{ color: '#B11E6A' }} />
+                      <Text strong style={{ color: textColor }}>Invoice Font</Text>
+                    </Space>
+                  }
+                >
+                  <Text style={{ fontSize: 13, color: '#aaa', display: 'block', marginBottom: 16 }}>
+                    Choose the typeface used across your invoice
+                  </Text>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+                    {INVOICE_FONTS.map(font => {
+                      const selected = invoiceFont === font.key;
+                      return (
+                        <div
+                          key={font.key}
+                          onClick={() => setInvoiceFont(font.key)}
+                          style={{
+                            cursor: 'pointer',
+                            borderRadius: 10,
+                            border: selected ? '2px solid #B11E6A' : `2px solid ${borderColor}`,
+                            padding: '10px 16px',
+                            minWidth: 100,
+                            textAlign: 'center',
+                            background: selected ? '#B11E6A08' : cardBg,
+                            transition: 'all 0.2s',
+                            boxShadow: selected ? '0 2px 10px rgba(177,30,106,0.18)' : 'none',
+                          }}
+                        >
+                          <div style={{ fontFamily: font.key, fontSize: 24, fontWeight: 500, color: selected ? '#B11E6A' : textColor, lineHeight: 1 }}>{font.sample}</div>
+                          <Text style={{ fontSize: 11, color: selected ? '#B11E6A' : '#aaa', display: 'block', marginTop: 4, fontWeight: selected ? 600 : 400 }}>{font.name}</Text>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  {/* Live preview */}
+                  <div style={{ marginTop: 18, background: subBg, borderRadius: 10, padding: '14px 18px', border: `1px solid ${borderColor}` }}>
+                    <Text style={{ fontSize: 11, color: '#aaa', display: 'block', marginBottom: 8 }}>Preview</Text>
+                    <div style={{ fontFamily: invoiceFont, color: textColor }}>
+                      <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 2 }}>Tax Invoice #INV-0042</div>
+                      <div style={{ fontSize: 13, color: '#888' }}>Heal N Glow &nbsp;·&nbsp; 29ABCDE1234F1Z5 &nbsp;·&nbsp; 26 May 2026</div>
+                      <div style={{ fontSize: 12, marginTop: 8, color: '#aaa' }}>Product description — Qty × Rate = Amount</div>
+                    </div>
+                  </div>
+                </Card>
+
+                {/* ── GST ── */}
+                <Card
+                  style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }}
+                  title={
+                    <Space>
+                      <span style={{ fontSize: 16 }}>%</span>
+                      <Text strong style={{ color: textColor }}>GST & Tax Display</Text>
+                    </Space>
+                  }
+                >
+                  <Text style={{ fontSize: 13, color: '#aaa', display: 'block', marginBottom: 20 }}>
+                    Configure which tax components appear on the printed invoice
+                  </Text>
+
+                  {/* Tax component selection */}
+                  <div style={{ marginBottom: 24 }}>
+                    <Text strong style={{ color: textColor, display: 'block', marginBottom: 12, fontSize: 13 }}>Tax Components on Invoice</Text>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                      {GST_OPTIONS.map(opt => {
+                        const selected = invoiceGstConfig === opt.value;
+                        return (
+                          <div
+                            key={opt.value}
+                            onClick={() => setInvoiceGstConfig(opt.value)}
+                            style={{
+                              cursor: 'pointer',
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: 14,
+                              padding: '12px 16px',
+                              borderRadius: 10,
+                              border: selected ? '1.5px solid #B11E6A' : `1.5px solid ${borderColor}`,
+                              background: selected ? '#B11E6A08' : subBg,
+                              transition: 'all 0.18s',
+                            }}
+                          >
+                            <div style={{
+                              width: 18,
+                              height: 18,
+                              borderRadius: '50%',
+                              border: `2px solid ${selected ? '#B11E6A' : '#bbb'}`,
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              flexShrink: 0,
+                              transition: 'all 0.18s',
+                            }}>
+                              {selected && <div style={{ width: 9, height: 9, borderRadius: '50%', background: '#B11E6A' }} />}
+                            </div>
+                            <div style={{ flex: 1 }}>
+                              <Text strong style={{ fontSize: 13, color: selected ? '#B11E6A' : textColor }}>{opt.label}</Text>
+                              <Text style={{ fontSize: 12, color: '#aaa', display: 'block' }}>{opt.desc}</Text>
+                            </div>
+                            {opt.value !== 'none' && (
+                              <div style={{ display: 'flex', gap: 5 }}>
+                                {opt.value === 'cgst_sgst' && <>
+                                  <Tag style={{ borderRadius: 8, background: '#B11E6A12', color: '#B11E6A', border: '1px solid #B11E6A33', fontSize: 11, margin: 0 }}>CGST</Tag>
+                                  <Tag style={{ borderRadius: 8, background: '#B11E6A12', color: '#B11E6A', border: '1px solid #B11E6A33', fontSize: 11, margin: 0 }}>SGST</Tag>
+                                </>}
+                                {opt.value === 'cgst' && <Tag style={{ borderRadius: 8, background: '#B11E6A12', color: '#B11E6A', border: '1px solid #B11E6A33', fontSize: 11, margin: 0 }}>CGST</Tag>}
+                                {opt.value === 'sgst' && <Tag style={{ borderRadius: 8, background: '#B11E6A12', color: '#B11E6A', border: '1px solid #B11E6A33', fontSize: 11, margin: 0 }}>SGST</Tag>}
+                                {opt.value === 'igst' && <Tag style={{ borderRadius: 8, background: '#1e3a5f18', color: '#1e3a5f', border: '1px solid #1e3a5f33', fontSize: 11, margin: 0 }}>IGST</Tag>}
+                                {opt.value === 'all' && <>
+                                  <Tag style={{ borderRadius: 8, background: '#B11E6A12', color: '#B11E6A', border: '1px solid #B11E6A33', fontSize: 11, margin: 0 }}>CGST</Tag>
+                                  <Tag style={{ borderRadius: 8, background: '#B11E6A12', color: '#B11E6A', border: '1px solid #B11E6A33', fontSize: 11, margin: 0 }}>SGST</Tag>
+                                  <Tag style={{ borderRadius: 8, background: '#1e3a5f18', color: '#1e3a5f', border: '1px solid #1e3a5f33', fontSize: 11, margin: 0 }}>IGST</Tag>
+                                </>}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <Divider style={{ margin: '0 0 20px' }} />
+
+                  {/* Tax detail toggles */}
+                  <Text strong style={{ color: textColor, display: 'block', marginBottom: 14, fontSize: 13 }}>Tax Detail Options</Text>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+                    {[
+                      { label: 'Show GSTIN on Invoice',        desc: 'Print your GST registration number',        val: invoiceShowGstin,  set: setInvoiceShowGstin },
+                      { label: 'Show Tax Rate per Line Item',  desc: 'Print applicable GST % next to each row',    val: invoiceShowTaxRate,set: setInvoiceShowTaxRate },
+                    ].map((item, i, arr) => (
+                      <div key={item.label} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 0', borderBottom: i < arr.length - 1 ? `1px solid ${borderColor}` : 'none' }}>
+                        <div>
+                          <Text strong style={{ color: textColor, display: 'block', fontSize: 13 }}>{item.label}</Text>
+                          <Text style={{ fontSize: 12, color: '#aaa' }}>{item.desc}</Text>
+                        </div>
+                        <Switch checked={item.val} onChange={item.set} style={{ background: item.val ? '#B11E6A' : undefined, flexShrink: 0, marginLeft: 16 }} />
+                      </div>
+                    ))}
+                  </div>
+                </Card>
+
+                {/* ── Invoice Display Options ── */}
+                <Card
+                  style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }}
+                  title={<Text strong style={{ color: textColor }}>Invoice Display Options</Text>}
+                >
+                  {/* Show Company Logo */}
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 0', borderBottom: `1px solid ${borderColor}` }}>
+                    <div>
+                      <Text strong style={{ color: textColor, display: 'block', fontSize: 13 }}>Show Company Logo</Text>
+                      <Text style={{ fontSize: 12, color: '#aaa' }}>Print the logo at the top of every invoice</Text>
+                    </div>
+                    <Switch checked={invoiceShowLogo} onChange={setInvoiceShowLogo} style={{ background: invoiceShowLogo ? '#B11E6A' : undefined, flexShrink: 0, marginLeft: 16 }} />
+                  </div>
+
+                  {/* Show Bank Details */}
+                  <div style={{ borderBottom: `1px solid ${borderColor}` }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 0' }}>
+                      <div>
+                        <Text strong style={{ color: textColor, display: 'block', fontSize: 13 }}>Show Bank Details</Text>
+                        <Text style={{ fontSize: 12, color: '#aaa' }}>Print the selected bank account and its UPI QR on invoices &amp; quotations</Text>
+                      </div>
+                      <Switch checked={invoiceShowBank} onChange={setInvoiceShowBank} style={{ background: invoiceShowBank ? '#B11E6A' : undefined, flexShrink: 0, marginLeft: 16 }} />
+                    </div>
+
+                    {/* Bank Accounts — always editable: the payment dropdowns (Billing → Record
+                        Payment, Sales → Add Payment Entry) use them even when the invoice hides them. */}
+                    <div style={{ paddingBottom: 16 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+                        <div style={{ minWidth: 0 }}>
+                          <Text strong style={{ fontSize: 12, color: '#B11E6A', display: 'block' }}>Bank Accounts ({bankAccounts.length})</Text>
+                          <Text style={{ fontSize: 11, color: '#999' }}>
+                            Active accounts appear in every payment dropdown. Choose which one prints on invoices.
+                          </Text>
+                        </div>
+                        <Button size="small" icon={<PlusOutlined />} onClick={addBankAccount} style={{ color: '#B11E6A', borderColor: '#B11E6A55' }}>
+                          Add Bank Account
+                        </Button>
+                      </div>
+
+                      {bankAccounts.length === 0 && (
+                        <div style={{ background: subBg, borderRadius: 10, padding: 16, border: `1px dashed ${isDark ? '#444' : '#ddd'}`, textAlign: 'center' }}>
+                          <Text style={{ fontSize: 12, color: '#999' }}>No bank accounts yet. Add one to print it on invoices and to record payments against it.</Text>
+                        </div>
+                      )}
+
+                      {bankAccounts.map((acc, idx) => {
+                        const isInvoice = acc.accountId === invoiceBankAccountId && acc.active !== false;
+                        const inactive = acc.active === false;
+                        return (
+                          <div
+                            key={acc.accountId}
+                            style={{
+                              background: subBg, borderRadius: 10, padding: 14, marginBottom: 10,
+                              border: `1px solid ${isInvoice ? '#B11E6A88' : borderColor}`,
+                              opacity: inactive ? 0.7 : 1,
+                            }}
+                          >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+                              <Space size={8} wrap>
+                                <Text strong style={{ fontSize: 12, color: textColor }}>Account {idx + 1}</Text>
+                                {isInvoice && <Tag color="magenta" style={{ margin: 0 }}>Shown on invoice</Tag>}
+                                {inactive && <Tag style={{ margin: 0 }}>Inactive</Tag>}
+                              </Space>
+                              <Space size={12} wrap>
+                                <Radio
+                                  checked={isInvoice}
+                                  disabled={inactive}
+                                  onChange={() => chooseInvoiceBankAccount(acc.accountId)}
+                                >
+                                  <Text style={{ fontSize: 12 }}>Show on invoice</Text>
+                                </Radio>
+                                <Space size={4}>
+                                  <Text style={{ fontSize: 12, color: '#888' }}>Active</Text>
+                                  <Switch size="small" checked={!inactive} onChange={(v) => setBankAccountActive(acc.accountId, v)} />
+                                </Space>
+                                <Popconfirm
+                                  title="Remove this bank account?"
+                                  description="Payments already recorded against it keep its name in reports. To only hide it from dropdowns, switch it off instead."
+                                  okText="Remove"
+                                  okButtonProps={{ danger: true }}
+                                  onConfirm={() => removeBankAccount(acc.accountId)}
+                                >
+                                  <Button size="small" type="text" danger icon={<DeleteOutlined />} />
+                                </Popconfirm>
+                              </Space>
+                            </div>
+                            <Row gutter={12}>
+                              <Col xs={24} sm={12}>
+                                <Text style={{ fontSize: 11, color: '#888', display: 'block', marginBottom: 4 }}>Nickname (shown in dropdowns)</Text>
+                                <Input
+                                  value={acc.label}
+                                  onChange={e => updateBankAccount(acc.accountId, { label: e.target.value })}
+                                  placeholder="e.g. HDFC Current"
+                                  style={{ borderRadius: 8, marginBottom: 10 }}
+                                />
+                              </Col>
+                              <Col xs={24} sm={12}>
+                                <Text style={{ fontSize: 11, color: '#888', display: 'block', marginBottom: 4 }}>Account Holder Name</Text>
+                                <Input
+                                  value={acc.name}
+                                  onChange={e => updateBankAccount(acc.accountId, { name: e.target.value })}
+                                  placeholder="e.g. Heal n Glow"
+                                  style={{ borderRadius: 8, marginBottom: 10 }}
+                                />
+                              </Col>
+                              <Col xs={24} sm={12}>
+                                <Text style={{ fontSize: 11, color: '#888', display: 'block', marginBottom: 4 }}>Bank Name &amp; Branch</Text>
+                                <Input
+                                  value={acc.bank}
+                                  onChange={e => updateBankAccount(acc.accountId, { bank: e.target.value })}
+                                  placeholder="e.g. Kotak Mahindra Bank, MADURAI"
+                                  style={{ borderRadius: 8, marginBottom: 10 }}
+                                />
+                              </Col>
+                              <Col xs={24} sm={12}>
+                                <Text style={{ fontSize: 11, color: '#888', display: 'block', marginBottom: 4 }}>Account Number</Text>
+                                <Input
+                                  value={acc.account}
+                                  onChange={e => updateBankAccount(acc.accountId, { account: e.target.value })}
+                                  placeholder="e.g. 8056766743"
+                                  style={{ borderRadius: 8, marginBottom: 10 }}
+                                />
+                              </Col>
+                              <Col xs={24} sm={12}>
+                                <Text style={{ fontSize: 11, color: '#888', display: 'block', marginBottom: 4 }}>IFSC Code</Text>
+                                <Input
+                                  value={acc.ifsc}
+                                  onChange={e => updateBankAccount(acc.accountId, { ifsc: e.target.value.toUpperCase() })}
+                                  placeholder="e.g. KKBK0008716"
+                                  style={{ borderRadius: 8, marginBottom: 10 }}
+                                />
+                              </Col>
+                              <Col xs={24} sm={12}>
+                                <Text style={{ fontSize: 11, color: '#888', display: 'block', marginBottom: 4 }}>UPI ID</Text>
+                                <Input
+                                  value={acc.upiId}
+                                  onChange={e => updateBankAccount(acc.accountId, { upiId: e.target.value })}
+                                  placeholder="e.g. healnglow@okhdfcbank"
+                                  style={{ borderRadius: 8, marginBottom: 10 }}
+                                />
+                              </Col>
+                            </Row>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
+                              <div style={{ width: 72, height: 72, borderRadius: 10, border: `2px dashed ${isDark ? '#444' : '#ddd'}`, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', background: cardBg, flexShrink: 0 }}>
+                                {acc.qrCodeUrl
+                                  ? <img src={acc.qrCodeUrl} alt="UPI QR" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+                                  : <Text style={{ fontSize: 11, color: '#bbb' }}>No QR</Text>}
+                              </div>
+                              <div>
+                                <Upload
+                                  accept="image/*"
+                                  showUploadList={false}
+                                  beforeUpload={(file) => handleQrCodeUpload(acc.accountId, file)}
+                                >
+                                  <Button size="small" icon={<UploadOutlined />} style={{ marginBottom: 6, display: 'block', color: '#B11E6A', borderColor: '#B11E6A55' }}>
+                                    {acc.qrCodeUrl ? 'Change UPI QR Code' : 'Upload UPI QR Code'}
+                                  </Button>
+                                </Upload>
+                                <Text style={{ fontSize: 11, color: '#aaa', display: 'block' }}>PNG, JPG up to 2MB — printed next to this account on the invoice</Text>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                      {bankAccounts.length > 0 && (
+                        <Text style={{ fontSize: 11, color: '#aaa' }}>Click Save Invoice Settings below to apply bank account changes.</Text>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Terms & Conditions — toggle + editable textarea */}
+                  <div style={{ borderBottom: `1px solid ${borderColor}` }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 0' }}>
+                      <div>
+                        <Text strong style={{ color: textColor, display: 'block', fontSize: 13 }}>Show Terms & Conditions</Text>
+                        <Text style={{ fontSize: 12, color: '#aaa' }}>Print T&C text at the bottom of the invoice</Text>
+                      </div>
+                      <Switch checked={invoiceShowTerms} onChange={setInvoiceShowTerms} style={{ background: invoiceShowTerms ? '#B11E6A' : undefined, flexShrink: 0, marginLeft: 16 }} />
+                    </div>
+                    {invoiceShowTerms && (
+                      <motion.div
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: 'auto' }}
+                        exit={{ opacity: 0, height: 0 }}
+                        style={{ overflow: 'hidden', paddingBottom: 16 }}
+                      >
+                        <div style={{ background: subBg, borderRadius: 10, padding: 14, border: `1px solid ${borderColor}` }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                            <Text strong style={{ fontSize: 12, color: '#B11E6A' }}>Terms & Conditions Text</Text>
+                            <Text style={{ fontSize: 11, color: '#aaa' }}>Displayed on every invoice footer</Text>
+                          </div>
+                          <Input.TextArea
+                            value={invoiceTerms}
+                            onChange={e => setInvoiceTerms(e.target.value)}
+                            rows={6}
+                            placeholder={`1. Goods once sold will not be taken back or exchanged.\n2. All disputes are subject to local jurisdiction only.\n3. Payment should be made within the due date.`}
+                            showCount
+                            maxLength={1000}
+                            style={{
+                              borderRadius: 8,
+                              fontSize: 13,
+                              lineHeight: 1.7,
+                              resize: 'vertical',
+                            }}
+                          />
+                          <Text style={{ fontSize: 11, color: '#aaa', display: 'block', marginTop: 8 }}>
+                            Tip: Start each clause on a new line (e.g. 1. First clause, 2. Second clause…)
+                          </Text>
+                        </div>
+                      </motion.div>
+                    )}
+                  </div>
+
+                  {/* Show Signature Field */}
+                  <div>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 0' }}>
+                      <div>
+                        <Text strong style={{ color: textColor, display: 'block', fontSize: 13 }}>Show Signature Field</Text>
+                        <Text style={{ fontSize: 12, color: '#aaa' }}>Add authorised signatory line at footer</Text>
+                      </div>
+                      <Switch checked={invoiceShowSign} onChange={setInvoiceShowSign} style={{ background: invoiceShowSign ? '#B11E6A' : undefined, flexShrink: 0, marginLeft: 16 }} />
+                    </div>
+                    {invoiceShowSign && (
+                      <motion.div
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: 'auto' }}
+                        exit={{ opacity: 0, height: 0 }}
+                        style={{ overflow: 'hidden', paddingBottom: 16 }}
+                      >
+                        <div style={{ background: subBg, borderRadius: 10, padding: 14, border: `1px solid ${borderColor}` }}>
+                          <Text strong style={{ fontSize: 12, color: '#B11E6A', display: 'block', marginBottom: 10 }}>Signature Image</Text>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 20, flexWrap: 'wrap' }}>
+                            <div style={{ width: 140, height: 70, borderRadius: 10, border: `2px dashed ${isDark ? '#444' : '#ddd'}`, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', background: cardBg }}>
+                              {signatureUrl
+                                ? <img src={signatureUrl} alt="signature" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+                                : <Text style={{ fontSize: 11, color: '#bbb' }}>No signature</Text>}
+                            </div>
+                            <div>
+                              <Upload
+                                accept="image/*"
+                                showUploadList={false}
+                                beforeUpload={handleSignatureUpload}
+                              >
+                                <Button icon={<UploadOutlined />} style={{ marginBottom: 8, display: 'block', color: '#B11E6A', borderColor: '#B11E6A55' }}>
+                                  {signatureUrl ? 'Change Signature' : 'Upload Signature'}
+                                </Button>
+                              </Upload>
+                              <Text style={{ fontSize: 12, color: '#aaa', display: 'block' }}>PNG, JPG up to 2MB</Text>
+                              <Text style={{ fontSize: 12, color: '#aaa' }}>Transparent background recommended</Text>
+                            </div>
+                          </div>
+                        </div>
+                      </motion.div>
+                    )}
+                  </div>
+
+                  <Divider style={{ margin: '4px 0 16px' }} />
+                  <Form layout="vertical">
+                    <Form.Item label={<Text strong style={{ color: textColor }}>Invoice Footer Note</Text>} style={{ marginBottom: 0 }}>
+                      <Input
+                        value={invoiceFooter}
+                        onChange={e => setInvoiceFooter(e.target.value)}
+                        placeholder="e.g. Thank you for your business!"
+                        maxLength={120}
+                        showCount
+                        style={{ borderRadius: 8 }}
+                      />
+                    </Form.Item>
+                  </Form>
+                </Card>
+
+                {/* Save */}
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+                  <Button>Cancel</Button>
+                  <Button type="primary" icon={<SaveOutlined />} onClick={saveInvoiceSettings} style={{ background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none' }}>
+                    Save Invoice Settings
+                  </Button>
+                </div>
+              </div>
+            ),
+          },
+          {
+            key: 'alert_configuration',
+            label: <Space><NotificationOutlined />Alert Configuration</Space>,
+            children: <AlertConfigurationTab />,
+          },
+          ...(isAdminOrManagement ? [{
+            key: 'snoozed_alerts',
+            label: <Space><ClockCircleOutlined />Snoozed Alerts</Space>,
+            children: (
+              <Card style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 8 }}>
+                  <Text type="secondary" style={{ fontSize: 13 }}>Alerts individual users have snoozed or stopped, with who/when/duration (Admin/Management only)</Text>
+                  <Space wrap>
+                    <Input
+                      prefix={<span>🔍</span>}
+                      placeholder="Search by user or alert..."
+                      value={snoozedSearch}
+                      onChange={e => setSnoozedSearch(e.target.value)}
+                      style={{ width: 220, borderRadius: 8 }}
+                      allowClear
+                    />
+                    <Select value={snoozedActionFilter} onChange={setSnoozedActionFilter} style={{ width: 160 }}>
+                      <Option value="all">All</Option>
+                      <Option value="snooze">Snoozed</Option>
+                      <Option value="stop">Stopped</Option>
+                    </Select>
+                  </Space>
+                </div>
+                {snoozedLoading ? (
+                  <div style={{ textAlign: 'center', padding: 40 }}><Spin /></div>
+                ) : snoozedAlerts.length === 0 ? (
+                  <Empty description="No snoozed or stopped alerts" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+                ) : (
+                  <Table
+                    size="small"
+                    dataSource={snoozedAlerts
+                      .filter(r => snoozedActionFilter === 'all' || r.action === snoozedActionFilter)
+                      .filter(r => {
+                        if (!snoozedSearch) return true;
+                        const q = snoozedSearch.toLowerCase();
+                        return (r.userId?.fullName || '').toLowerCase().includes(q)
+                          || (r.title || '').toLowerCase().includes(q)
+                          || (r.group || '').toLowerCase().includes(q);
+                      })}
+                    rowKey="_id"
+                    pagination={{ showSizeChanger: true, pageSizeOptions: ['10', '20', '50', '100'], defaultPageSize: 10 }}
+                    columns={[
+                      {
+                        title: 'User', dataIndex: 'userId', width: 180,
+                        render: u => <Text strong style={{ color: textColor, fontSize: 13 }}>{u?.fullName || 'Unknown'}</Text>
+                      },
+                      {
+                        title: 'Alert', key: 'alert',
+                        render: (_, r) => (
+                          <div>
+                            <Text style={{ color: textColor, fontSize: 13, display: 'block' }}>{r.title || `${r.group}${r.role ? ` — ${r.role}` : ''}`}</Text>
+                            <Tag style={{ borderRadius: 10, background: '#B11E6A15', color: '#B11E6A', border: '1px solid #B11E6A33', fontSize: 11, marginTop: 2 }}>{r.group}</Tag>
+                          </div>
+                        )
+                      },
+                      {
+                        title: 'Action', dataIndex: 'action', width: 100,
+                        render: v => <Tag color={v === 'stop' ? 'red' : 'orange'} style={{ borderRadius: 10, fontSize: 12 }}>{v === 'stop' ? 'Stopped' : 'Snoozed'}</Tag>
+                      },
+                      {
+                        title: 'Duration', dataIndex: 'snoozeMinutes', width: 100,
+                        render: (v, r) => r.action === 'stop' ? <Text style={{ fontSize: 13, color: '#888' }}>—</Text> : <Text style={{ fontSize: 13, color: '#888' }}>{v} min</Text>
+                      },
+                      {
+                        title: 'Status', key: 'status', width: 110,
+                        render: (_, r) => {
+                          if (r.action === 'stop') return <Tag color="red" style={{ borderRadius: 10, fontSize: 12 }}>Stopped</Tag>;
+                          const active = r.snoozedUntil && new Date(r.snoozedUntil) > new Date();
+                          return <Tag color={active ? 'green' : 'default'} style={{ borderRadius: 10, fontSize: 12 }}>{active ? 'Active' : 'Expired'}</Tag>;
+                        }
+                      },
+                      {
+                        title: 'At', dataIndex: 'createdAt', width: 160,
+                        render: v => <Text style={{ fontSize: 13, color: '#888' }}>{new Date(v).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })}</Text>
+                      },
+                      {
+                        title: 'Until', dataIndex: 'snoozedUntil', width: 160,
+                        render: v => v ? <Text style={{ fontSize: 13, color: '#888' }}>{new Date(v).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })}</Text> : <Text style={{ fontSize: 13, color: '#888' }}>—</Text>
+                      },
+                      {
+                        title: 'Actions', key: 'actions', width: 80,
+                        render: (_, r) => (
+                          <Tooltip title="Clear — alert will ring again for this user">
+                            <Button
+                              size="small"
+                              type="link"
+                              style={{ color: '#52c41a', padding: '0 4px', fontSize: 13 }}
+                              onClick={async () => {
+                                try {
+                                  await clearSnoozedAlertMutation(r._id).unwrap();
+                                  enqueueSnackbar('Cleared', { variant: 'success' });
+                                } catch { enqueueSnackbar('Failed to clear', { variant: 'error' }); }
+                              }}
+                            >
+                              Clear
+                            </Button>
+                          </Tooltip>
+                        )
+                      },
+                    ]}
+                  />
+                )}
+              </Card>
+            ),
+          }] : []),
+          {
+            key: 'deleted_records',
+            label: <Space><DeleteOutlined />Deleted Records</Space>,
+            children: (
+              <Card style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 8 }}>
+                  <Text type="secondary" style={{ fontSize: 13 }}>All records that have been deleted from the system (Super Admin only)</Text>
+                  <Space wrap>
+                    <Input
+                      prefix={<span>🔍</span>}
+                      placeholder="Search deleted records..."
+                      value={deletedSearch}
+                      onChange={e => setDeletedSearch(e.target.value)}
+                      style={{ width: 220, borderRadius: 8 }}
+                      allowClear
+                    />
+                    <Select value={deletedModuleFilter} onChange={setDeletedModuleFilter} style={{ width: 180 }}>
+                      <Option value="all">All Modules</Option>
+                      <Option value="Ledgers">Ledgers</Option>
+                      <Option value="Sales Team">Sales Team</Option>
+                      <Option value="Billing">Billing</Option>
+                      <Option value="Inventory">Inventory</Option>
+                      <Option value="Vendors">Vendors</Option>
+                      <Option value="Staff Management">Staff Management</Option>
+                      <Option value="Settings">Settings</Option>
+                    </Select>
+                  </Space>
+                </div>
+                {deletedRecords.length === 0 ? (
+                  <Empty description="No deleted records found" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+                ) : (
+                  <Table
+                    size="small"
+                    dataSource={deletedRecords.filter(r =>
+                      (deletedModuleFilter === 'all' || r.module === deletedModuleFilter) &&
+                      (!deletedSearch || r.name.toLowerCase().includes(deletedSearch.toLowerCase()) || r.module.toLowerCase().includes(deletedSearch.toLowerCase()))
+                    )}
+                    rowKey="key"
+                    pagination={{ showSizeChanger: true, pageSizeOptions: ['10', '20', '50', '100'], defaultPageSize: 10 }}
+                    columns={[
+                      {
+                        title: 'Module', dataIndex: 'module', width: 160,
+                        render: v => <Tag style={{ borderRadius: 10, background: '#B11E6A15', color: '#B11E6A', border: '1px solid #B11E6A33', fontSize: 12 }}>{v}</Tag>
+                      },
+                      {
+                        title: 'Record Name', dataIndex: 'name',
+                        render: v => <Text strong style={{ color: textColor, fontSize: 13 }}>{v}</Text>
+                      },
+                      {
+                        title: 'Type', dataIndex: 'type', width: 120,
+                        render: v => <Tag color="default" style={{ borderRadius: 10, fontSize: 12 }}>{v}</Tag>
+                      },
+                      {
+                        title: 'Deleted By', dataIndex: 'deletedBy', width: 140,
+                        render: v => <Text style={{ fontSize: 13, color: '#888' }}>{v}</Text>
+                      },
+                      {
+                        title: 'Deleted At', dataIndex: 'deletedAt', width: 160,
+                        render: v => <Text style={{ fontSize: 13, color: '#888' }}>{new Date(v).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })}</Text>
+                      },
+                      {
+                        title: 'Actions', key: 'actions', width: 80,
+                        render: (_, r) => (
+                          <Tooltip title="Restore Record">
+                            <Button
+                              size="small"
+                              type="link"
+                              style={{ color: '#52c41a', padding: '0 4px', fontSize: 13 }}
+                              onClick={async () => {
+                                try {
+                                  await restoreRecordMutation({ type: r.type, id: r.key }).unwrap();
+                                  enqueueSnackbar(`${r.name} restored`, { variant: 'success' });
+                                } catch { enqueueSnackbar('Restore failed', { variant: 'error' }); }
+                              }}
+                            >
+                              Restore
+                            </Button>
+                          </Tooltip>
+                        )
+                      },
+                    ]}
+                  />
+                )}
+              </Card>
+            ),
+          },
+        ])}
+      />
+    </div>
+  );
+}

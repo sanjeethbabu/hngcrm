@@ -1,0 +1,59 @@
+const express = require('express');
+const router = express.Router();
+const ctrl = require('./sales.controller');
+const { protect } = require('../../middleware/auth');
+const { uploadCloud } = require('../../config/cloudinary');
+
+router.use(protect);
+
+// Reminders + hotel lookup
+router.get('/reminders', ctrl.getReminders);
+router.get('/hotels', ctrl.getHotelNames);
+router.get('/hotels/lookup', ctrl.getHotelByName);
+
+// Leads
+router.get('/leads', ctrl.getLeads);
+router.post('/leads', ctrl.createLead);
+router.get('/leads/:id', ctrl.getLead);
+router.put('/leads/:id', ctrl.updateLead);
+router.delete('/leads/:id', ctrl.deleteLead);
+router.patch('/leads/:id/status', ctrl.updateLeadStatus);
+router.patch('/leads/:id/assign', ctrl.assignLead);
+router.post('/leads/:id/convert-negotiation', ctrl.convertLeadToNegotiation);
+
+// Quotations
+router.get('/quotations', ctrl.getQuotations);
+router.post('/quotations', ctrl.createQuotation);
+router.put('/quotations/:id', ctrl.updateQuotation);
+router.delete('/quotations/:id', ctrl.deleteQuotation);
+router.post('/quotations/:id/convert-negotiation', ctrl.convertToNegotiation);
+
+// Negotiations
+router.get('/negotiations', ctrl.getNegotiations);
+router.put('/negotiations/:id', ctrl.updateNegotiation);
+router.delete('/negotiations/:id', ctrl.deleteNegotiation);
+router.post('/negotiations/:id/convert-order', ctrl.convertToOrder);
+
+// Orders
+router.get('/orders/by-hotel', ctrl.getOrdersByHotelName);
+router.get('/orders', ctrl.getOrders);
+router.post('/orders', ctrl.createDirectOrder);
+router.get('/orders/:id', ctrl.getOrder);
+router.put('/orders/:id', ctrl.updateOrder);
+router.delete('/orders/:id', ctrl.deleteOrder);
+router.patch('/orders/:id/status', ctrl.updateOrderStatus);
+router.patch('/orders/:id/transport-mismatch-decision', ctrl.decideTransportMismatch);
+router.patch('/orders/:id/lr-mismatch-decision', ctrl.decideLrMismatchSales);
+router.patch('/orders/:id/invoice-mismatch-decision', ctrl.decideInvoiceMismatch);
+
+// Complaints
+router.get('/complaints', ctrl.getComplaints);
+router.get('/complaints/history', ctrl.getComplaintHistory);
+router.post('/complaints', ctrl.createComplaint);
+router.patch('/complaints/:id/status', ctrl.updateComplaintStatus);
+
+// File upload (Cloudinary)
+router.post('/upload', uploadCloud.array('files', 10), ctrl.uploadFiles);
+router.delete('/upload', ctrl.deleteFile);
+
+module.exports = router;

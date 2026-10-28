@@ -1,0 +1,833 @@
+import React, { useEffect, useMemo, useState } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
+import {
+  Alert, Avatar, Button, Card, Col, Descriptions, Divider, Input, Modal, Progress, Radio, Rate, Row, Space, Statistic, Steps, Table, Tag, Timeline, Tooltip, Typography,
+} from 'antd';
+import {
+  AlertFilled, ArrowLeftOutlined, BellOutlined, CheckCircleOutlined, ClockCircleOutlined,
+  ExclamationCircleOutlined, ExperimentOutlined, FieldTimeOutlined, PauseCircleOutlined, PlayCircleOutlined, SwapOutlined, UserOutlined,
+} from '@ant-design/icons';
+import { enqueueSnackbar } from 'notistack';
+import { useSelector } from 'react-redux';
+import PageBreadcrumb from '../../components/common/PageBreadcrumb';
+import LogoThumb from '../../components/common/LogoThumb';
+import { secToHuman, ratingFromDurations, ratingColor, ratingLabel } from '../../utils/taskTime';
+import { buildActiveTaskMap, findStartBlocker, startBlockerMessage, taskAssigneeIds } from '../../utils/activeTaskLock';
+import { isCreditTerms, creditPayLabel } from '../../utils/creditPayment';
+import {
+  useGetTaskQuery,
+  useGetTasksQuery,
+  useUpdateTaskStatusMutation,
+  useRequestEmergencyDispatchMutation,
+  useRequestEmergencyDispatchForOrderMutation,
+} from '../../store/api/apiSlice';
+
+const { Text, Title } = Typography;
+
+const typeColor = { Production: '#B11E6A', 'Sticker Work': '#8a1652', Packing: '#C94F8A', Procurement: '#D85C9E', Internal: '#6b1240' };
+const priorityColor = { Urgent: '#6b1240', High: '#B11E6A', Medium: '#C94F8A', Normal: '#D85C9E' };
+const statusColor = { 'In Progress': '#B11E6A', Pending: '#C94F8A', Paused: '#fa8c16', Completed: '#6b1240', Done: '#6b1240' };
+const timelineIcon = { Start: <PlayCircleOutlined />, Resume: <PlayCircleOutlined />, Pause: <PauseCircleOutlined />, Completion: <CheckCircleOutlined />, Switch: <SwapOutlined /> };
+const timelineColor = { Start: 'blue', Resume: 'blue', Pause: 'orange', Completion: 'green', Switch: 'purple' };
+const paymentColor = { Paid: 'success', Pending: 'warning', Partial: 'orange' };
+
+const labelStyle = {
+  fontSize: 11, color: '#B11E6A', letterSpacing: 1, textTransform: 'uppercase', fontWeight: 600,
+};
+
+export default function TaskDetail() {
+  const { id } = useParams();
+  const navigate = useNavigate();
+  const isDark = useSelector((s) => s.theme.isDark);
+  const currentUser = useSelector((s) => s.auth.user);
+
+  const { data: taskData, isLoading } = useGetTaskQuery(id);
+  const { data: allTasksData } = useGetTasksQuery({ limit: 1000 });
+
+  const [updateTaskStatus] = useUpdateTaskStatusMutation();
+  const [requestEmergencyDispatch, { isLoading: requesting }] = useRequestEmergencyDispatchMutation();
+  const [requestEmergencyDispatchForOrder, { isLoading: requestingOrder }] = useRequestEmergencyDispatchForOrderMutation();
+
+  const [emergencyModalOpen, setEmergencyModalOpen] = useState(false);
+  const [emergencyReason, setEmergencyReason] = useState('');
+  const [emergencyScope, setEmergencyScope] = useState('task');
+  const [completeModalOpen, setCompleteModalOpen] = useState(false);
+  const [feedbackText, setFeedbackText] = useState('');
+
+  const t = taskData?.data;
+
+  // Personalized/Separate Kit Packing tasks can have MULTIPLE assignees
+  // (assignedToMany/assigneeNames); every other task type still has exactly one.
+  const assigneeNameList = useMemo(() => {
+    if (!t) return [];
+    if (Array.isArray(t.assigneeNames) && t.assigneeNames.length) return t.assigneeNames;
+    if (Array.isArray(t.assignedToMany) && t.assignedToMany.length) {
+      return t.assignedToMany.map((u) => u?.fullName).filter(Boolean);
+    }
+    return [t.assignedTo?.fullName || t.assigneeName].filter(Boolean);
+  }, [t]);
+
+  const orderId = t?.orderId?._id?.toString() || (typeof t?.orderId === 'string' ? t.orderId : null);
+  const isSample = t?.orderId?.orderCategory === 'SAMPLE' || t?.orderId?.leadId?.leadType === 'SAMPLE';
+  // Credit payment terms — dispatch doesn't wait for payment (see backend dispatchOrder).
+  const isCredit = isCreditTerms(t?.orderId?.paymentTerms, t?.orderId?.leadId?.paymentTerms);
+  const displayStatus = t?.status === 'Done' ? 'Completed' : t?.status;
+
+  const siblingTasks = useMemo(() => {
+    if (!orderId || !allTasksData?.data) return [];
+    return allTasksData.data
+      .filter((s) => {
+        const sOrdId = (typeof s.orderId === 'object' ? s.orderId?._id : s.orderId)?.toString();
+        return sOrdId === orderId && s._id !== id;
+      })
+      .map((s) => {
+        const names = (Array.isArray(s.assigneeNames) && s.assigneeNames.length)
+          ? s.assigneeNames
+          : (Array.isArray(s.assignedToMany) && s.assignedToMany.length)
+            ? s.assignedToMany.map((u) => u?.fullName).filter(Boolean)
+            : [s.assignedTo?.fullName || s.assigneeName].filter(Boolean);
+        return {
+          key: s._id,
+          id: s.taskCode,
+          type: s.taskType || 'Packing',
+          product: s.product || '—',
+          assignee: names.join(', ') || '—',
+          status: s.status === 'Done' ? 'Completed' : s.status,
+          // Task.dueDate is almost never set (nothing in the Assign Task flows sends
+          // it) — fall back to the order's expected delivery date, same as the Task
+          // Management list's "Due" column.
+          due: s.dueDate ? s.dueDate.slice(0, 10)
+            : (s.orderId?.expectedDeliveryDate ? s.orderId.expectedDeliveryDate.slice(0, 10) : '—'),
+        };
+      });
+  }, [allTasksData, orderId, id]);
+
+  const pendingCount = siblingTasks.filter((s) => s.status === 'Pending' || s.status === 'In Progress' || s.status === 'Paused').length;
+  const doneCount = siblingTasks.filter((s) => s.status === 'Completed').length;
+
+  // Live-ticking "worked so far" clock while the task is actively In Progress — re-renders
+  // every second so the Time & Performance card reflects real elapsed time, not just the
+  // value from the last fetch. Frozen (no interval) once Paused or Done.
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  useEffect(() => {
+    if (t?.status !== 'In Progress') return undefined;
+    const iv = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(iv);
+  }, [t?.status]);
+
+  // Worked time excludes every completed pause span (t.pausedDurationSec) — while
+  // currently Paused, the clock is frozen at the moment the pause began (t.lastPausedAt);
+  // while In Progress, it ticks live off nowTick; once Done, the backend's own
+  // actualDurationSec (computed the same way) is authoritative.
+  const liveWorkedSec = useMemo(() => {
+    if (!t?.startedAt) return 0;
+    const startMs = new Date(t.startedAt).getTime();
+    const pausedSec = t.pausedDurationSec || 0;
+    if (t.status === 'In Progress') return Math.max(0, Math.round((nowTick - startMs) / 1000) - pausedSec);
+    if (t.status === 'Paused' && t.lastPausedAt) return Math.max(0, Math.round((new Date(t.lastPausedAt).getTime() - startMs) / 1000) - pausedSec);
+    return t.actualDurationSec || 0;
+  }, [t, nowTick]);
+
+  // One In Progress task per person (backend updateTaskStatus enforces it) — tooltip
+  // message when Start/Resume is blocked by another task this assignee already has running.
+  const startBlockMsg = useMemo(() => {
+    if (!t) return '';
+    const blocker = findStartBlocker(
+      { taskId: t._id, status: t.status, assigneeIds: taskAssigneeIds(t) },
+      buildActiveTaskMap(allTasksData?.data || []),
+      currentUser?._id || currentUser?.id,
+    );
+    return blocker ? startBlockerMessage(blocker) : '';
+  }, [t, allTasksData, currentUser]);
+
+  const handleStatus = async (status) => {
+    try {
+      await updateTaskStatus({ id, status }).unwrap();
+      enqueueSnackbar(`Task marked as ${status}`, { variant: 'success' });
+    } catch (err) {
+      enqueueSnackbar(err?.data?.message || 'Failed to update status', { variant: 'error' });
+    }
+  };
+
+  // Completion: capture feedback, then mark Done (backend auto-rates vs the estimate).
+  const confirmComplete = async () => {
+    try {
+      await updateTaskStatus({ id, status: 'Done', feedback: feedbackText }).unwrap();
+      enqueueSnackbar('Task completed', { variant: 'success' });
+      setCompleteModalOpen(false);
+    } catch (err) {
+      enqueueSnackbar(err?.data?.message || 'Failed to complete task', { variant: 'error' });
+    }
+  };
+
+  if (isLoading) {
+    return (
+      <div style={{ padding: 24 }}>
+        <Text>Loading task details...</Text>
+      </div>
+    );
+  }
+
+  if (!t) {
+    return (
+      <div style={{ padding: 24 }}>
+        <Alert type="error" message="Task not found" />
+        <Button icon={<ArrowLeftOutlined />} onClick={() => navigate('/tasks')} style={{ marginTop: 16 }}>
+          Back to Tasks
+        </Button>
+      </div>
+    );
+  }
+
+  const cardStyle = { borderRadius: 12, marginBottom: 0 };
+  // Latest mid-task switch on this task (backend switchInProgressTask) — present only on
+  // the outgoing assignee's finished portion (t.switchedOut).
+  const midSwitch = (t.switchHistory || []).filter((h) => h.stage === 'In Progress').slice(-1)[0] || null;
+
+  return (
+    <div className="page-container fade-in">
+      <PageBreadcrumb
+        items={[{ label: 'Task Management', path: '/tasks' }, { label: t.taskCode }]}
+      />
+
+      {/* Header */}
+      <Card style={{ ...cardStyle, marginBottom: 16 }} styles={{ body: { padding: '16px 20px' } }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
+          <Space size={12} wrap>
+            <Button icon={<ArrowLeftOutlined />} onClick={() => navigate('/tasks')}>Back</Button>
+            <div>
+              <Space size={8} align="center">
+                {(t.isEmergency || t.priority === 'Urgent') && <AlertFilled style={{ color: '#ff4d4f', fontSize: 16 }} />}
+                {isSample && <ExperimentOutlined style={{ color: '#722ed1', fontSize: 16 }} />}
+                <Title level={4} style={{ margin: 0 }}>{t.taskCode}</Title>
+                <Tag color={statusColor[displayStatus]}>{displayStatus}</Tag>
+                <Tag color={priorityColor[t.priority || 'Normal']}>{t.priority || 'Normal'}</Tag>
+              </Space>
+              <Text type="secondary" style={{ display: 'block', marginTop: 2 }}>{t.taskName}</Text>
+            </div>
+          </Space>
+
+          {/* Action buttons */}
+          <Space wrap>
+            {t.status === 'Pending' && (
+              <Tooltip title={startBlockMsg || undefined}>
+                <Button type="primary" icon={<PlayCircleOutlined />} disabled={!!startBlockMsg}
+                  style={startBlockMsg ? undefined : { background: '#1890ff', border: 'none' }}
+                  onClick={() => handleStatus('In Progress')}>
+                  Start Task
+                </Button>
+              </Tooltip>
+            )}
+            {t.status === 'In Progress' && (
+              <Button icon={<PauseCircleOutlined />}
+                style={{ color: '#fa8c16', borderColor: '#fa8c16' }}
+                onClick={() => handleStatus('Paused')}>
+                Pause Task
+              </Button>
+            )}
+            {t.status === 'In Progress' && (
+              <Button type="primary" icon={<CheckCircleOutlined />}
+                style={{ background: '#52c41a', border: 'none' }}
+                onClick={() => { setFeedbackText(t.feedback || ''); setCompleteModalOpen(true); }}>
+                Mark Done
+              </Button>
+            )}
+            {t.status === 'Paused' && (
+              <Tooltip title={startBlockMsg || undefined}>
+                <Button type="primary" icon={<PlayCircleOutlined />} disabled={!!startBlockMsg}
+                  style={startBlockMsg ? undefined : { background: '#1890ff', border: 'none' }}
+                  onClick={() => handleStatus('In Progress')}>
+                  Resume Task
+                </Button>
+              </Tooltip>
+            )}
+            {(t.status === 'Pending' || t.status === 'In Progress' || t.status === 'Paused' || (t.status === 'Done' && t.paymentStatus !== 'Paid' && !isCredit)) && !isSample && !t.switchedOut && (
+              <Button danger icon={<ExclamationCircleOutlined />}
+                onClick={() => { setEmergencyReason(''); setEmergencyScope('task'); setEmergencyModalOpen(true); }}>
+                {t.emergencyRequested ? 'View Emergency Status' : 'Emergency Dispatch'}
+              </Button>
+            )}
+          </Space>
+        </div>
+      </Card>
+
+      <Row gutter={[16, 16]}>
+        {/* Left column */}
+        <Col xs={24} lg={14}>
+
+          {/* Task Information */}
+          <Card title={<Text style={labelStyle}>Task Information</Text>} style={cardStyle} styles={{ body: { padding: '0 16px 16px' } }}>
+            <Descriptions bordered size="small" column={2} style={{ marginTop: 12, borderRadius: 8 }}>
+              <Descriptions.Item label="Task ID"><Text strong>{t.taskCode}</Text></Descriptions.Item>
+              <Descriptions.Item label="Type">
+                <Tag color={typeColor[t.taskType]}>{t.taskType || '—'}</Tag>
+              </Descriptions.Item>
+              <Descriptions.Item label="Priority">
+                <Tag color={priorityColor[t.priority || 'Normal']}>{t.priority || 'Normal'}</Tag>
+              </Descriptions.Item>
+              <Descriptions.Item label="Status">
+                <Tag color={statusColor[displayStatus]}>{displayStatus}</Tag>
+              </Descriptions.Item>
+              <Descriptions.Item label="Assigned To" span={2}>
+                {assigneeNameList.length
+                  ? (
+                    <Space wrap size={[12, 4]}>
+                      {assigneeNameList.map((name, i) => (
+                        <Space key={i} size={4}>
+                          <Avatar size={22} icon={<UserOutlined />} style={{ background: '#B11E6A' }} />
+                          <Text strong>{name}</Text>
+                          {i === 0 && t.assignedTo?.role && <Tag style={{ fontSize: 11 }}>{t.assignedTo.role}</Tag>}
+                        </Space>
+                      ))}
+                    </Space>
+                  )
+                  : <Text strong>Unassigned</Text>}
+              </Descriptions.Item>
+              {t.printingType && (
+                <Descriptions.Item label="Printing Type">{t.printingType}</Descriptions.Item>
+              )}
+              {t.startedAt && (
+                <Descriptions.Item label="Started">
+                  {new Date(t.startedAt).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })}
+                </Descriptions.Item>
+              )}
+              {t.completedAt && (
+                <Descriptions.Item label="Completed">
+                  {new Date(t.completedAt).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })}
+                </Descriptions.Item>
+              )}
+              {t.description && (
+                <Descriptions.Item label="Description" span={2}>{t.description}</Descriptions.Item>
+              )}
+            </Descriptions>
+            {t.switchedOut && (
+              <Alert
+                type="info"
+                showIcon
+                icon={<SwapOutlined />}
+                style={{ marginTop: 12, borderRadius: 8 }}
+                message="Switched mid-way"
+                description={(
+                  <Space direction="vertical" size={4}>
+                    <Text style={{ fontSize: 12 }}>
+                      {midSwitch?.fromName || 'Previous assignee'} completed {t.qty} of {t.originalQty ?? midSwitch?.totalQty ?? '—'} units
+                      {midSwitch?.at ? ` · switched ${new Date(midSwitch.at).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })}` : ''}
+                      {midSwitch?.byName ? ` by ${midSwitch.byName}` : ''}.
+                      {' '}Remaining {midSwitch?.remainingQty ?? '—'} moved to {midSwitch?.toName || 'another assignee'}.
+                    </Text>
+                    {t.switchedToTask && (
+                      <Button size="small" icon={<SwapOutlined />} onClick={() => navigate(`/tasks/${t.switchedToTask}`)}>
+                        Open {t.switchedToTaskCode || 'continuation task'}
+                      </Button>
+                    )}
+                  </Space>
+                )}
+              />
+            )}
+            {t.switchedFromTask && (
+              <Alert
+                type="info"
+                showIcon
+                icon={<SwapOutlined />}
+                style={{ marginTop: 12, borderRadius: 8 }}
+                message={`Continued from ${t.switchedFromTaskCode || 'an earlier task'}`}
+                description={(
+                  <Space direction="vertical" size={4}>
+                    <Text style={{ fontSize: 12 }}>This task holds the remaining units after a mid-task switch — its time and rating are tracked separately from the earlier portion.</Text>
+                    <Button size="small" icon={<SwapOutlined />} onClick={() => navigate(`/tasks/${t.switchedFromTask}`)}>
+                      Open {t.switchedFromTaskCode || 'earlier task'}
+                    </Button>
+                  </Space>
+                )}
+              />
+            )}
+          </Card>
+
+          {/* Time & Performance */}
+          {(t.estimatedDurationSec > 0 || t.actualDurationSec > 0 || t.rating != null || liveWorkedSec > 0) && (
+            <Card
+              title={<Text style={labelStyle}><FieldTimeOutlined /> Time &amp; Performance</Text>}
+              style={{ ...cardStyle, marginTop: 16 }}
+              styles={{ body: { padding: 16 } }}
+            >
+              {(t.status === 'In Progress' || t.status === 'Paused') && (
+                <Tag color={t.status === 'In Progress' ? 'processing' : 'warning'} icon={t.status === 'In Progress' ? <ClockCircleOutlined /> : <PauseCircleOutlined />} style={{ marginBottom: 12 }}>
+                  {t.status === 'In Progress' ? 'Timer running' : 'Timer paused'}
+                </Tag>
+              )}
+              <Row gutter={[16, 16]}>
+                {t.estimatedDurationSec > 0 && (
+                  <Col xs={8}>
+                    <Statistic title="Estimated" value={secToHuman(t.estimatedDurationSec)} valueStyle={{ fontSize: 18, color: '#7c3aed' }} />
+                  </Col>
+                )}
+                {t.status === 'Done' && t.actualDurationSec > 0 ? (
+                  <Col xs={8}>
+                    <Statistic title="Actual" value={secToHuman(t.actualDurationSec)} valueStyle={{ fontSize: 18, color: '#B11E6A' }} />
+                  </Col>
+                ) : (t.status === 'In Progress' || t.status === 'Paused') && liveWorkedSec > 0 && (
+                  <Col xs={8}>
+                    <Statistic title="Worked (so far)" value={secToHuman(liveWorkedSec)} valueStyle={{ fontSize: 18, color: '#B11E6A' }} />
+                  </Col>
+                )}
+                {t.pausedDurationSec > 0 && (
+                  <Col xs={8}>
+                    <Statistic title="Paused Time" value={secToHuman(t.pausedDurationSec)} valueStyle={{ fontSize: 18, color: '#fa8c16' }} />
+                  </Col>
+                )}
+                {t.efficiencyPct != null && (
+                  <Col xs={8}>
+                    <Statistic title="Efficiency" value={t.efficiencyPct} suffix="%" valueStyle={{ fontSize: 18, color: t.efficiencyPct >= 100 ? '#52c41a' : '#fa8c16' }} />
+                  </Col>
+                )}
+              </Row>
+              {t.rating != null && (
+                <>
+                  <Divider style={{ margin: '14px 0' }} />
+                  <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                    <Space align="center" wrap>
+                      <Text type="secondary" style={{ fontSize: 12 }}>Performance rating:</Text>
+                      <Rate disabled allowHalf value={t.rating} style={{ color: ratingColor(t.rating) }} />
+                      <Tag color={ratingColor(t.rating)} style={{ marginInlineStart: 4 }}>{ratingLabel(t.rating)}</Tag>
+                    </Space>
+                    {t.ratingReason && <Text type="secondary" style={{ fontSize: 12 }}>{t.ratingReason}</Text>}
+                  </Space>
+                </>
+              )}
+              {t.feedback && (
+                <Alert type="info" showIcon style={{ marginTop: 12, borderRadius: 8 }} message="Feedback" description={t.feedback} />
+              )}
+            </Card>
+          )}
+
+          {/* Task Timeline — every Start/Pause/Resume/Completion event, timestamped */}
+          {t.timeline?.length > 0 && (
+            <Card
+              title={<Text style={labelStyle}><FieldTimeOutlined /> Task Timeline</Text>}
+              style={{ ...cardStyle, marginTop: 16 }}
+              styles={{ body: { padding: '16px 20px' } }}
+            >
+              <Timeline
+                items={t.timeline.map((ev, i) => ({
+                  key: i,
+                  color: timelineColor[ev.event] || 'gray',
+                  dot: timelineIcon[ev.event],
+                  children: (
+                    <Space direction="vertical" size={0}>
+                      <Text strong>{ev.event}</Text>
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        {ev.at ? new Date(ev.at).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }) : '—'}
+                        {ev.byName ? ` · ${ev.byName}` : ''}
+                      </Text>
+                    </Space>
+                  ),
+                }))}
+              />
+            </Card>
+          )}
+
+          {/* Sub-tasks */}
+          {t.subTasks?.length > 0 && (
+            <Card
+              title={<Text style={labelStyle}>Sub-tasks</Text>}
+              style={{ ...cardStyle, marginTop: 16 }}
+              styles={{ body: { padding: '0 16px 16px' } }}
+            >
+              <Table
+                dataSource={t.subTasks.map((s, i) => ({ ...s, key: i }))}
+                pagination={false}
+                size="small"
+                style={{ marginTop: 12, borderRadius: 8, overflow: 'hidden' }}
+                columns={[
+                  { title: 'Sub-task', dataIndex: 'label', render: (v) => <Text strong>{v || '—'}</Text> },
+                  { title: 'Qty', dataIndex: 'qty', render: (v) => v ? v.toLocaleString() : '—' },
+                  {
+                    title: 'Assigned To', dataIndex: 'assigneeName',
+                    render: (v) => v
+                      ? <Space size={4}><Avatar size={16} icon={<UserOutlined />} style={{ background: '#B11E6A' }} />{v}</Space>
+                      : <Text type="secondary">—</Text>,
+                  },
+                  {
+                    title: 'Status', dataIndex: 'done',
+                    render: (v) => v
+                      ? <Tag color="success" icon={<CheckCircleOutlined />}>Done</Tag>
+                      : <Tag color="processing" icon={<ClockCircleOutlined />}>Pending</Tag>,
+                  },
+                ]}
+              />
+            </Card>
+          )}
+
+          {/* Other tasks on the same order */}
+          {siblingTasks.length > 0 && (
+            <Card
+              title={
+                <Space>
+                  <Text style={labelStyle}>Other Tasks on this Order</Text>
+                  {pendingCount > 0 && <Tag color="warning">{pendingCount} Pending / In Progress</Tag>}
+                  {doneCount > 0 && <Tag color="success">{doneCount} Completed</Tag>}
+                </Space>
+              }
+              style={{ ...cardStyle, marginTop: 16 }}
+              styles={{ body: { padding: '0 16px 16px' } }}
+            >
+              <Table
+                dataSource={siblingTasks}
+                pagination={false}
+                size="small"
+                style={{ marginTop: 12, borderRadius: 8, overflow: 'hidden' }}
+                onRow={(r) => ({ onClick: () => navigate(`/tasks/${r.key}`) })}
+                columns={[
+                  {
+                    title: 'Task ID', dataIndex: 'id',
+                    render: (v, r) => (
+                      <Button type="link" style={{ color: '#B11E6A', padding: 0, fontWeight: 700 }}
+                        onClick={(e) => { e.stopPropagation(); navigate(`/tasks/${r.key}`); }}>
+                        {v}
+                      </Button>
+                    ),
+                  },
+                  { title: 'Type', dataIndex: 'type', render: (v) => <Tag color={typeColor[v]} style={{ fontSize: 11 }}>{v}</Tag> },
+                  { title: 'Product', dataIndex: 'product' },
+                  {
+                    title: 'Assigned To', dataIndex: 'assignee',
+                    render: (v) => v && v !== '—'
+                      ? <Space size={4}><Avatar size={16} icon={<UserOutlined />} style={{ background: '#B11E6A' }} />{v}</Space>
+                      : <Text type="secondary" style={{ fontSize: 11 }}>Unassigned</Text>,
+                  },
+                  { title: 'Status', dataIndex: 'status', render: (v) => <Tag color={statusColor[v]} style={{ fontSize: 11 }}>{v}</Tag> },
+                  { title: 'Due', dataIndex: 'due' },
+                ]}
+              />
+            </Card>
+          )}
+        </Col>
+
+        {/* Right column */}
+        <Col xs={24} lg={10}>
+
+          {/* Order Details */}
+          {t.orderId && (
+            <Card title={<Text style={labelStyle}>Order Details</Text>} style={cardStyle} styles={{ body: { padding: '0 16px 16px' } }}>
+              <Descriptions bordered size="small" column={1} style={{ marginTop: 12, borderRadius: 8 }}>
+                <Descriptions.Item label="Order ID">
+                  <Text strong style={{ color: '#B11E6A' }}>{t.orderId.orderCode}</Text>
+                </Descriptions.Item>
+                <Descriptions.Item label="Hotel / Client">
+                  <Text strong>{t.orderId.clientName || t.clientName || '—'}</Text>
+                </Descriptions.Item>
+                <Descriptions.Item label="Logo">
+                  {(t.orderId.logoUrl || t.orderId.leadId?.hotelLogoUrl)
+                    ? <LogoThumb url={t.orderId.logoUrl || t.orderId.leadId.hotelLogoUrl} size={48} radius={8} />
+                    : <Text type="secondary">—</Text>}
+                </Descriptions.Item>
+                <Descriptions.Item label="This Task's Product">
+                  {t.product || '—'}
+                </Descriptions.Item>
+                <Descriptions.Item label="Quantity">
+                  {(t.qty ?? 0).toLocaleString()} units
+                  {t.switchedOut && t.originalQty != null && (
+                    <Text type="secondary" style={{ fontSize: 12 }}> (of {Number(t.originalQty).toLocaleString()} — rest switched)</Text>
+                  )}
+                </Descriptions.Item>
+                {t.orderId.expectedDeliveryDate && (
+                  <Descriptions.Item label="Expected Delivery">
+                    {t.orderId.expectedDeliveryDate.slice(0, 10)}
+                  </Descriptions.Item>
+                )}
+                {t.orderId.status && (
+                  <Descriptions.Item label="Order Status">
+                    <Tag color="processing">{t.orderId.status}</Tag>
+                  </Descriptions.Item>
+                )}
+                <Descriptions.Item label="Payment">
+                  {t.paymentStatus
+                    ? <Tag color={paymentColor[t.paymentStatus]}>{creditPayLabel(t.paymentStatus, isCredit)}</Tag>
+                    : 'N/A'}
+                </Descriptions.Item>
+              </Descriptions>
+
+              {/* All products in this order */}
+              {t.orderId.items?.length > 0 && (
+                <div style={{ marginTop: 12 }}>
+                  <Text style={{ fontSize: 12, color: '#888', display: 'block', marginBottom: 6 }}>
+                    All products in this order
+                  </Text>
+                  <Table
+                    dataSource={t.orderId.items.map((it, i) => ({ ...it, key: i }))}
+                    pagination={false}
+                    size="small"
+                    style={{ borderRadius: 8, overflow: 'hidden' }}
+                    columns={[
+                      {
+                        title: 'Product', dataIndex: 'itemName',
+                        render: (v, r) => (
+                          <Space size={4}>
+                            {v === t.product && <Tag color="#B11E6A" style={{ fontSize: 10, padding: '0 4px' }}>This task</Tag>}
+                            <Text strong={v === t.product}>{v || '—'}</Text>
+                          </Space>
+                        ),
+                      },
+                      { title: 'Qty', dataIndex: 'qty', render: (v) => v ? v.toLocaleString() : '—' },
+                      { title: 'Logo', dataIndex: 'logoType', render: (v) => v ? <Tag style={{ fontSize: 10 }}>{v}</Tag> : '—' },
+                    ]}
+                  />
+                </div>
+              )}
+            </Card>
+          )}
+
+          {/* Product Details (Brand / Packing Material / Material Category) */}
+          {t.productDetails && (
+            t.productDetails.brand || t.productDetails.packingMaterial
+            || t.productDetails.materialCategory || t.productDetails.category
+            || t.productDetails.unit || t.productDetails.size || t.productDetails.hsnCode
+          ) && (
+            <Card
+              title={<Text style={labelStyle}>Product Details</Text>}
+              style={{ ...cardStyle, marginTop: t.orderId ? 16 : 0 }}
+              styles={{ body: { padding: '0 16px 16px' } }}
+            >
+              <Descriptions bordered size="small" column={1} style={{ marginTop: 12, borderRadius: 8 }}>
+                <Descriptions.Item label="Product">
+                  <Text strong>{t.product || t.productDetails.itemName || '—'}</Text>
+                </Descriptions.Item>
+                <Descriptions.Item label="Brand">
+                  {t.productDetails.brand
+                    ? <Tag color="#B11E6A">{t.productDetails.brand}</Tag>
+                    : <Text type="secondary">—</Text>}
+                </Descriptions.Item>
+                <Descriptions.Item label="Packing Material">
+                  {t.productDetails.packingMaterial
+                    ? <Tag color="#C94F8A">{t.productDetails.packingMaterial}</Tag>
+                    : <Text type="secondary">—</Text>}
+                </Descriptions.Item>
+                <Descriptions.Item label="Material Category">
+                  {t.productDetails.materialCategory
+                    ? <Tag color="#D85C9E">{t.productDetails.materialCategory}</Tag>
+                    : <Text type="secondary">—</Text>}
+                </Descriptions.Item>
+                {t.productDetails.size && (
+                  <Descriptions.Item label="Size">{t.productDetails.size}</Descriptions.Item>
+                )}
+                {t.productDetails.unit && (
+                  <Descriptions.Item label="Unit">{t.productDetails.unit}</Descriptions.Item>
+                )}
+                {t.productDetails.hsnCode && (
+                  <Descriptions.Item label="HSN Code">{t.productDetails.hsnCode}</Descriptions.Item>
+                )}
+              </Descriptions>
+              {t.productDetails.source === 'order' && (
+                <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 8 }}>
+                  Shown from order line item — product not found in inventory master.
+                </Text>
+              )}
+            </Card>
+          )}
+
+          {/* Alerts */}
+          <div style={{ marginTop: t.orderId ? 16 : 0, display: 'flex', flexDirection: 'column', gap: 12 }}>
+            {t.orderId?.orderCategory !== 'SAMPLE' && t.orderId?.leadId?.leadType !== 'SAMPLE'
+              && t.status === 'Done' && !t.switchedOut && (t.paymentStatus || 'Pending') !== 'Paid' && (
+              <Alert type="warning" showIcon icon={<BellOutlined />}
+                message="Sales Follow-up Required"
+                description={`${t.assignedTo?.fullName || t.assigneeName || 'Sales person'} should contact ${t.orderId?.clientName || t.clientName || 'client'} regarding payment.`}
+                style={{ borderRadius: 8 }}
+              />
+            )}
+            {displayStatus === 'Completed' && !isSample && !isCredit && !t.switchedOut && t.paymentStatus && t.paymentStatus !== 'Paid' && (
+              <Alert type="error" showIcon icon={<ExclamationCircleOutlined />}
+                message="Dispatch Blocked — Payment Pending"
+                description={`Payment status: "${t.paymentStatus}". Dispatch requires full payment or Emergency Dispatch approval.`}
+                style={{ borderRadius: 8 }}
+              />
+            )}
+            {displayStatus === 'Completed' && !isSample && isCredit && !t.switchedOut && t.paymentStatus && t.paymentStatus !== 'Paid' && (
+              <Alert type="info" showIcon
+                message="Credit Payment — Dispatch Allowed"
+                description={`Payment status: "${creditPayLabel(t.paymentStatus, true)}". Credit terms — dispatch doesn't wait for payment or Emergency Dispatch approval. Collect payment by the credit due date.`}
+                style={{ borderRadius: 8 }}
+              />
+            )}
+            {t.isEmergency && (
+              <Alert type={t.emergencyApproved ? 'success' : 'error'} showIcon icon={<AlertFilled />}
+                message={t.emergencyApproved ? 'Emergency Dispatch Approved' : t.emergencyRequested ? 'Emergency Dispatch — Pending Approvals' : 'Emergency — Awaiting Approval'}
+                description={
+                  t.emergencyApproved
+                    ? 'Both Sales Head and Ops Head have approved. Emergency dispatch can proceed immediately.'
+                    : t.emergencyRequested
+                    ? `Sales Head: ${t.emergencySalesApproved ? 'Approved ✓' : 'Pending — go to Sales page'} | Ops Head: ${t.emergencyOpsApproved ? 'Approved ✓' : t.emergencySalesApproved ? 'Pending — go to Operations page' : 'Locked until Sales Head approves'}`
+                    : 'Awaiting Sales Head + Operations Head dual approval.'
+                }
+                style={{ borderRadius: 8 }}
+              />
+            )}
+          </div>
+        </Col>
+      </Row>
+
+      {/* ── Complete Task Modal (rating + feedback) ───────────────────────── */}
+      <Modal
+        title={<Space><CheckCircleOutlined style={{ color: '#52c41a' }} /><span>Complete Task</span></Space>}
+        open={completeModalOpen}
+        onCancel={() => setCompleteModalOpen(false)}
+        onOk={confirmComplete}
+        okText="Mark Done"
+        okButtonProps={{ style: { background: '#52c41a', border: 'none' } }}
+        width={Math.min(480, window.innerWidth - 32)}
+      >
+        {(() => {
+          const estSec = t.estimatedDurationSec || 0;
+          const actualSec = t.startedAt
+            ? Math.max(0, Math.round((Date.now() - new Date(t.startedAt).getTime()) / 1000) - (t.pausedDurationSec || 0))
+            : 0;
+          const preview = ratingFromDurations(estSec, actualSec);
+          return (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginTop: 8 }}>
+              <Row gutter={16}>
+                <Col xs={12}><Statistic title="Estimated" value={estSec > 0 ? secToHuman(estSec) : '—'} valueStyle={{ fontSize: 18, color: '#7c3aed' }} /></Col>
+                <Col xs={12}><Statistic title="Actual (so far)" value={actualSec > 0 ? secToHuman(actualSec) : '—'} valueStyle={{ fontSize: 18, color: '#B11E6A' }} /></Col>
+              </Row>
+              {preview.rating != null ? (
+                <Alert
+                  type={preview.rating >= 3.5 ? 'success' : preview.rating >= 2.5 ? 'warning' : 'error'}
+                  showIcon
+                  message={(
+                    <Space>
+                      <Rate disabled allowHalf value={preview.rating} style={{ fontSize: 16, color: ratingColor(preview.rating) }} />
+                      <Text strong>{ratingLabel(preview.rating)}</Text>
+                    </Space>
+                  )}
+                  description={preview.ratingReason}
+                  style={{ borderRadius: 8 }}
+                />
+              ) : (
+                <Alert type="info" showIcon style={{ borderRadius: 8 }}
+                  message="No automatic rating"
+                  description="This task has no configured time estimate, so a rating can't be auto-calculated." />
+              )}
+              <div>
+                <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>Feedback (optional)</Text>
+                <Input.TextArea rows={3} value={feedbackText} onChange={(e) => setFeedbackText(e.target.value)}
+                  placeholder="Notes on quality, issues, or anything worth recording" />
+              </div>
+            </div>
+          );
+        })()}
+      </Modal>
+
+      {/* ── Emergency Dispatch Modal ─────────────────────────────────────── */}
+      <Modal
+        title={<Space><ExclamationCircleOutlined style={{ color: '#f5222d' }} /><span>Emergency Dispatch</span></Space>}
+        open={emergencyModalOpen}
+        onCancel={() => setEmergencyModalOpen(false)}
+        width={Math.min(560, window.innerWidth - 32)}
+        footer={null}
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginTop: 8 }}>
+          <Alert type="warning" showIcon
+            message="Payment Pending — Emergency Dispatch Required"
+            description="This order is complete but payment has not been received. Emergency dispatch allows immediate delivery and requires approval from Sales Head followed by Operations Head."
+            style={{ borderRadius: 8 }}
+          />
+
+          {/* Order summary */}
+          <Descriptions bordered size="small" column={2} style={{ borderRadius: 8 }}>
+            <Descriptions.Item label="Task ID"><span style={{ color: '#B11E6A', fontWeight: 700 }}>{t.taskCode}</span></Descriptions.Item>
+            <Descriptions.Item label="Order">{t.orderId?.orderCode || '—'}</Descriptions.Item>
+            <Descriptions.Item label="Client">{t.orderId?.clientName || t.clientName || '—'}</Descriptions.Item>
+            <Descriptions.Item label="Product">{t.product || '—'}</Descriptions.Item>
+            <Descriptions.Item label="Payment Status"><Tag color="warning">{creditPayLabel(t.paymentStatus || 'Pending', isCredit)}</Tag></Descriptions.Item>
+            <Descriptions.Item label="Task Status"><Tag color="processing">{displayStatus}</Tag></Descriptions.Item>
+          </Descriptions>
+
+          {!t.emergencyRequested ? (
+            <>
+              <Divider style={{ margin: '4px 0' }} />
+              <Typography.Text type="secondary" style={{ fontSize: 13 }}>
+                After submitting, this request will be sent to the <strong>Sales Head</strong> (via Sales page) and then to the <strong>Operations Head</strong> (via Operations page) for sequential approval.
+              </Typography.Text>
+              <div>
+                <Typography.Text strong style={{ display: 'block', marginBottom: 6, fontSize: 13 }}>Apply Emergency Dispatch To</Typography.Text>
+                <Radio.Group value={emergencyScope} onChange={(e) => setEmergencyScope(e.target.value)}>
+                  <Space direction="vertical">
+                    <Radio value="task">This product/kit only — {t.product || t.taskName}</Radio>
+                    <Radio value="order">Full order — all {siblingTasks.length + 1} product/kit task(s) on Order {t.orderId?.orderCode || '—'}</Radio>
+                  </Space>
+                </Radio.Group>
+              </div>
+              <Input.TextArea
+                rows={3}
+                placeholder="Reason for emergency dispatch (required)..."
+                value={emergencyReason}
+                onChange={(e) => setEmergencyReason(e.target.value)}
+                style={{ borderRadius: 8 }}
+              />
+              <Button
+                type="primary" danger
+                loading={requesting || requestingOrder}
+                disabled={!emergencyReason.trim()}
+                onClick={async () => {
+                  try {
+                    if (emergencyScope === 'order' && orderId) {
+                      const result = await requestEmergencyDispatchForOrder({ orderId, reason: emergencyReason }).unwrap();
+                      enqueueSnackbar(`Emergency dispatch requested for ${result?.data?.length || 'all'} task(s) on this order — awaiting Sales Head approval`, { variant: 'success' });
+                    } else {
+                      await requestEmergencyDispatch({ id, reason: emergencyReason }).unwrap();
+                      enqueueSnackbar('Emergency dispatch requested — awaiting Sales Head approval', { variant: 'success' });
+                    }
+                    setEmergencyModalOpen(false);
+                    setEmergencyReason('');
+                  } catch (err) {
+                    enqueueSnackbar(err?.data?.message || 'Failed to request emergency dispatch', { variant: 'error' });
+                  }
+                }}
+              >
+                Request Emergency Dispatch
+              </Button>
+            </>
+          ) : (
+            <>
+              <Divider style={{ margin: '4px 0' }} />
+              <Typography.Text strong style={{ display: 'block', marginBottom: 4 }}>Approval Progress</Typography.Text>
+              {t.emergencyReason && (
+                <Alert type="info" showIcon message={`Reason: ${t.emergencyReason}`} style={{ borderRadius: 8, marginBottom: 4 }} />
+              )}
+              <Steps
+                direction="vertical"
+                size="small"
+                current={t.emergencyApproved ? 2 : t.emergencySalesApproved ? 1 : 0}
+                items={[
+                  {
+                    title: 'Sales Head Approval',
+                    description: t.emergencySalesApproved
+                      ? 'Approved — Sales Head has authorized emergency dispatch'
+                      : 'Pending — Sales Head must approve in the Sales page',
+                    status: t.emergencySalesApproved ? 'finish' : 'process',
+                  },
+                  {
+                    title: 'Operations Head Approval',
+                    description: t.emergencyOpsApproved
+                      ? 'Approved — Ops Head has authorized emergency dispatch'
+                      : t.emergencySalesApproved
+                      ? 'Pending — Ops Head must approve in the Operations page'
+                      : 'Locked — awaiting Sales Head approval first',
+                    status: t.emergencyOpsApproved ? 'finish' : t.emergencySalesApproved ? 'process' : 'wait',
+                  },
+                  {
+                    title: 'Emergency Dispatch Authorized',
+                    description: t.emergencyApproved ? 'Both approvals received — proceed with dispatch immediately' : 'Waiting for both approvals',
+                    status: t.emergencyApproved ? 'finish' : 'wait',
+                  },
+                ]}
+              />
+              {t.emergencyApproved && (
+                <Alert type="success" showIcon message="Emergency dispatch fully approved. Proceed immediately." style={{ borderRadius: 8 }} />
+              )}
+            </>
+          )}
+        </div>
+      </Modal>
+    </div>
+  );
+}

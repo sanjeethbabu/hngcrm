@@ -1,0 +1,2123 @@
+import React, { useState, useMemo } from 'react';
+import { useCloudinaryUpload } from '../../hooks/useCloudinaryUpload';
+import { useNavigate } from 'react-router-dom';
+import {
+  Row, Col, Card, Table, Tag, Button, Modal, Form, Input, Typography, Space,
+  Descriptions, Alert, Select, Tabs, Divider, Collapse, Upload, InputNumber, DatePicker,
+} from 'antd';
+import { enqueueSnackbar } from 'notistack';
+import {
+  CarOutlined, CheckCircleOutlined, UploadOutlined, EyeOutlined,
+  SearchOutlined, PrinterOutlined, SaveOutlined, EditOutlined,
+  InboxOutlined, FilterOutlined, GlobalOutlined,
+  ExportOutlined, WalletOutlined, UserOutlined,
+  PhoneOutlined, FileTextOutlined, DollarCircleOutlined,
+  AlertFilled, ExperimentOutlined, CalendarOutlined,
+  GiftOutlined, AppstoreOutlined, ThunderboltFilled, ClockCircleOutlined,
+} from '@ant-design/icons';
+import { useSelector } from 'react-redux';
+import { motion } from 'framer-motion';
+import PageBreadcrumb from '../../components/common/PageBreadcrumb';
+import useTabAccess from '../../hooks/useTabAccess';
+import usePageAccess from '../../hooks/usePageAccess';
+import useDebouncedValue from '../../hooks/useDebouncedValue';
+import { buildDispatchGroupedProducts, summarizeDispatchVerification } from '../../utils/dispatchGrouping';
+import { isCreditTerms, creditPayLabel } from '../../utils/creditPayment';
+import {
+  useGetDispatchesQuery,
+  useGetTodaysDispatchesQuery,
+  useGetPendingDispatchesQuery,
+  useGetDispatchStatsQuery,
+  useGetCompanySettingsQuery,
+  useUploadDispatchLRMutation,
+  useConfirmDispatchMutation,
+  useGetTransportsQuery,
+  useGetPickupOrdersQuery,
+  useGetTodaysPickupOrdersQuery,
+  useUpdatePickupOrderMutation,
+  useUpdateTransportStatusMutation,
+  useGetUsersQuery,
+} from '../../store/api/apiSlice';
+
+const { Title, Text } = Typography;
+const { Option } = Select;
+
+// All dispatch orders loaded from API
+
+const statusColor = {
+  'Ready to Dispatch': '#C94F8A',
+  'Partially Dispatched': '#d97706',
+  'Payment Pending': '#D85C9E',
+  'Dispatched': '#6b1240',
+  'Packing': '#B11E6A',
+};
+
+// Transport data loaded from API
+
+
+// LR parsing handled by AI scan API
+
+// Who bears the freight/transport cost — Order.transportationBy ('CLIENT' | 'HNG'), set on
+// the Sales "Transport Cost Scope" field. Same Client/HNG tag styling as the Dispatch Detail
+// page's "Transport Cost Scope" field, just relabeled here to match how Dispatch reads it.
+const renderTransportPaidBy = (v) => {
+  if (!v) return <Text type="secondary" style={{ fontSize: 13 }}>—</Text>;
+  return (
+    <Tag color={v === 'HNG' ? 'purple' : 'blue'} style={{ borderRadius: 20, fontSize: 12 }}>
+      {v === 'CLIENT' ? 'Client' : v}
+    </Tag>
+  );
+};
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+const isToday = (dateStr) => {
+  const d = new Date(dateStr);
+  const now = new Date();
+  return d.getDate() === now.getDate() && d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
+};
+
+// Order.destination is a legacy field that's almost never populated now that Lead/Order
+// carry a dedicated shipping address (shippingCity/shippingState) — reading it directly
+// left the Destination column blank for most orders. Compose from the shipping address
+// first (falling back to the billing city/state, then the legacy destination field).
+const resolveDestination = (o) => {
+  const city = o?.shippingCity || o?.city;
+  const state = o?.shippingState || o?.state;
+  if (city && state) return `${city}, ${state}`;
+  return city || state || o?.destination || '—';
+};
+
+const fmtDate = (v) => (v ? new Date(v).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '—');
+const fmtDateTime = (v) => (v ? new Date(v).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }) : '—');
+const fmtMoney = (v) => `₹${(Number(v) || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
+
+// Tentative delivery date, red + "Overdue" once it's in the past.
+const renderDeliveryDate = (v) => {
+  if (!v) return <Text type="secondary" style={{ fontSize: 13 }}>—</Text>;
+  const date = new Date(v);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const isOverdue = date < today;
+  return (
+    <Space direction="vertical" size={0}>
+      <Text strong style={{ fontSize: 13, color: isOverdue ? '#ff4d4f' : '#2e7d32' }}>{fmtDate(v)}</Text>
+      {isOverdue && <Tag color="red" style={{ fontSize: 10, lineHeight: '14px' }}>Overdue</Tag>}
+    </Space>
+  );
+};
+
+// `r` is the table row — normalized dispatch rows carry isCredit, /dispatch/stats rows carry the
+// raw paymentTerms. Credit orders read e.g. "Pending (Credit Payment)" (display only — `v` is
+// still what the Payment filters / Payment Pending card match on).
+const renderPaymentTag = (v, r) => {
+  if (v === 'N/A') return <Tag color="default" style={{ borderRadius: 20, fontSize: 13, fontWeight: 600 }}>N/A</Tag>;
+  const c = v === 'Paid' ? '#2e7d32' : v === 'Partial' ? '#c77700' : '#B11E6A';
+  const isCredit = !!r && (r.isCredit || isCreditTerms(r.paymentTerms));
+  return <Tag style={{ borderRadius: 20, fontSize: 13, background: `${c}22`, color: c, border: `1px solid ${c}44`, whiteSpace: 'normal' }}>{creditPayLabel(v, isCredit)}</Tag>;
+};
+
+// Header stat cards. Each one's count AND its click-through list come from the same
+// /dispatch/stats rows via `match`, so the number on a card always equals the rows its modal lists.
+// `columns` picks from the stat modal's column set (statCols in the component) — each list
+// shows what matters for that card (emergency split, approver, amount due, dispatch time…).
+// `sumDue` adds a "Total due" figure above the list.
+const STAT_CARDS = [
+  {
+    key: 'emergency', label: 'Emergency Orders', color: '#ff4d4f', match: (r) => r.isEmergency,
+    hint: 'Orders with an urgent / emergency delivery split — dispatch the emergency quantity first, the rest on the tentative date.',
+    columns: ['order', 'client', 'destination', 'emergencyItems', 'deliveryDate', 'status', 'payment', 'salesPerson'],
+  },
+  {
+    key: 'emergencyDispatch', label: 'Emergency Dispatch', color: '#fa8c16', match: (r) => r.emergencyApproved,
+    hint: 'Sales Head + Ops Head approved dispatching these orders even though payment is not complete.',
+    columns: ['order', 'client', 'approval', 'reason', 'payment', 'balance', 'status', 'salesPerson'],
+    sumDue: true,
+  },
+  {
+    key: 'readyToDispatch', label: 'Ready to Dispatch', color: '#B11E6A', match: (r) => r.status === 'Ready to Dispatch',
+    hint: 'Packing verified and confirmed — waiting to go out.',
+    columns: ['order', 'client', 'destination', 'deliveryDate', 'boxes', 'payment', 'salesPerson'],
+  },
+  {
+    key: 'packing', label: 'Packing in Progress', color: '#8a1652', match: (r) => r.status === 'Packing',
+    hint: 'Still being packed / verified — no dispatch round confirmed yet.',
+    columns: ['order', 'client', 'destination', 'createdAt', 'deliveryDate', 'payment', 'salesPerson'],
+  },
+  {
+    key: 'dispatchedToday', label: 'Dispatched Today', color: '#C94F8A', match: (r) => r.dispatchedToday,
+    hint: 'At least one dispatch round confirmed or finished today.',
+    columns: ['order', 'client', 'destination', 'dispatchedAt', 'transport', 'invoice', 'payment'],
+  },
+  {
+    key: 'paymentPending', label: 'Payment Pending', color: '#D85C9E', match: (r) => r.payment === 'Pending',
+    hint: 'No payment received yet against these orders (sample orders excluded).',
+    columns: ['order', 'client', 'balance', 'paymentTerms', 'status', 'deliveryDate', 'salesPerson'],
+    sumDue: true,
+  },
+];
+
+// "Urgent / Emergency Deliveries (Partial)" split, keyed per target (lowercase product
+// name, the literal '__kit__' composite key standing in for the Personalized Kit header
+// itself, or `__sepkit__:<kitId>` for a standalone Separate Kit header) → { emergencyQty,
+// totalQty }. Mirrors Dispatch Detail's emergencyByTarget so the Dispatch Orders list's
+// expanded product panel can show the same "N of M units are emergency — dispatch first
+// as Partial, rest later as Full" breakdown, not just the Detail page.
+//
+// Sales' emergency dropdown (see buildEmergencySelectionOptions in Sales/index.jsx) saves
+// '__personalized__' / '__sepkit__:<kitId>' as the splitDate's product value (the legacy
+// '__kit__' sentinel is only still interpreted for records saved before that rename). Both
+// must be EXPANDED here — a Personalized Kit's real component items (Paste/Brush, matched
+// by name below) and any Separate Product/Kit partially bundled into it (via
+// packagingIncludes) each need their OWN entry so their own row gets the right badge, not
+// just the kit header. A bundled row's contribution is capped at packagingIncludesQty (the
+// bundled portion) rather than its full order qty — a Separate Product ordered at 20 with
+// only 5 packed into the kit must show 5, not 20, as emergency purely because the kit
+// bundling it is fully emergency (mirrors the Operations/data.js getEmergencyProductQtyMap
+// fix for the same bug).
+// Marks which map keys represent a RAW splitDates entry (a kit header composite key, or a
+// plain product-name entry) vs. one produced by expanding a kit into its components/bundled
+// rows — attached to the returned map so callers can sum "total emergency units in this
+// order" from ONLY the raw entries (`map.topLevelKeys`), never double-counting a kit header
+// together with the very components it was expanded into.
+const buildEmergencyByTarget = (splitDates, kitOverallQty, orderItems, kitOrders, packagingIncludes, packagingIncludesQty) => {
+  const map = new Map();
+  const topLevelKeys = new Set();
+  const rawItems = orderItems || [];
+
+  const kitCfgById = new Map((kitOrders || []).filter((k) => k?.kitId).map((k) => [String(k.kitId), k]));
+  const includeSet = new Set((packagingIncludes || []).map(String));
+  const piQty = packagingIncludesQty || {};
+  const isBundled = (it) => includeSet.has(String(it.kitId)) || includeSet.has(String(it.name || it.itemName || it.product));
+  const bundledQtyFor = (it) => {
+    const key = it.kitId ? String(it.kitId) : String(it.name || it.itemName || it.product);
+    return includeSet.has(key) ? (Number(piQty[key]) || 0) : null;
+  };
+  const resolveKitCount = (it) => Number(kitCfgById.get(String(it.kitId))?.overallQty) || Number(kitOverallQty) || 0;
+  const effectiveQty = (it) => {
+    if (!(it.isKit || it.kitType)) return Number(it.qty) || 0;
+    const perUnit = Number(it.qty) || 0;
+    const count = resolveKitCount(it);
+    return count > 0 ? perUnit * count : (Number(it.overallQty) || perUnit || 0);
+  };
+
+  // Name -> TRUE total qty (not the per-kit ratio a kit component's own `.qty` stores) —
+  // must use effectiveQty here, or a component like Brush (2/kit) shows totalQty=2 instead
+  // of its real 10-of-10-kits total, making its informational badge read as "5 of 2".
+  const itemQtyByName = new Map();
+  rawItems.forEach((it) => {
+    const key = (it.product || it.itemName || it.name || '').toLowerCase();
+    if (key) itemQtyByName.set(key, (itemQtyByName.get(key) || 0) + effectiveQty(it));
+  });
+
+  const addToMap = (key, qty, total) => {
+    const existing = map.get(key) || { emergencyQty: 0, totalQty: total };
+    existing.emergencyQty += Number(qty) || 0;
+    map.set(key, existing);
+  };
+
+  const expandGroup = (items, groupTotalQty, kitEmergencyQty, qtyResolver) => {
+    const resolveQty = qtyResolver || effectiveQty;
+    if (!items.length || !groupTotalQty || kitEmergencyQty == null) return;
+    items.forEach((it) => {
+      const key = (it.product || it.itemName || it.name || '').toLowerCase();
+      if (!key) return;
+      const itemQty = resolveQty(it);
+      const qty = Math.min(Math.round((kitEmergencyQty / groupTotalQty) * itemQty), itemQty);
+      addToMap(key, qty, itemQtyByName.get(key) || itemQty);
+    });
+  };
+
+  const expandPersonalized = (kitEmergencyQty) => {
+    topLevelKeys.add('__kit__');
+    addToMap('__kit__', kitEmergencyQty, kitOverallQty || 0);
+    const items = rawItems.filter((it) => it.category === 'personalized' || isBundled(it));
+    const kitItems = items.filter((it) => it.isKit || it.kitType);
+    const groupTotalQty = kitItems.length ? Math.max(...kitItems.map(resolveKitCount)) : (Number(kitOverallQty) || 0);
+    const qtyResolver = (it) => {
+      if (it.category !== 'personalized') {
+        const bundled = bundledQtyFor(it);
+        if (bundled != null) return bundled;
+      }
+      return effectiveQty(it);
+    };
+    expandGroup(items, groupTotalQty, kitEmergencyQty, qtyResolver);
+  };
+
+  const expandSeparateKit = (kitKey, kitEmergencyQty) => {
+    const items = rawItems.filter((it) => !isBundled(it) && String(it.kitId || it.kitName || it.kitType) === kitKey);
+    const groupTotalQty = items.length ? Math.max(...items.map(resolveKitCount)) : 0;
+    topLevelKeys.add(`__sepkit__:${kitKey}`);
+    addToMap(`__sepkit__:${kitKey}`, kitEmergencyQty, groupTotalQty);
+    expandGroup(items, groupTotalQty, kitEmergencyQty);
+  };
+
+  const handleEntry = (product, qty) => {
+    if (!product) return;
+    if (product === '__kit__' || product === '__personalized__') { expandPersonalized(qty); return; }
+    if (typeof product === 'string' && product.startsWith('__sepkit__:')) {
+      expandSeparateKit(product.slice('__sepkit__:'.length), qty);
+      return;
+    }
+    const key = product.toLowerCase();
+    topLevelKeys.add(key);
+    addToMap(key, qty, itemQtyByName.get(key) || 0);
+  };
+
+  (splitDates || []).forEach((sd) => {
+    const productList = (sd.products && sd.products.length > 0)
+      ? sd.products
+      : (sd.product ? [{ product: sd.product, qty: sd.qty }] : []);
+    productList.forEach((p) => handleEntry(p.product, p.qty != null ? Number(p.qty) : null));
+  });
+  map.topLevelKeys = topLevelKeys;
+  return map;
+};
+
+// Escapes a value for CSV — wraps in quotes (and doubles any inner quotes) whenever
+// the field itself could contain a comma, e.g. the combined address string below.
+const csvCell = (v) => {
+  const s = String(v ?? '');
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+};
+
+const exportCSV = (data, filename) => {
+  const headers = ['S.No', 'Hotel Name', 'Box Count', 'Transport', 'Address', 'Phone Number', 'I STAY', 'After Dispatch'];
+  const rows = data.map((o, i) => {
+    const address = [o.shippingAddress, o.shippingCity, o.shippingState, o.shippingPincode]
+      .filter((p) => p && p !== '—')
+      .join(', ') || o.destination || '';
+    return [i + 1, o.client, o.boxes, o.transport, address, o.phone, '', ''];
+  });
+  const csv = [headers, ...rows].map(r => r.map(csvCell).join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename; a.click();
+  URL.revokeObjectURL(url);
+};
+
+const downloadCSVRows = (rows, filename) => {
+  const csv = rows.map((r) => r.map(csvCell).join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename; a.click();
+  URL.revokeObjectURL(url);
+};
+
+// Pending Dispatches export — hotel-wise sections, each listing every order under that
+// hotel with the SAME per-bucket pending breakdown (Personalized Kit / Separate Kit /
+// Separate Product) the on-screen Balance column shows, plus full order/contact details.
+// The generic exportCSV above only ever wrote 5 columns and dropped the balance data entirely.
+const exportPendingDispatchCSV = (orders, filename) => {
+  const rows = [];
+  rows.push(['Pending Dispatches Report']);
+  rows.push([`Generated: ${new Date().toLocaleString('en-IN')}`]);
+  rows.push([]);
+
+  const entries = orders.map((o) => {
+    const { products } = buildDispatchGroupedProducts({
+      items: o.items, kitOrders: o.kitOrders, orderItems: o.orderItems,
+      boxes: o.boxes, kitDispatch: o.kitDispatch, packagingIncludes: o.packagingIncludes,
+    });
+    return { order: o, summary: summarizeDispatchVerification(products) };
+  });
+
+  const byHotel = new Map();
+  entries.forEach((x) => {
+    const key = x.order.client || 'Unknown';
+    if (!byHotel.has(key)) byHotel.set(key, []);
+    byHotel.get(key).push(x);
+  });
+
+  const orderHeaders = [
+    'Order ID', 'Status', 'Emergency', 'Delivery Date', 'Created Date', 'Destination',
+    'Location', 'Sales Person', 'Transport', 'Payment Status', 'Boxes', 'Weight',
+    'Personalized Kit Total', 'Personalized Kit Dispatched', 'Personalized Kit Pending',
+    'Separate Kit Total', 'Separate Kit Dispatched', 'Separate Kit Pending',
+    'Separate Product Total', 'Separate Product Dispatched', 'Separate Product Pending',
+    'Overall Total Qty', 'Overall Dispatched Qty', 'Overall Pending Qty',
+    'Phone', 'Address',
+  ];
+
+  byHotel.forEach((hotelEntries, hotelName) => {
+    rows.push([`Hotel: ${hotelName}`]);
+    rows.push(orderHeaders);
+    hotelEntries.forEach(({ order: o, summary }) => {
+      const address = [o.shippingAddress, o.shippingCity, o.shippingState, o.shippingPincode]
+        .filter((p) => p && p !== '—')
+        .join(', ') || o.destination || '';
+      rows.push([
+        o.id, o.status, o.isEmergency ? 'Yes' : 'No',
+        o.deliveryDate ? new Date(o.deliveryDate).toLocaleDateString('en-IN') : '—',
+        o.createdAt ? new Date(o.createdAt).toLocaleDateString('en-IN') : '—',
+        o.destination || '—',
+        (o.city && o.state) ? `${o.city}, ${o.state}` : (o.city || o.state || '—'),
+        o.salesPerson || '—', o.transport || '—', o.payment || '—', o.boxes || 0, o.weight || '—',
+        summary.personalizedKit.total, summary.personalizedKit.dispatched, summary.personalizedKit.pending,
+        summary.separateKit.total, summary.separateKit.dispatched, summary.separateKit.pending,
+        summary.separateProduct.total, summary.separateProduct.dispatched, summary.separateProduct.pending,
+        summary.overall.total, summary.overall.dispatched, summary.overall.pending,
+        o.phone || '—', address,
+      ]);
+    });
+    rows.push([]);
+  });
+
+  downloadCSVRows(rows, filename);
+};
+
+// Pickup expenses loaded from API
+
+// ─────────────────────────────────────────────────────────────────────────────
+export default function Dispatch() {
+  const makeUpload = useCloudinaryUpload();
+  const isDark = useSelector((s) => s.theme.isDark);
+  const navigate = useNavigate();
+
+  const [searchText, setSearchText] = useState('');
+  const [activeTab, setActiveTab] = useState('dispatch');
+  const { filterTabs, activeKeyFor } = useTabAccess('Dispatch Team');
+  const { requireAccess } = usePageAccess('Dispatch Team');
+  const [dispatchSubTab, setDispatchSubTab] = useState('all');
+  const [pendingSearch, setPendingSearch] = useState('');
+  const [paymentFilter, setPaymentFilter] = useState('All');
+  const [dispatchStatusFilter, setDispatchStatusFilter] = useState(null);
+  const [dispatchPage, setDispatchPage] = useState(1);
+  const [dispatchPageSize, setDispatchPageSize] = useState(10);
+  const [pickupSearch, setPickupSearch] = useState('');
+  const [pickupTakenFilter, setPickupTakenFilter] = useState(null);
+  const [pickupPayFilter, setPickupPayFilter] = useState(null);
+  const [reimbSearch, setReimbSearch] = useState('');
+  const [reimbPayFilter, setReimbPayFilter] = useState(null);
+  const [transportSearch, setTransportSearch] = useState('');
+  const [transportStatusFilter, setTransportStatusFilter] = useState(null);
+  // Date-range filters (each holds null or ['YYYY-MM-DD','YYYY-MM-DD']).
+  // dispatchDateRange is shared by the "All Orders" / "Today's Dispatch Order" dispatch
+  // sub-tabs (mirrors how searchText/paymentFilter are already shared between them),
+  // filtering on order creation date. pickupDateRange is likewise shared by the
+  // "Today's Pickup Orders" / "All Orders" pickup sub-tabs, filtering on pickup date.
+  const [dispatchDateRange, setDispatchDateRange] = useState(null);
+  const [pickupDateRange, setPickupDateRange] = useState(null);
+  const [reimbDateRange, setReimbDateRange] = useState(null);
+  const [transportDateRange, setTransportDateRange] = useState(null);
+  const { data: companySettingsData } = useGetCompanySettingsQuery();
+  const companyInfo = useMemo(() => {
+    const s = companySettingsData?.data || {};
+    return { name: s.companyName || 'Heal N Glow', address: s.address || '', city: s.city || '', state: s.state || '', pincode: s.pincode || '', phone: s.phone || '', gstin: s.gstNumber || '' };
+  }, [companySettingsData]);
+  const HNG = companyInfo;
+  const [printModalOpen, setPrintModalOpen] = useState(false);
+  const [selectedPrintOrder, setSelectedPrintOrder] = useState(null);
+  const [printEditMode, setPrintEditMode] = useState(false);
+  const [printForm] = Form.useForm();
+  const [aiParsing, setAiParsing] = useState(false);
+  const [aiParsed, setAiParsed] = useState(null);
+  const [aiForm] = Form.useForm();
+
+  // Expanded rows for product panel
+  const [expandedRows, setExpandedRows] = useState([]);
+
+  const cardBg = isDark ? '#1E1E2E' : '#ffffff';
+  const textColor = isDark ? '#e0e0e0' : '#1a1a2e';
+
+  // ── Dispatch orders — RTK Query ─────────────────────────────────────────
+  // "Payment Pending" isn't a DispatchRecord.status value (it's a resolved payment
+  // state), so it's sent as a separate param so the backend can filter on it correctly.
+  const dispatchStatusParams = dispatchStatusFilter === 'Payment Pending'
+    ? { paymentStatus: 'Pending' }
+    : (dispatchStatusFilter ? { status: dispatchStatusFilter } : {});
+  // searchText is shared with the "Today's Dispatch Order" sub-tab (which filters its own
+  // fully-loaded list client-side), so only send it to the server while the paginated "All
+  // Orders" list is the one on screen — typing on the other sub-tab must not refetch this
+  // list or shift the stat cards derived from it.
+  const debouncedSearchText = useDebouncedValue(searchText.trim());
+  const dispatchServerSearch = dispatchSubTab === 'all' ? debouncedSearchText : '';
+  const { data: dispatchData } = useGetDispatchesQuery({ page: dispatchPage, limit: dispatchPageSize, ...dispatchStatusParams, ...(dispatchServerSearch ? { search: dispatchServerSearch } : {}) });
+  const { data: todaysDispatchData } = useGetTodaysDispatchesQuery();
+  // Orders with at least one confirmed dispatch round that's still 'Partial Dispatch' —
+  // i.e. some kit/product quantity was left undispatched. Resolved server-side (not just
+  // filtered from the current "All Orders" page) so nothing partial is missed behind
+  // pagination.
+  const { data: pendingDispatchData } = useGetPendingDispatchesQuery();
+  // Stat cards + their click-through lists — every visible dispatch record, not just the
+  // "All Orders" page on screen (see getDispatchStats).
+  const { data: statsData, isFetching: statsFetching } = useGetDispatchStatsQuery();
+  const [statModalKey, setStatModalKey] = useState(null);
+  const [statSearch, setStatSearch] = useState('');
+  const [uploadLR] = useUploadDispatchLRMutation();
+  const [confirmDispatch] = useConfirmDispatchMutation();
+
+  const normalizeDispatch = (d) => {
+    const isSample = d.orderId?.orderCategory === 'SAMPLE' || d.orderId?.leadId?.leadType === 'SAMPLE';
+    return {
+      key: d._id,
+      id: d.orderId?.orderCode || d.dispatchCode,
+      client: d.orderId?.clientName || '—',
+      product: d.orderId?.product || '—',
+      qty: d.orderId?.qty || 0,
+      boxes: d.boxes || 0,
+      weight: d.weight || '—',
+      payment: isSample ? 'N/A' : (d.orderPaymentStatus || 'Pending'),
+      // Credit payment terms — shown as "<status> (Credit Payment)" in the Payment column.
+      isCredit: !isSample && isCreditTerms(d.orderId?.paymentTerms, d.orderId?.leadId?.paymentTerms),
+      // A Confirmed record that's still Partial Dispatch (some rows have pending counts
+      // left) reads as "Partially Dispatched" rather than the generic "Ready to Dispatch" —
+      // orders that go out fully in one round keep the original 3-state mapping unchanged.
+      status: d.status === 'Dispatched'
+        ? 'Dispatched'
+        : d.status === 'Confirmed'
+        ? (d.dispatchType === 'Partial Dispatch' ? 'Partially Dispatched' : 'Ready to Dispatch')
+        : 'Packing',
+      dispatchType: d.dispatchType || null,
+      kitDispatch: d.kitDispatch || [],
+      orderCategory: isSample ? 'SAMPLE' : (d.orderId?.orderCategory || 'ORDER'),
+      isSample,
+      isEmergency: !!(d.orderId?.isEmergency),
+      // Set once Sales Head + Ops Head both approve an Emergency Dispatch request
+      // (dispatch-despite-pending-payment override) — distinct from isEmergency, which
+      // just flags an urgent delivery date on the order.
+      emergencyApproved: !!(d.orderId?.emergencyApproved),
+      transport: d.transportName || d.lrNumber || '—',
+      // Who bears the freight cost — 'CLIENT' | 'HNG' (Sales' "Transport Cost Scope").
+      transportationBy: d.orderId?.transportationBy || '',
+      lrNumber: d.lrNumber,
+      trackingUrl: d.trackingUrl,
+      invoiceNumber: d.invoiceNumber,
+      createdAt: d.createdAt,
+      dispatchedAt: d.dispatchedAt,
+      // Only set by /dispatch/today — whether any round was confirmed/finished today, and
+      // when the latest one was, so that tab can split "shipped today" from "due today".
+      dispatchedToday: !!d.dispatchedToday,
+      lastDispatchedTodayAt: d.lastDispatchedTodayAt || null,
+      roundsToday: d.roundsToday || 0,
+      deliveryDate: d.orderId?.expectedDeliveryDate || null,
+      items: d.items || [],
+      // Kit header data + the order's own items — used to group the verification
+      // panel into Personalized Kit / Separate Kits / Separate Products (see
+      // buildDispatchGroupedProducts).
+      kitOrders: d.orderId?.kitOrders || [],
+      orderItems: d.orderId?.items || [],
+      // Sales' "Select Kit(s) to Include" — separate kit(s)/product(s) packed inside the
+      // personalized kit's own box, so buildDispatchGroupedProducts nests them under the
+      // Personalized Kit bucket instead of Separate Kit/Product (see dispatchGrouping.js).
+      packagingIncludes: d.orderId?.packagingIncludes || [],
+      // How much of each packagingIncludes-listed row is actually packed inside the
+      // personalized kit (vs. the rest shipping as its own standalone Separate
+      // Kit/Product) — see buildEmergencyByTarget, which needs this to avoid marking a
+      // bundled item's FULL order qty emergency when only its bundled portion is.
+      packagingIncludesQty: d.orderId?.packagingIncludesQty || {},
+      // "Urgent / Emergency Deliveries (Partial)" split — same source Dispatch Detail
+      // reads to badge which product/kit qty is emergency vs. the remaining tentative
+      // qty, and to show the "dispatch emergency first, rest as Full Dispatch later" info.
+      splitDates: d.orderId?.splitDates || [],
+      kitOverallQty: d.orderId?.kitOverallQty || 0,
+      // Order-level packing Tasks (productIndex/taskType/assignedTo) — lets the product
+      // panel below tell an assigned product/kit apart from one nobody's picked up yet.
+      tasks: d.tasks || [],
+      // Customer / address fields (now populated from the order)
+      destination: resolveDestination(d.orderId),
+      salesPerson: d.orderId?.assignedTo?.fullName || '—',
+      contactPerson: d.orderId?.contactPerson || d.orderId?.clientName || '—',
+      phone: d.orderId?.clientPhone || d.orderId?.phone || '—',
+      email: d.orderId?.email || '—',
+      detailedAddress: d.orderId?.detailedAddress || '—',
+      city: d.orderId?.city || '—',
+      state: d.orderId?.state || '—',
+      pincode: d.orderId?.pincode || '—',
+      // Shipping address — dispatch labels/manifests use this, falling back to the
+      // billing address when no distinct shipping address was captured.
+      shippingAddress: d.orderId?.shippingAddress || d.orderId?.detailedAddress || '—',
+      shippingCity: d.orderId?.shippingCity || d.orderId?.city || '—',
+      shippingState: d.orderId?.shippingState || d.orderId?.state || '—',
+      shippingPincode: d.orderId?.shippingPincode || d.orderId?.pincode || '—',
+    };
+  };
+
+  const dispatchOrders = useMemo(() => (dispatchData?.data || []).map(normalizeDispatch), [dispatchData]);
+  const todayDispatchOrders = useMemo(() => (todaysDispatchData?.data || []).map(normalizeDispatch), [todaysDispatchData]);
+  const pendingDispatchOrdersRaw = useMemo(() => (pendingDispatchData?.data || []).map(normalizeDispatch), [pendingDispatchData]);
+
+  // Transport records (real Transport collection, created on LR upload).
+  const { data: transportRaw } = useGetTransportsQuery();
+  const [updateTransportStatus] = useUpdateTransportStatusMutation();
+  const transportData = useMemo(() => {
+    const fromApi = (transportRaw?.data || []).map((t) => ({
+      key: t._id, lrNumber: t.lrNumber, orderId: t.orderCode, client: t.clientName,
+      transport: t.transportCompany || t.lrNumber || '—',
+      boxes: t.boxes, weight: t.weight, freight: t.freight,
+      trackingUrl: t.trackingUrl,
+      dispatchDate: (t.dispatchedAt || '').slice(0, 10),
+      status: t.status || 'In Transit',
+      // Dispatch details joined in from the linked Order/DispatchRecord (see
+      // getTransports) — previously these columns had no data source at all.
+      destination: resolveDestination(t.orderId),
+      contactPerson: t.orderId?.contactPerson || '—',
+      phone: t.orderId?.clientPhone || '—',
+      salesPerson: t.orderId?.assignedTo?.fullName || t.orderId?.salesPerson || '—',
+      isEmergency: !!t.orderId?.isEmergency,
+      emergencyApproved: !!t.orderId?.emergencyApproved,
+      payment: t.orderPaymentStatus || 'Pending',
+      invoiceNumber: t.dispatchId?.invoiceNumber || '—',
+      // Who bears the freight cost — 'CLIENT' | 'HNG' (Sales' "Transport Cost Scope").
+      transportationBy: t.orderId?.transportationBy || '',
+    }));
+    if (fromApi.length) return fromApi;
+    // Fallback: derive from dispatch records that carry an LR number.
+    return dispatchOrders.filter((d) => d.lrNumber).map((d) => ({
+      key: d.key, lrNumber: d.lrNumber, orderId: d.id,
+      client: d.client, transport: d.transport,
+      dispatchDate: d.dispatchedAt?.slice(0, 10),
+      status: d.status === 'Dispatched' ? 'In Transit' : 'Delivered',
+      destination: d.destination || '—',
+      contactPerson: d.contactPerson || '—',
+      phone: d.phone || '—',
+      salesPerson: d.salesPerson || '—',
+      isEmergency: !!d.isEmergency,
+      emergencyApproved: !!d.emergencyApproved,
+      payment: d.payment || 'Pending',
+      invoiceNumber: d.invoiceNumber || '—',
+      transportationBy: d.transportationBy || '',
+    }));
+  }, [transportRaw, dispatchOrders]);
+
+  // ── Pick Up Order tab state — Today's / All Orders, both live from PickupOrder ──
+  const { data: pickupOrdersRaw } = useGetPickupOrdersQuery();
+  const { data: todaysPickupOrdersRaw } = useGetTodaysPickupOrdersQuery();
+  const [updatePickupOrder] = useUpdatePickupOrderMutation();
+  const [pickupSubTab, setPickupSubTab] = useState('pickup_orders');
+
+  const normalizePickup = (p) => ({
+    key: p._id,
+    orderId: p.orderCode || '—',
+    client: p.clientName || '—',
+    destination: p.destination || '—',
+    date: (p.scheduledDate || p.createdAt || '').slice(0, 10),
+    pickupEmpName: p.pickupPersonName || p.pickupEmpId?.fullName || '—',
+    pickupEmpId: p.pickupEmpId?._id || null,
+    taken: !!p.taken,
+    takenStatus: p.takenStatus || 'Pending',
+    amount: p.amount || 0,
+    paymentBy: p.paymentBy || '',
+    paymentStatus: p.paymentStatus || 'Unpaid',
+    gPayNumber: p.gPayNumber || '',
+    proofUrl: p.proofUrl || '',
+    reimbursementStatus: p.reimbursementStatus || 'Not Applicable',
+    reimbursedAmount: p.reimbursedAmount || 0,
+    reimbursementProofUrl: p.reimbursementProofUrl || '',
+    paidBy: p.paidBy || '',
+    paidDate: (p.paidDate || '').slice(0, 10),
+  });
+
+  const allPickupOrders = useMemo(() => (pickupOrdersRaw?.data || []).map(normalizePickup), [pickupOrdersRaw]);
+  const todaysPickupOrders = useMemo(() => (todaysPickupOrdersRaw?.data || []).map(normalizePickup), [todaysPickupOrdersRaw]);
+  // Reimbursement claims — pickups a Pickup Team member paid for out of pocket
+  // (Finance-paid pickups need no reimbursement, so they never appear here).
+  const reimbExpenses = useMemo(() => allPickupOrders.filter((r) => r.paymentBy === 'Pickup Team'), [allPickupOrders]);
+
+  // Staff list for the "Pickup Employee Name" selector on the payment modal —
+  // Dispatch department users only (real logins, not the separate Staff HR roster).
+  const { data: pickupUsersRaw } = useGetUsersQuery({ limit: 500 });
+  const pickupStaffOptions = useMemo(() => (pickupUsersRaw?.data || [])
+    .filter((u) => u.department === 'Dispatch')
+    .map((u) => ({ value: u._id, label: u.fullName })), [pickupUsersRaw]);
+
+  // ── Taken Status / Payment By modal state ────────────────────────────────
+  const [showPickupPayModal, setShowPickupPayModal] = useState(false);
+  const [pickupPayTarget, setPickupPayTarget] = useState(null);
+  const [pickupPayForm] = Form.useForm();
+  const [showReceivedModal, setShowReceivedModal] = useState(false);
+  const [receivedTarget, setReceivedTarget] = useState(null);
+
+  // ── Pickup Status / Payment handlers ──────────────────────────────────────
+  const handlePickupStatusChange = async (record, status) => {
+    if (!requireAccess('edit')) return;
+    const takenStatus = status === 'pickup_dropped' ? 'Pickup Dropped' : 'Taken';
+    try {
+      await updatePickupOrder({ id: record.key, takenStatus }).unwrap();
+    } catch {
+      enqueueSnackbar('Failed to update taken status', { variant: 'error' });
+      return;
+    }
+    if (status === 'pickup_dropped') {
+      setReceivedTarget(record);
+      setShowReceivedModal(true);
+    }
+  };
+
+  // Finance settles it directly (no form needed — treated as paid immediately).
+  // Pickup Team pays out of pocket, so it opens the modal to capture GPay/amount/proof
+  // and raises a reimbursement claim for Finance to pay back (full or partial).
+  const handlePickupPayByChange = async (record, payBy) => {
+    if (!requireAccess('edit')) return;
+    if (payBy === 'finance') {
+      try {
+        await updatePickupOrder({ id: record.key, paymentBy: 'Finance' }).unwrap();
+        enqueueSnackbar('Marked as paid by Finance.', { variant: 'success' });
+      } catch {
+        enqueueSnackbar('Failed to update payment', { variant: 'error' });
+      }
+      return;
+    }
+    setPickupPayTarget({ ...record, payBy });
+    pickupPayForm.resetFields();
+    setShowPickupPayModal(true);
+  };
+
+  const handlePickupPaySubmit = async (vals) => {
+    const fileItem = vals.proof?.fileList?.[0];
+    const proofUrl = fileItem?.url || null;
+    const staffMember = pickupStaffOptions.find((s) => s.value === vals.pickupEmpId);
+    try {
+      await updatePickupOrder({
+        id: pickupPayTarget.key,
+        paymentBy: 'Pickup Team',
+        amount: vals.amount,
+        pickupEmpId: vals.pickupEmpId,
+        pickupPersonName: staffMember?.label || '',
+        gPayNumber: vals.gPayNumber,
+        ...(proofUrl ? { proofUrl } : {}),
+      }).unwrap();
+    } catch {
+      enqueueSnackbar('Failed to submit payment', { variant: 'error' });
+      return;
+    }
+    enqueueSnackbar('Payment proof submitted — visible in Reimbursement Claims for Finance to process.', { variant: 'success' });
+    setShowPickupPayModal(false);
+    setPickupPayTarget(null);
+    pickupPayForm.resetFields();
+  };
+
+  const handlePickupDroppedConfirm = async () => {
+    try {
+      await updatePickupOrder({ id: receivedTarget.key, takenStatus: 'Pickup Dropped' }).unwrap();
+      enqueueSnackbar(`Order ${receivedTarget?.orderId} marked as Pickup Dropped — received order process started.`, { variant: 'success' });
+    } catch {
+      enqueueSnackbar('Failed to update status', { variant: 'error' });
+    }
+    setShowReceivedModal(false);
+    setReceivedTarget(null);
+  };
+
+  // ── Handlers ───────────────────────────────────────────────────────────────
+  const openPrintModal = (order) => {
+    setSelectedPrintOrder(order);
+    printForm.setFieldsValue({
+      toName: order.client,
+      toContact: order.contactPerson,
+      toPhone: order.phone,
+      toAddress: order.shippingAddress,
+      toCity: order.shippingCity,
+      toState: order.shippingState,
+      toPincode: order.shippingPincode,
+      toLocation: order.address,
+      orderRef: order.id,
+      boxCount: order.boxes,
+      weight: order.weight,
+    });
+    setPrintEditMode(false);
+    setAiParsed(null);
+    setPrintModalOpen(true);
+  };
+
+  const handlePrint = () => {
+    const vals = printForm.getFieldsValue();
+    const win = window.open('', '_blank', 'width=480,height=640');
+    win.document.write(`<!DOCTYPE html><html><head><title>Dispatch Label</title>
+<style>
+  body { font-family: Arial, sans-serif; margin: 0; padding: 24px; font-size: 13px; color: #111; }
+  .label { border: 2px solid #333; padding: 20px; width: 400px; border-radius: 4px; }
+  .badge { background: #B11E6A; color: #fff; display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 11px; font-weight: bold; margin-bottom: 12px; }
+  .section-title { font-size: 10px; letter-spacing: 2px; text-transform: uppercase; color: #888; font-weight: bold; margin-bottom: 6px; }
+  .name { font-size: 16px; font-weight: bold; margin-bottom: 4px; }
+  .line { margin: 2px 0; color: #333; }
+  hr { border: none; border-top: 1px dashed #aaa; margin: 14px 0; }
+  .order-ref { font-size: 11px; color: #555; margin-top: 12px; border-top: 1px solid #eee; padding-top: 8px; }
+  .barcode { font-family: monospace; font-size: 10px; letter-spacing: 4px; color: #333; margin-top: 4px; }
+</style></head><body>
+<div class="label">
+  <div class="badge">HEAL N GLOW — DISPATCH LABEL</div>
+  <div class="section-title">From</div>
+  <div class="name">${HNG.name}</div>
+  <div class="line">${HNG.address}</div>
+  <div class="line">${HNG.city}, ${HNG.state} — ${HNG.pincode}</div>
+  <div class="line">Ph: ${HNG.phone}</div>
+  <div class="line">GSTIN: ${HNG.gstin}</div>
+  <hr/>
+  <div class="section-title">To</div>
+  <div class="name">${vals.toName || ''}</div>
+  <div class="line">Attn: ${vals.toContact || ''}</div>
+  <div class="line">${vals.toAddress || ''}</div>
+  <div class="line">${vals.toCity || ''}, ${vals.toState || ''} — ${vals.toPincode || ''}</div>
+  <div class="line">Ph: ${vals.toPhone || ''}</div>
+  <div class="order-ref">
+    Order Ref: <b>${vals.orderRef || ''}</b> &nbsp;|&nbsp; Boxes: <b>${vals.boxCount || ''}</b> &nbsp;|&nbsp; Weight: <b>${vals.weight || ''}</b>
+  </div>
+  <div class="barcode">||| ${vals.orderRef || ''} |||</div>
+</div>
+</body></html>`);
+    win.document.close();
+    win.print();
+  };
+
+  const handleAIParse = () => {
+    setAiParsing(true);
+    setTimeout(() => {
+      setAiParsing(false);
+      enqueueSnackbar('AI scan complete. Please fill in the LR details manually.', { variant: 'info' });
+    }, 1200);
+  };
+
+  // ── Product progress expanded row ──────────────────────────────────────────
+  // Groups items into Personalized Kit / Separate Kits / Separate Products — same
+  // categorization + counts as the Dispatch Detail page's verification table. Read-only
+  // here: entering dispatch counts, uploading photos, and confirming all happen on the
+  // Dispatch Detail page (this panel is just a progress summary).
+  const renderProductPanel = (record) => {
+    const { products, groupedProducts } = buildDispatchGroupedProducts({
+      items: record.items,
+      kitOrders: record.kitOrders,
+      orderItems: record.orderItems,
+      boxes: record.boxes,
+      kitDispatch: record.kitDispatch,
+      packagingIncludes: record.packagingIncludes,
+      packagingIncludesQty: record.packagingIncludesQty,
+      tasks: record.tasks,
+    });
+    const summary = summarizeDispatchVerification(products);
+
+    // Emergency-vs-tentative split for this order (see buildEmergencyByTarget above) —
+    // lets a mixed order (some units emergency, the rest on the regular tentative date)
+    // show the full order's product details here PLUS an info message on how much is
+    // emergency vs. tentative, instead of only surfacing the emergency portion.
+    const emergencyByTarget = buildEmergencyByTarget(record.splitDates, record.kitOverallQty, record.orderItems, record.kitOrders, record.packagingIncludes, record.packagingIncludesQty);
+    const itemNameById = new Map();
+    (record.items || []).forEach((it, i) => {
+      if (!it?._id) return;
+      const fallback = (record.orderItems || [])[i] || {};
+      itemNameById.set(String(it._id), it.product || it.itemName || fallback.product || fallback.itemName || fallback.name || '');
+    });
+    const getRowEmergency = (row) => {
+      if (emergencyByTarget.size === 0) return null;
+      if (row.type === 'kit_header' && row.isPersonalized) {
+        const info = emergencyByTarget.get('__kit__');
+        return info && info.emergencyQty > 0 ? info : null;
+      }
+      const childIds = row.type === 'kit_header' ? (row.childItemIds || []) : (row.itemId ? [row.itemId] : []);
+      if (childIds.length === 0) return null;
+      let emergencyQty = 0;
+      let totalQty = 0;
+      let matched = false;
+      const seenNames = new Set();
+      childIds.forEach((itemId) => {
+        const name = (itemNameById.get(String(itemId)) || '').toLowerCase();
+        if (!name || seenNames.has(name)) return;
+        seenNames.add(name);
+        const info = emergencyByTarget.get(name);
+        if (info) { matched = true; emergencyQty += info.emergencyQty; totalQty += info.totalQty; }
+      });
+      return matched ? { emergencyQty, totalQty } : null;
+    };
+    // Sum only the RAW splitDates entries (map.topLevelKeys) — a kit header's composite
+    // entry and the per-component entries it expands into both live in emergencyByTarget,
+    // and summing everything would double-count the same physical units twice.
+    let emergencyTotals = { emergencyQty: 0, totalQty: 0 };
+    (emergencyByTarget.topLevelKeys || []).forEach((key) => {
+      const v = emergencyByTarget.get(key);
+      if (!v) return;
+      emergencyTotals.emergencyQty += v.emergencyQty;
+      emergencyTotals.totalQty += v.totalQty;
+    });
+
+    const catMeta = {
+      personalized: { icon: <GiftOutlined />, bg: '#ede9fe', color: '#5b21b6', label: 'Personalized Kit' },
+      separate_kit: { icon: <GiftOutlined />, bg: '#e0f2fe', color: '#0369a1', label: 'Separate Kit' },
+      separate_product: { icon: <AppstoreOutlined />, bg: '#fce7f3', color: '#9d174d', label: 'Products' },
+    };
+
+    return (
+      <div style={{ padding: '12px 24px', background: isDark ? '#161622' : '#fafafa', borderRadius: 8, margin: '4px 0' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4, flexWrap: 'wrap' }}>
+          <Tag style={{ background: '#B11E6A18', color: '#B11E6A', border: '1px solid #B11E6A33', borderRadius: 12, fontWeight: 600 }}>
+            {record.id}
+          </Tag>
+          <Text style={{ fontSize: 12, color: isDark ? '#aaa' : '#888' }}>— Product Details</Text>
+          <Text style={{ fontSize: 12, color: isDark ? '#aaa' : '#888', marginLeft: 'auto' }}>
+            <CheckCircleOutlined style={{ color: '#52c41a', marginRight: 4 }} />
+            {summary.overall.dispatched} / {summary.overall.total} dispatched
+          </Text>
+        </div>
+        {emergencyTotals.emergencyQty > 0 && (
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 10, borderRadius: 8 }}
+            message="Emergency + Tentative Order"
+            description={`${emergencyTotals.emergencyQty} of ${emergencyTotals.totalQty} unit${emergencyTotals.totalQty !== 1 ? 's' : ''} in this order ${emergencyTotals.emergencyQty !== 1 ? 'are' : 'is'} emergency — dispatch ${emergencyTotals.emergencyQty !== 1 ? 'these' : 'this'} first as Partial Dispatch. The remaining ${emergencyTotals.totalQty - emergencyTotals.emergencyQty} tentative unit${(emergencyTotals.totalQty - emergencyTotals.emergencyQty) !== 1 ? 's' : ''} stay on this order and go out later as Full Dispatch — open the order to confirm each round.`}
+          />
+        )}
+        <Space size={6} wrap style={{ marginBottom: 10 }}>
+          {[summary.personalizedKit, summary.separateKit, summary.separateProduct]
+            .filter((b) => b.total > 0)
+            .map((b) => (
+              <Tag key={b.label} style={{ borderRadius: 12, fontSize: 11, background: 'transparent', border: '1px solid #B11E6A33' }}>
+                {b.label}: {b.dispatched}/{b.total} ({b.pending} pending)
+              </Tag>
+            ))}
+        </Space>
+
+        <Table
+          size="small"
+          pagination={false}
+          dataSource={groupedProducts}
+          rowKey="key"
+          style={{ borderRadius: 8, overflow: 'hidden' }}
+          // Rows with no assigned packing Task yet (row.assigned === false, set by
+          // buildDispatchGroupedProducts) render disabled — greyed out and inert —
+          // until Operations assigns someone to pack them.
+          onRow={(row) => (row.assigned === false ? { style: { opacity: 0.45, pointerEvents: 'none' } } : {})}
+          columns={[
+            {
+              title: 'Product / Kit',
+              dataIndex: 'name',
+              // Pure divider rows (no `bucket`) span the full row. Real dispatchable kit
+              // headers (Personalized/Separate Kit, `bucket` set) get their own Progress cell.
+              onCell: (row) => (row.type === 'kit_header' && !row.bucket ? { colSpan: 2 } : {}),
+              render: (v, row) => {
+                const emergencyInfo = getRowEmergency(row);
+                const emergencyBadge = emergencyInfo && (
+                  <Tag color="red" style={{ borderRadius: 12, fontSize: 10 }}>
+                    Emergency: {emergencyInfo.emergencyQty}{emergencyInfo.totalQty ? `/${emergencyInfo.totalQty}` : ''}
+                  </Tag>
+                );
+                if (row.type === 'kit_header') {
+                  const cm = catMeta[row.category] || catMeta.separate_kit;
+                  return (
+                    <div style={{ background: cm.bg, padding: '6px 12px', display: 'flex', alignItems: 'center', gap: 8, margin: '-1px -1px', flexWrap: 'wrap' }}>
+                      <span style={{ color: cm.color }}>{cm.icon}</span>
+                      <Text strong style={{ color: cm.color, fontSize: 12 }}>{row.kitName}</Text>
+                      {row.qty != null && (
+                        <Tag style={{ borderRadius: 12, background: `${cm.color}15`, color: cm.color, border: `1px solid ${cm.color}44`, fontSize: 11 }}>
+                          {row.qty} kit{row.qty !== 1 ? 's' : ''}
+                        </Tag>
+                      )}
+                      <Tag style={{ borderRadius: 12, fontSize: 10, background: 'transparent', color: cm.color, border: `1px solid ${cm.color}33` }}>
+                        {cm.label}
+                      </Tag>
+                      {row.bucket && row.assigned === false && (
+                        <Tag color="error" style={{ borderRadius: 12, fontSize: 10 }}>
+                          {row.unassignedNames?.length
+                            ? `Not Assigned: ${row.unassignedNames.join(', ')}`
+                            : 'Task Not Assigned'}
+                        </Tag>
+                      )}
+                      {emergencyBadge}
+                    </div>
+                  );
+                }
+                return (
+                  <Space size={4} wrap>
+                    {(row.type === 'kit_item' || row.type === 'personalized_item') && (
+                      <span style={{ color: '#ccc', fontSize: 13, marginLeft: 8 }}>└</span>
+                    )}
+                    <Text style={{ fontSize: 12 }}>{v}</Text>
+                    {row.perKitQty != null && <Text style={{ fontSize: 10, color: '#bbb' }}>({row.perKitQty}/kit)</Text>}
+                    {row.includedFrom && (
+                      <Tag style={{ borderRadius: 10, fontSize: 10, background: '#ede9fe', color: '#5b21b6', border: '1px solid #5b21b633' }}>
+                        {row.includedFrom}
+                      </Tag>
+                    )}
+                    {(row.bucket === 'separateProduct' || row.type === 'kit_item' || row.type === 'personalized_item') && row.assigned === false && (
+                      <Tag color="error" style={{ borderRadius: 10, fontSize: 10 }}>
+                        Not Assigned
+                      </Tag>
+                    )}
+                    {emergencyBadge}
+                  </Space>
+                );
+              },
+            },
+            {
+              title: 'Progress', key: 'progress',
+              onCell: (row) => (!row.bucket ? { colSpan: 0 } : {}),
+              render: (_, row) => {
+                if (!row.bucket) return null;
+                const total = row.overallQty ?? row.qtyOrdered ?? 0;
+                const done = row.dispatchedQty ?? row.qtyDispatched ?? 0;
+                const pending = Math.max(0, total - done);
+                return (
+                  <Space direction="vertical" size={0}>
+                    <Text style={{ fontSize: 12 }}>{done} / {total}</Text>
+                    {pending === 0
+                      ? <Tag color="success" style={{ borderRadius: 20, fontSize: 11 }}>Fully Dispatched</Tag>
+                      : done > 0
+                      ? <Tag color="orange" style={{ borderRadius: 20, fontSize: 11 }}>Partial — {pending} pending</Tag>
+                      : <Tag color="default" style={{ borderRadius: 20, fontSize: 11 }}>Pending</Tag>}
+                  </Space>
+                );
+              },
+            },
+          ]}
+        />
+      </div>
+    );
+  };
+
+  // ── Columns ────────────────────────────────────────────────────────────────
+  const buildColumns = (showTodayActions = false) => {
+    const deliveryDateCol = {
+      title: (
+        <Space size={4}>
+          <CalendarOutlined style={{ color: '#B11E6A' }} />
+          Delivery Date
+        </Space>
+      ),
+      dataIndex: 'deliveryDate',
+      width: 140,
+      render: renderDeliveryDate,
+    };
+
+    const baseCols = [
+      {
+        title: 'Order', dataIndex: 'id', width: 120,
+        render: (v, r) => (
+          <Space direction="vertical" size={2}>
+            <Space size={4}>
+              {r.isEmergency && <AlertFilled style={{ color: '#ff4d4f', fontSize: 13 }} />}
+              {r.emergencyApproved && <ThunderboltFilled style={{ color: '#fa8c16', fontSize: 13 }} />}
+              {r.orderCategory === 'SAMPLE' && <ExperimentOutlined style={{ color: '#722ed1', fontSize: 13 }} />}
+              <Text strong style={{ color: '#B11E6A', fontSize: 13 }}>{v}</Text>
+            </Space>
+            {r.isEmergency && <Tag color="red" style={{ fontSize: 11, lineHeight: '16px', marginBottom: 0 }}>Emergency</Tag>}
+            {r.emergencyApproved && <Tag color="orange" style={{ fontSize: 11, lineHeight: '16px', marginBottom: 0 }}>Emergency Dispatch</Tag>}
+            {r.orderCategory === 'SAMPLE' && <Tag color="purple" style={{ fontSize: 11, lineHeight: '16px', marginBottom: 0 }}>Sample Order</Tag>}
+          </Space>
+        ),
+      },
+      { title: 'Client', dataIndex: 'client', width: 150, render: v => <Text style={{ fontSize: 13 }}>{v}</Text> },
+      { title: 'Destination', dataIndex: 'destination', width: 120, responsive: ['md'], render: (v) => <Text style={{ fontSize: 13 }}>{v || '—'}</Text> },
+      { title: 'Location', dataIndex: 'city', width: 120, responsive: ['lg'], render: (v, r) => <Text style={{ fontSize: 13 }}>{v && r.state ? `${v}, ${r.state}` : v || r.state || '—'}</Text> },
+      { title: 'Created Date', dataIndex: 'createdAt', width: 160, responsive: ['md'], render: (v) => <Text style={{ fontSize: 13 }}>{v ? new Date(v).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }) : '—'}</Text> },
+      { title: 'Sales Person', dataIndex: 'salesPerson', width: 115, responsive: ['lg'], render: v => <Text style={{ fontSize: 13 }}>{v}</Text> },
+      {
+        title: 'Boxes', dataIndex: 'boxes', width: 80, responsive: ['sm'],
+        render: (v) => <Space size={4}><InboxOutlined style={{ color: '#B11E6A' }} /><Text strong style={{ fontSize: 13 }}>{v}</Text></Space>,
+      },
+      { title: 'Weight', dataIndex: 'weight', width: 90, responsive: ['lg'], render: v => <Text style={{ fontSize: 13 }}>{v}</Text> },
+      {
+        title: 'Payment', dataIndex: 'payment', width: 115,
+        render: renderPaymentTag,
+      },
+      { title: 'Transport', dataIndex: 'transport', width: 120, responsive: ['lg'], render: v => <Text style={{ fontSize: 13 }}>{v}</Text> },
+      { title: 'Transportation Paid By', dataIndex: 'transportationBy', width: 150, responsive: ['lg'], render: renderTransportPaidBy },
+      {
+        title: 'Balance', key: 'balance', width: 170,
+        // Pending counts broken down by Personalized Kit / Separate Kit / Separate
+        // Product — only the buckets actually present on this order.
+        render: (_, r) => {
+          const { products } = buildDispatchGroupedProducts({
+            items: r.items, kitOrders: r.kitOrders, orderItems: r.orderItems,
+            boxes: r.boxes, kitDispatch: r.kitDispatch, packagingIncludes: r.packagingIncludes,
+          });
+          const summary = summarizeDispatchVerification(products);
+          const buckets = [summary.personalizedKit, summary.separateKit, summary.separateProduct].filter((b) => b.total > 0);
+          if (buckets.length === 0) return <Text type="secondary" style={{ fontSize: 12 }}>—</Text>;
+          return (
+            <Space direction="vertical" size={2}>
+              {buckets.map((b) => (
+                <Tag key={b.label} color={b.pending === 0 ? 'success' : 'orange'} style={{ borderRadius: 10, fontSize: 11, margin: 0 }}>
+                  {b.label}: {b.pending} pending
+                </Tag>
+              ))}
+            </Space>
+          );
+        },
+      },
+      {
+        title: 'Status', dataIndex: 'status', width: 140,
+        render: (v) => <Tag style={{ borderRadius: 20, fontWeight: 500, fontSize: 13, background: `${statusColor[v]}22`, color: statusColor[v], border: `1px solid ${statusColor[v]}44` }}>{v}</Tag>,
+      },
+      {
+        title: 'Actions', key: 'actions', width: 110,
+        render: (_, r) => (
+          <Space onClick={(e) => e.stopPropagation()}>
+            <Button size="small" icon={<EyeOutlined />} onClick={() => navigate(`/dispatch/${r.key}`)} />
+            <Button size="small" icon={<PrinterOutlined />} style={{ color: '#B11E6A', borderColor: '#B11E6A' }} onClick={() => openPrintModal(r)} />
+            {showTodayActions && (
+              <Button size="small" icon={<ExportOutlined />} style={{ color: '#B11E6A', borderColor: '#B11E6A' }}
+                onClick={() => exportCSV([r], `${r.id}-export.csv`)} />
+            )}
+          </Space>
+        ),
+      },
+    ];
+
+    // Insert Delivery Date column right after Order+Client — shown on both the
+    // "All Orders" and "Today's Dispatch Order" dispatch tables.
+    baseCols.splice(2, 0, deliveryDateCol);
+
+    // Today's Dispatch Order only: when this order went out today, or that it's due
+    // today and still waiting to be dispatched.
+    if (showTodayActions) {
+      baseCols.splice(3, 0, {
+        title: 'Dispatched Today', key: 'dispatchedToday', width: 150,
+        render: (_, r) => (r.dispatchedToday ? (
+          <Space direction="vertical" size={0}>
+            <Text strong style={{ fontSize: 13, color: '#2e7d32' }}>
+              {new Date(r.lastDispatchedTodayAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}
+            </Text>
+            {r.roundsToday > 1 && <Text type="secondary" style={{ fontSize: 11 }}>{r.roundsToday} rounds today</Text>}
+          </Space>
+        ) : (
+          <Tag color="gold" style={{ borderRadius: 10, fontSize: 11 }}>Due today</Tag>
+        )),
+      });
+    }
+
+    return baseCols;
+  };
+
+  const transportColumns = [
+    {
+      title: 'Order', dataIndex: 'orderId', width: 120,
+      render: (v, r) => (
+        <Space direction="vertical" size={2}>
+          <Space size={4}>
+            {r.isEmergency && <AlertFilled style={{ color: '#ff4d4f', fontSize: 13 }} />}
+            {r.emergencyApproved && <ThunderboltFilled style={{ color: '#fa8c16', fontSize: 13 }} />}
+            <Text strong style={{ color: '#B11E6A', fontSize: 13 }}>{v}</Text>
+          </Space>
+          {r.isEmergency && <Tag color="red" style={{ fontSize: 11, lineHeight: '16px', marginBottom: 0 }}>Emergency</Tag>}
+          {r.emergencyApproved && <Tag color="orange" style={{ fontSize: 11, lineHeight: '16px', marginBottom: 0 }}>Emergency Dispatch</Tag>}
+        </Space>
+      ),
+    },
+    { title: 'LR Number', dataIndex: 'lrNumber', width: 115, render: (v) => <Text strong style={{ color: '#B11E6A', fontSize: 13 }}>{v}</Text> },
+    { title: 'Invoice No.', dataIndex: 'invoiceNumber', width: 110, responsive: ['lg'], render: v => <Text style={{ fontSize: 13 }}>{v}</Text> },
+    { title: 'Client', dataIndex: 'client', width: 145, render: v => <Text style={{ fontSize: 13 }}>{v}</Text> },
+    {
+      title: 'Contact', key: 'contact', width: 150, responsive: ['lg'],
+      render: (_, r) => (
+        <Space direction="vertical" size={0}>
+          <Text style={{ fontSize: 13 }}>{r.contactPerson}</Text>
+          {r.phone && r.phone !== '—' && <Text type="secondary" style={{ fontSize: 12 }}>{r.phone}</Text>}
+        </Space>
+      ),
+    },
+    { title: 'Destination', dataIndex: 'destination', width: 130, responsive: ['md'], render: v => <Text style={{ fontSize: 13 }}>{v}</Text> },
+    { title: 'Sales Person', dataIndex: 'salesPerson', width: 120, responsive: ['lg'], render: v => <Text style={{ fontSize: 13 }}>{v}</Text> },
+    { title: 'Transport Co.', dataIndex: 'transport', width: 135, render: v => <Text style={{ fontSize: 13 }}>{v}</Text> },
+    { title: 'Boxes', dataIndex: 'boxes', width: 80, render: (v) => <Space size={4}><InboxOutlined style={{ color: '#B11E6A' }} /><Text style={{ fontSize: 13 }}>{v}</Text></Space> },
+    { title: 'Weight', dataIndex: 'weight', width: 95, render: v => <Text style={{ fontSize: 13 }}>{v}</Text> },
+    { title: 'Freight', dataIndex: 'freight', width: 95, render: v => <Text style={{ fontSize: 13 }}>{v}</Text> },
+    { title: 'Transportation Paid By', dataIndex: 'transportationBy', width: 150, render: renderTransportPaidBy },
+    {
+      title: 'Payment', dataIndex: 'payment', width: 100,
+      render: v => <Tag color={v === 'Paid' ? 'success' : v === 'Partial' ? 'processing' : 'error'} style={{ fontSize: 12 }}>{v}</Tag>,
+    },
+    { title: 'Dispatch Date', dataIndex: 'dispatchDate', width: 120, render: v => <Text style={{ fontSize: 13 }}>{v}</Text> },
+    { title: 'Status', dataIndex: 'status', width: 105, render: (v) => <Tag color={v === 'Delivered' ? 'success' : 'processing'} style={{ fontSize: 13 }}>{v}</Tag> },
+  ];
+
+  // Shared columns for the "Today's Pickup Orders" and "All Orders" Pick Up Order tables.
+  const pickupColumns = [
+    { title: 'Date', dataIndex: 'date', width: 95 },
+    { title: 'Order ID', dataIndex: 'orderId', width: 100, render: v => <Text strong style={{ color: '#B11E6A', fontSize: 13 }}>{v}</Text> },
+    { title: 'From / Client', dataIndex: 'client', width: 150, render: v => <Text style={{ color: '#B11E6A', fontWeight: 600, fontSize: 13 }}>{v}</Text> },
+    { title: 'Destination', dataIndex: 'destination', width: 150, render: v => <Text style={{ fontSize: 13 }}>{v}</Text> },
+    { title: 'Pickup Employee', key: 'emp', width: 150, render: (_, r) => <Text strong style={{ fontSize: 13 }}>{r.pickupEmpName || '—'}</Text> },
+    {
+      title: 'Taken Status', key: 'taken', width: 165,
+      render: (_, r) => (
+        <Select
+          size="small"
+          value={r.takenStatus === 'Pending' ? undefined : (r.takenStatus === 'Pickup Dropped' ? 'pickup_dropped' : 'taken')}
+          placeholder="Select status"
+          style={{ width: 152 }}
+          onClick={e => e.stopPropagation()}
+          onChange={v => handlePickupStatusChange(r, v)}
+        >
+          <Option value="taken">Taken</Option>
+          <Option value="pickup_dropped">Pickup Dropped</Option>
+        </Select>
+      )
+    },
+    {
+      title: 'Payment By', key: 'paymentBy', width: 185,
+      render: (_, r) => {
+        if (r.paymentBy) {
+          return <Tag color={r.paymentBy === 'Finance' ? 'blue' : 'green'} style={{ borderRadius: 8, fontWeight: 600 }}>{r.paymentBy}</Tag>;
+        }
+        if (r.paymentStatus === 'Paid') return <Text type="secondary" style={{ fontSize: 12 }}>—</Text>;
+        return (
+          <Select
+            size="small"
+            placeholder="Select payer"
+            style={{ width: 170 }}
+            onClick={e => e.stopPropagation()}
+            onChange={v => handlePickupPayByChange(r, v)}
+          >
+            <Option value="finance">Payment by Finance</Option>
+            <Option value="pickup_team">Payment by Pickup Team</Option>
+          </Select>
+        );
+      }
+    },
+    { title: 'Amount', dataIndex: 'amount', width: 100, align: 'right', render: v => <Text strong style={{ color: '#B11E6A', fontSize: 13 }}>&#8377;{v?.toLocaleString()}</Text> },
+    { title: 'GPay Number', dataIndex: 'gPayNumber', width: 130, render: v => v ? <Space size={4}><PhoneOutlined style={{ color: '#52c41a' }} /><Text style={{ fontSize: 13 }}>{v}</Text></Space> : <Text type="secondary">—</Text> },
+    { title: 'Payment Proof', dataIndex: 'proofUrl', width: 125, render: v => v ? <Button size="small" icon={<FileTextOutlined />} onClick={() => window.open(v, '_blank')} style={{ fontSize: 12, color: '#B11E6A', borderColor: '#B11E6A' }}>View</Button> : <Tag color="default" style={{ borderRadius: 8, fontSize: 11 }}>Not Uploaded</Tag> },
+    {
+      title: 'Payment Status', dataIndex: 'paymentStatus', width: 120, align: 'center',
+      render: v => <Tag color={v === 'Paid' ? 'success' : 'warning'} style={{ borderRadius: 10, fontWeight: 600, fontSize: 12 }}>{v}</Tag>
+    },
+  ];
+
+  const reimbursementColumns = [
+    { title: 'Date', dataIndex: 'date', width: 95 },
+    { title: 'Order ID', dataIndex: 'orderId', width: 100, render: v => <Text strong style={{ color: '#B11E6A', fontSize: 13 }}>{v}</Text> },
+    { title: 'From', dataIndex: 'client', width: 140, render: v => <Text style={{ color: '#B11E6A', fontWeight: 600, fontSize: 13 }}>{v}</Text> },
+    { title: 'Pickup Employee', key: 'emp', width: 150, render: (_, r) => <Text strong style={{ fontSize: 13 }}>{r.pickupEmpName || '—'}</Text> },
+    { title: 'GPay Number', dataIndex: 'gPayNumber', width: 130, render: v => v ? <Space size={4}><PhoneOutlined style={{ color: '#52c41a' }} /><Text style={{ fontSize: 13 }}>{v}</Text></Space> : <Text type="secondary">—</Text> },
+    { title: 'Amount', dataIndex: 'amount', width: 100, align: 'right', render: v => <Text strong style={{ color: '#B11E6A', fontSize: 13 }}>&#8377;{v?.toLocaleString()}</Text> },
+    { title: 'Payment Proof', dataIndex: 'proofUrl', width: 125, render: v => v ? <Button size="small" icon={<FileTextOutlined />} onClick={() => window.open(v, '_blank')} style={{ fontSize: 12, color: '#B11E6A', borderColor: '#B11E6A' }}>View</Button> : <Tag color="warning" style={{ borderRadius: 8, fontSize: 11 }}>Not Uploaded</Tag> },
+    {
+      title: 'Reimbursement', key: 'reimb', width: 150, align: 'center',
+      render: (_, r) => (
+        <div>
+          <Tag color={r.reimbursementStatus === 'Paid' ? 'success' : r.reimbursementStatus === 'Partial' ? 'processing' : 'warning'} style={{ borderRadius: 10, fontSize: 12 }}>
+            {r.reimbursementStatus}
+          </Tag>
+          {r.reimbursementStatus !== 'Pending' && <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>&#8377;{r.reimbursedAmount} of &#8377;{r.amount}</Text>}
+        </div>
+      )
+    },
+    { title: 'Reimbursed By', dataIndex: 'paidBy', width: 120, render: v => v ? <Tag color="blue" style={{ borderRadius: 8, fontSize: 12 }}>{v}</Tag> : <Text type="secondary" style={{ fontSize: 13 }}>—</Text> },
+    { title: 'Finance Proof', dataIndex: 'reimbursementProofUrl', width: 130, render: v => v ? <Button size="small" icon={<FileTextOutlined />} onClick={() => window.open(v, '_blank')} style={{ fontSize: 12, color: '#52c41a', borderColor: '#52c41a' }}>View Proof</Button> : <Tag color="default" style={{ borderRadius: 8, fontSize: 11 }}>Not Yet Paid</Tag> },
+  ];
+
+  // skipSearch: the "All Orders" dispatch list (dispatchOrders) already has searchText sent
+  // to useGetDispatchesQuery as a `search` param and matched server-side against the order's
+  // full field set (including address fields this client-side check can't see) — re-checking
+  // it here would only ever narrow, never restore, so it's skipped for that dataset. Today's
+  // Dispatch (todayDispatchOrders) is fetched unfiltered, so it still needs this client check.
+  const applyFilters = (orders, { skipSearch = false } = {}) => orders.filter((o) => {
+    const s = skipSearch || !searchText || (o.id || '').toLowerCase().includes(searchText.toLowerCase()) || (o.client || '').toLowerCase().includes(searchText.toLowerCase()) || (o.address || '').toLowerCase().includes(searchText.toLowerCase()) || (o.destination || '').toLowerCase().includes(searchText.toLowerCase());
+    const p = paymentFilter === 'All' || o.payment === paymentFilter;
+    if (dispatchDateRange) {
+      const d = o.createdAt ? o.createdAt.slice(0, 10) : '';
+      if (d < dispatchDateRange[0] || d > dispatchDateRange[1]) return false;
+    }
+    return s && p;
+  });
+
+  // Emergency orders surface first wherever dispatch orders are listed — sort is
+  // stable, so recency order (already newest-first from the backend) is preserved
+  // within the emergency and non-emergency buckets.
+  const sortEmergencyFirst = (arr) => [...arr].sort((a, b) => ((b.isEmergency || b.emergencyApproved) ? 1 : 0) - ((a.isEmergency || a.emergencyApproved) ? 1 : 0));
+
+  const filteredOrders = sortEmergencyFirst(applyFilters(dispatchOrders, { skipSearch: true }));
+  // Today's Dispatch Order — sourced from the backend's dedicated /dispatch/today
+  // endpoint: orders dispatched today (any round) plus orders whose tentative delivery
+  // date is today. The Status filter is applied server-side only for "All Orders", so
+  // it's mirrored client-side here (it previously did nothing on this sub-tab).
+  const matchesStatusFilter = (o) => {
+    if (!dispatchStatusFilter) return true;
+    if (dispatchStatusFilter === 'Payment Pending') return o.payment === 'Pending';
+    // 'Ready to Dispatch' is DB status 'Confirmed', which includes partial rounds.
+    if (dispatchStatusFilter === 'Ready to Dispatch') return o.status === 'Ready to Dispatch' || o.status === 'Partially Dispatched';
+    return o.status === dispatchStatusFilter;
+  };
+  const todayOrders = sortEmergencyFirst(applyFilters(todayDispatchOrders).filter(matchesStatusFilter));
+  // Pending Dispatches — orders left with a Partial Dispatch balance (the "Balance"
+  // column's per-kit/product pending counts). Own lightweight search (order/client/
+  // destination only) rather than the shared filtersRow, since Payment/Status/Date
+  // filters there don't apply cleanly to a list that's already scoped to one status.
+  const pendingDispatchOrders = sortEmergencyFirst(pendingDispatchOrdersRaw.filter((o) => {
+    const q = pendingSearch.toLowerCase();
+    return !q || (o.id || '').toLowerCase().includes(q) || (o.client || '').toLowerCase().includes(q) || (o.destination || '').toLowerCase().includes(q);
+  }));
+
+  // ── Stat card click-through lists ─────────────────────────────────────────
+  const statRows = statsData?.data || [];
+  const activeStat = STAT_CARDS.find((c) => c.key === statModalKey) || null;
+  const activeStatRows = activeStat ? statRows.filter(activeStat.match) : [];
+  const statModalRows = (() => {
+    const q = statSearch.trim().toLowerCase();
+    const rows = activeStatRows.filter((r) => !q || [r.orderCode, r.clientName, r.destination, r.salesPerson]
+      .some((f) => (f || '').toLowerCase().includes(q)));
+    // Dispatched Today reads best latest-first; every other list keeps emergency-first.
+    if (activeStat?.key === 'dispatchedToday') {
+      return [...rows].sort((a, b) => new Date(b.lastDispatchedTodayAt || 0) - new Date(a.lastDispatchedTodayAt || 0));
+    }
+    return sortEmergencyFirst(rows);
+  })();
+  const statModalDue = statModalRows.reduce((s, r) => s + (r.payment === 'N/A' ? 0 : Number(r.balance) || 0), 0);
+  const openStatModal = (key) => { setStatSearch(''); setStatModalKey(key); };
+
+  const statCols = {
+    order: {
+      title: 'Order', dataIndex: 'orderCode', width: 140,
+      render: (v, r) => (
+        <Space direction="vertical" size={2}>
+          <Text strong style={{ color: '#B11E6A', fontSize: 13 }}>{v}</Text>
+          {r.isEmergency && <Tag color="red" style={{ fontSize: 11, lineHeight: '16px', marginBottom: 0 }}>Emergency</Tag>}
+          {r.emergencyApproved && <Tag color="orange" style={{ fontSize: 11, lineHeight: '16px', marginBottom: 0 }}>Emergency Dispatch</Tag>}
+          {r.isSample && <Tag color="purple" style={{ fontSize: 11, lineHeight: '16px', marginBottom: 0 }}>Sample Order</Tag>}
+        </Space>
+      ),
+    },
+    client: {
+      title: 'Client', dataIndex: 'clientName', width: 170,
+      render: (v, r) => (
+        <Space direction="vertical" size={0}>
+          <Text style={{ fontSize: 13 }}>{v}</Text>
+          {r.phone && r.phone !== '—' && <Text type="secondary" style={{ fontSize: 12 }}>{r.phone}</Text>}
+        </Space>
+      ),
+    },
+    destination: { title: 'Destination', dataIndex: 'destination', width: 140, render: (v) => <Text style={{ fontSize: 13 }}>{v}</Text> },
+    salesPerson: { title: 'Sales Person', dataIndex: 'salesPerson', width: 130, render: (v) => <Text style={{ fontSize: 13 }}>{v}</Text> },
+    deliveryDate: { title: 'Delivery Date', dataIndex: 'expectedDeliveryDate', width: 130, render: renderDeliveryDate },
+    createdAt: { title: 'Created Date', dataIndex: 'createdAt', width: 170, render: (v) => <Text style={{ fontSize: 13 }}>{fmtDateTime(v)}</Text> },
+    status: {
+      title: 'Status', dataIndex: 'status', width: 150,
+      render: (v) => <Tag style={{ borderRadius: 20, fontWeight: 500, fontSize: 13, background: `${statusColor[v]}22`, color: statusColor[v], border: `1px solid ${statusColor[v]}44` }}>{v}</Tag>,
+    },
+    payment: { title: 'Payment', dataIndex: 'payment', width: 110, render: renderPaymentTag },
+    balance: {
+      title: 'Amount Due', dataIndex: 'balance', width: 130, align: 'right',
+      render: (v, r) => (r.payment === 'N/A'
+        ? <Text type="secondary" style={{ fontSize: 13 }}>—</Text>
+        : (
+          <Space direction="vertical" size={0} style={{ alignItems: 'flex-end' }}>
+            <Text strong style={{ fontSize: 13, color: v > 0 ? '#B11E6A' : '#2e7d32' }}>{fmtMoney(v)}</Text>
+            {r.orderTotal > 0 && <Text type="secondary" style={{ fontSize: 11 }}>of {fmtMoney(r.orderTotal)}</Text>}
+          </Space>
+        )),
+    },
+    paymentTerms: { title: 'Payment Terms', dataIndex: 'paymentTerms', width: 140, render: (v) => <Text style={{ fontSize: 13 }}>{v || '—'}</Text> },
+    boxes: {
+      title: 'Boxes', dataIndex: 'boxes', width: 80,
+      render: (v) => <Space size={4}><InboxOutlined style={{ color: '#B11E6A' }} /><Text strong style={{ fontSize: 13 }}>{v}</Text></Space>,
+    },
+    transport: {
+      title: 'Transport / LR', key: 'transport', width: 150,
+      render: (_, r) => (
+        <Space direction="vertical" size={0}>
+          <Text style={{ fontSize: 13 }}>{r.transport}</Text>
+          {r.lrNumber && r.lrNumber !== r.transport && <Text type="secondary" style={{ fontSize: 12 }}>LR: {r.lrNumber}</Text>}
+        </Space>
+      ),
+    },
+    invoice: { title: 'Invoice No.', dataIndex: 'invoiceNumber', width: 120, render: (v) => <Text style={{ fontSize: 13 }}>{v || '—'}</Text> },
+    dispatchedAt: {
+      title: 'Dispatched At', key: 'dispatchedAt', width: 140,
+      render: (_, r) => (
+        <Space direction="vertical" size={0}>
+          <Text strong style={{ fontSize: 13, color: '#2e7d32' }}>
+            {r.lastDispatchedTodayAt ? new Date(r.lastDispatchedTodayAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) : '—'}
+          </Text>
+          {r.roundsToday > 1 && <Text type="secondary" style={{ fontSize: 11 }}>{r.roundsToday} rounds today</Text>}
+          {r.dispatchType && <Text type="secondary" style={{ fontSize: 11 }}>{r.dispatchType}</Text>}
+        </Space>
+      ),
+    },
+    emergencyItems: {
+      title: 'Emergency Items', key: 'emergencyItems', width: 250,
+      render: (_, r) => {
+        if (!r.emergencySplits?.length) return <Text type="secondary" style={{ fontSize: 12 }}>Whole order</Text>;
+        return (
+          <Space direction="vertical" size={4}>
+            {r.emergencySplits.map((s, i) => (
+              <div key={i}>
+                <Text strong style={{ fontSize: 12, color: '#ff4d4f' }}>{s.date ? fmtDate(s.date) : 'No date set'}</Text>
+                <div>
+                  {s.items.map((it, j) => (
+                    <Tag key={j} color="red" style={{ fontSize: 11, borderRadius: 10, marginTop: 2 }}>
+                      {it.name}{it.qty != null ? ` × ${it.qty}` : ' (all)'}{it.notes ? ` — ${it.notes}` : ''}
+                    </Tag>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </Space>
+        );
+      },
+    },
+    approval: {
+      title: 'Approved By', key: 'approval', width: 170,
+      render: (_, r) => (
+        <Space direction="vertical" size={0}>
+          <Text style={{ fontSize: 13 }}>{r.emergencyApprovedBy || '—'}</Text>
+          {r.emergencyApprovedAt && <Text type="secondary" style={{ fontSize: 12 }}>{fmtDateTime(r.emergencyApprovedAt)}</Text>}
+        </Space>
+      ),
+    },
+    reason: { title: 'Reason', dataIndex: 'emergencyReason', width: 200, render: (v) => <Text style={{ fontSize: 13 }}>{v || '—'}</Text> },
+  };
+
+  // Expandable config for all orders table
+  const expandable = {
+    expandedRowKeys: expandedRows,
+    onExpand: (expanded, record) => {
+      setExpandedRows(expanded ? [...expandedRows, record.key] : expandedRows.filter(k => k !== record.key));
+    },
+    expandedRowRender: (record) => renderProductPanel(record),
+    rowExpandable: () => true,
+  };
+
+  // ── Filters row ───────────────────────────────────────────────────────────
+  const filtersRow = (
+    <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+      <Input
+        prefix={<SearchOutlined />}
+        placeholder="Search orders, clients, destinations..."
+        value={searchText}
+        onChange={(e) => { setSearchText(e.target.value); setDispatchPage(1); }}
+        allowClear
+        style={{ flex: 1, minWidth: 200, borderRadius: 8 }}
+      />
+      <Space wrap>
+        <FilterOutlined style={{ color: '#B11E6A' }} />
+        <Select value={paymentFilter} onChange={setPaymentFilter} style={{ width: 160, borderRadius: 8 }}>
+          <Option value="All">All Payments</Option>
+          <Option value="Paid">Paid</Option>
+          <Option value="Partial">Partial</Option>
+          <Option value="Pending">Pending</Option>
+        </Select>
+        <Select allowClear placeholder="Status" value={dispatchStatusFilter} onChange={(val) => { setDispatchStatusFilter(val); setDispatchPage(1); }} style={{ width: 180, borderRadius: 8 }}>
+          <Option value="Ready to Dispatch">Ready to Dispatch</Option>
+          <Option value="Payment Pending">Payment Pending</Option>
+          <Option value="Dispatched">Dispatched</Option>
+          <Option value="Packing">Packing</Option>
+        </Select>
+        <DatePicker.RangePicker
+          style={{ borderRadius: 8 }}
+          onChange={(dates) => setDispatchDateRange(dates ? [dates[0].format('YYYY-MM-DD'), dates[1].format('YYYY-MM-DD')] : null)}
+          allowClear
+        />
+      </Space>
+    </div>
+  );
+
+  // ── Render ─────────────────────────────────────────────────────────────────
+  return (
+    <div className="page-container fade-in">
+      <PageBreadcrumb title="Dispatch Team" items={[{ label: 'Dispatch Team' }]} />
+
+      {/* Stats — counted over every visible dispatch record (/dispatch/stats); click a
+          card to list the orders behind its number. */}
+      <Row gutter={[12, 12]} style={{ marginBottom: 20 }}>
+        {STAT_CARDS.map((s, i) => (
+          <Col xs={12} sm={6} key={s.key}>
+            <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.08 }}>
+              <Card
+                hoverable
+                role="button"
+                tabIndex={0}
+                onClick={() => openStatModal(s.key)}
+                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openStatModal(s.key); } }}
+                style={{ borderRadius: 12, border: 'none', cursor: 'pointer', background: `linear-gradient(135deg, ${s.color}25 0%, ${s.color}10 100%)`, boxShadow: `0 4px 20px ${s.color}20`, textAlign: 'center' }}
+                styles={{ body: { padding: '16px 8px' } }}
+              >
+                <Title level={2} style={{ margin: 0, color: s.color }}>{statsData ? statRows.filter(s.match).length : '—'}</Title>
+                <Text style={{ fontSize: 12, color: isDark ? '#aaa' : '#666' }}>
+                  {s.label} <EyeOutlined style={{ fontSize: 11, opacity: 0.6 }} />
+                </Text>
+              </Card>
+            </motion.div>
+          </Col>
+        ))}
+      </Row>
+
+      {/* Main Tabs */}
+      <Tabs onChange={setActiveTab} type="card"
+        items={filterTabs([
+          {
+            key: 'dispatch',
+            label: <Space><CarOutlined />Dispatch Orders</Space>,
+            children: (
+              <Tabs
+                activeKey={dispatchSubTab}
+                onChange={setDispatchSubTab}
+                size="small"
+                tabBarStyle={{ marginBottom: 12 }}
+                items={[
+                  {
+                    key: 'all',
+                    label: 'All Orders',
+                    children: (
+                      <div>
+                        {filtersRow}
+                        <Card
+                          title={<Text strong style={{ color: textColor }}>Dispatch Orders</Text>}
+                          style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }}
+                          styles={{ body: { padding: 0 } }}
+                        >
+                          <div className="table-responsive" style={{ padding: '4px' }}>
+                            <Table
+                              dataSource={filteredOrders}
+                              columns={buildColumns(false)}
+                              expandable={expandable}
+                              rowKey="key"
+                              pagination={{
+                                current: dispatchPage,
+                                pageSize: dispatchPageSize,
+                                total: dispatchData?.total || 0,
+                                showSizeChanger: true,
+                                pageSizeOptions: ['10', '20', '50', '100'],
+                                onChange: (p, ps) => { setDispatchPage(p); setDispatchPageSize(ps); },
+                                size: 'small',
+                              }}
+                              size="small"
+                              scroll={{ x: 'max-content' }}
+                              onRow={(record) => ({
+                                onClick: () => navigate(`/dispatch/${record.key}`),
+                                style: { cursor: 'pointer' },
+                              })}
+                            />
+                          </div>
+                        </Card>
+                      </div>
+                    ),
+                  },
+                  {
+                    key: 'today',
+                    label: (
+                      <Space>
+                        Today's Dispatch Order
+                        <Tag style={{ borderRadius: 20, background: '#B11E6A22', color: '#B11E6A', border: '1px solid #B11E6A44', fontSize: 11 }}>
+                          {todayOrders.length}
+                        </Tag>
+                      </Space>
+                    ),
+                    children: (
+                      <div>
+                        {filtersRow}
+                        <Card
+                          title={<Space><CalendarOutlined style={{ color: '#B11E6A' }} /><Text strong style={{ color: textColor }}>Dispatched Today &amp; Due Today</Text></Space>}
+                          extra={
+                            <Button
+                              size="small"
+                              icon={<ExportOutlined />}
+                              style={{ color: '#B11E6A', borderColor: '#B11E6A' }}
+                              onClick={() => exportCSV(todayOrders, `today-dispatch-orders-${new Date().toLocaleDateString('en-IN').replace(/\//g, '-')}.csv`)}
+                            >
+                              Export All
+                            </Button>
+                          }
+                          style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }}
+                          styles={{ body: { padding: 0 } }}
+                        >
+                          <div className="table-responsive" style={{ padding: '4px' }}>
+                            {todayOrders.length === 0 ? (
+                              <div style={{ textAlign: 'center', padding: '32px', color: isDark ? '#aaa' : '#888' }}>
+                                <CarOutlined style={{ fontSize: 32, marginBottom: 8, display: 'block', color: '#B11E6A55' }} />
+                                No orders dispatched or due for dispatch today.
+                              </div>
+                            ) : (
+                              <Table
+                                dataSource={todayOrders}
+                                columns={buildColumns(true)}
+                                expandable={expandable}
+                                rowKey="key"
+                                pagination={{ showSizeChanger: true, pageSizeOptions: ['10', '20', '50', '100'], defaultPageSize: 10, size: 'small' }}
+                                size="small"
+                                scroll={{ x: 'max-content' }}
+                                onRow={(record) => ({
+                                  onClick: () => navigate(`/dispatch/${record.key}`),
+                                  style: { cursor: 'pointer' },
+                                })}
+                              />
+                            )}
+                          </div>
+                        </Card>
+                      </div>
+                    ),
+                  },
+                ]}
+              />
+            ),
+          },
+          {
+            key: 'pending_dispatch',
+            label: (
+              <Space>
+                <ClockCircleOutlined />
+                Pending Dispatches
+                {pendingDispatchOrders.length > 0 && (
+                  <Tag style={{ borderRadius: 20, background: '#d9770622', color: '#d97706', border: '1px solid #d9770644', fontSize: 11 }}>
+                    {pendingDispatchOrders.length}
+                  </Tag>
+                )}
+              </Space>
+            ),
+            children: (
+              <div>
+                <div style={{ marginBottom: 12 }}>
+                  <Text strong style={{ color: textColor }}>Orders Still Pending After Partial Dispatch</Text>
+                  <Text type="secondary" style={{ display: 'block', fontSize: 12 }}>Orders with at least one round already dispatched, but some kit/product quantity still left to go — see the Balance column for what's remaining</Text>
+                </div>
+                <div style={{ marginBottom: 12, display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                  <Input
+                    prefix={<SearchOutlined style={{ color: '#B11E6A' }} />}
+                    placeholder="Search orders, clients, destinations..."
+                    allowClear
+                    value={pendingSearch}
+                    onChange={(e) => setPendingSearch(e.target.value)}
+                    style={{ flex: 1, minWidth: 200, maxWidth: 320, borderRadius: 8 }}
+                  />
+                </div>
+                <Card
+                  title={<Space><ClockCircleOutlined style={{ color: '#d97706' }} /><Text strong style={{ color: textColor }}>Pending Dispatches</Text></Space>}
+                  extra={
+                    <Button
+                      size="small"
+                      icon={<ExportOutlined />}
+                      style={{ color: '#B11E6A', borderColor: '#B11E6A' }}
+                      onClick={() => exportPendingDispatchCSV(pendingDispatchOrders, `pending-dispatches-${new Date().toLocaleDateString('en-IN').replace(/\//g, '-')}.csv`)}
+                    >
+                      Export All
+                    </Button>
+                  }
+                  style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }}
+                  styles={{ body: { padding: 0 } }}
+                >
+                  <div className="table-responsive" style={{ padding: '4px' }}>
+                    {pendingDispatchOrders.length === 0 ? (
+                      <div style={{ textAlign: 'center', padding: '32px', color: isDark ? '#aaa' : '#888' }}>
+                        <ClockCircleOutlined style={{ fontSize: 32, marginBottom: 8, display: 'block', color: '#d9770655' }} />
+                        No pending dispatches — no order currently has a leftover balance from a partial dispatch.
+                      </div>
+                    ) : (
+                      <Table
+                        dataSource={pendingDispatchOrders}
+                        columns={buildColumns(false)}
+                        expandable={expandable}
+                        rowKey="key"
+                        pagination={{ showSizeChanger: true, pageSizeOptions: ['10', '20', '50', '100'], defaultPageSize: 10, size: 'small' }}
+                        size="small"
+                        scroll={{ x: 'max-content' }}
+                        onRow={(record) => ({
+                          onClick: () => navigate(`/dispatch/${record.key}`),
+                          style: { cursor: 'pointer' },
+                        })}
+                      />
+                    )}
+                  </div>
+                </Card>
+              </div>
+            ),
+          },
+          {
+            key: 'pickup',
+            label: <Space><CarOutlined />Pick Up Order</Space>,
+            children: (
+              <div>
+                <Tabs
+                  activeKey={pickupSubTab}
+                  onChange={setPickupSubTab}
+                  size="small"
+                  tabBarStyle={{ marginBottom: 12 }}
+                  items={[
+                    {
+                      key: 'pickup_orders',
+                      label: (
+                        <Space>
+                          Today's Pickup Orders
+                          {todaysPickupOrders.length > 0 && (
+                            <Tag style={{ borderRadius: 20, background: '#B11E6A22', color: '#B11E6A', border: '1px solid #B11E6A44', fontSize: 11 }}>
+                              {todaysPickupOrders.length}
+                            </Tag>
+                          )}
+                        </Space>
+                      ),
+                      children: (
+                        <div>
+                          <div style={{ marginBottom: 12 }}>
+                            <Text strong style={{ color: textColor }}>Current Day Pickup Orders</Text>
+                            <Text type="secondary" style={{ display: 'block', fontSize: 12 }}>Pickups whose Expected Delivery Date is today</Text>
+                          </div>
+                          <div style={{ marginBottom: 12, display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                            <Input prefix={<SearchOutlined style={{ color: '#B11E6A' }} />} placeholder="Search order ID, client..." allowClear value={pickupSearch} onChange={(e) => setPickupSearch(e.target.value)} style={{ width: 240, borderRadius: 8 }} />
+                            <Select allowClear placeholder="Taken Status" value={pickupTakenFilter} onChange={setPickupTakenFilter} style={{ width: 160, borderRadius: 8 }}>
+                              <Option value="Taken">Taken</Option>
+                              <Option value="Pickup Dropped">Pickup Dropped</Option>
+                            </Select>
+                            <Select allowClear placeholder="Payment Status" value={pickupPayFilter} onChange={setPickupPayFilter} style={{ width: 160, borderRadius: 8 }}>
+                              <Option value="Paid">Paid</Option>
+                              <Option value="Unpaid">Unpaid</Option>
+                            </Select>
+                            <DatePicker.RangePicker
+                              style={{ borderRadius: 8 }}
+                              onChange={(dates) => setPickupDateRange(dates ? [dates[0].format('YYYY-MM-DD'), dates[1].format('YYYY-MM-DD')] : null)}
+                              allowClear
+                            />
+                          </div>
+                          {(() => {
+                            const rows = todaysPickupOrders.filter((r) => {
+                              const q = pickupSearch.toLowerCase();
+                              const matchSearch = !q || (r.orderId || '').toLowerCase().includes(q) || (r.client || '').toLowerCase().includes(q);
+                              const matchTaken = !pickupTakenFilter || r.takenStatus === pickupTakenFilter;
+                              const matchPay = !pickupPayFilter || r.paymentStatus === pickupPayFilter;
+                              const matchDate = !pickupDateRange || ((r.date || '') >= pickupDateRange[0] && (r.date || '') <= pickupDateRange[1]);
+                              return matchSearch && matchTaken && matchPay && matchDate;
+                            });
+                            if (todaysPickupOrders.length === 0) return (
+                              <div style={{ textAlign: 'center', padding: '40px 0', color: isDark ? '#aaa' : '#888' }}>
+                                <CarOutlined style={{ fontSize: 40, display: 'block', marginBottom: 10, color: '#B11E6A55' }} />
+                                <Text type="secondary">No pickup orders for today.</Text>
+                              </div>
+                            );
+                            if (rows.length === 0) return <div style={{ textAlign: 'center', padding: '24px', color: isDark ? '#aaa' : '#888' }}>No results match your filters.</div>;
+                            return (
+                              <Table
+                                size="small"
+                                dataSource={rows}
+                                rowKey="key"
+                                pagination={{ showSizeChanger: true, pageSizeOptions: ['10', '20', '50', '100'], defaultPageSize: 10, size: 'small' }}
+                                scroll={{ x: 'max-content' }}
+                                columns={pickupColumns}
+                              />
+                            );
+                          })()}
+                        </div>
+                      ),
+                    },
+                    {
+                      key: 'all_pickup_orders',
+                      label: 'All Orders',
+                      children: (
+                        <div>
+                          <div style={{ marginBottom: 12 }}>
+                            <Text strong style={{ color: textColor }}>All Pickup Orders</Text>
+                            <Text type="secondary" style={{ display: 'block', fontSize: 12 }}>Every pickup job, regardless of Expected Delivery Date</Text>
+                          </div>
+                          <div style={{ marginBottom: 12, display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                            <Input prefix={<SearchOutlined style={{ color: '#B11E6A' }} />} placeholder="Search order ID, client..." allowClear value={pickupSearch} onChange={(e) => setPickupSearch(e.target.value)} style={{ width: 240, borderRadius: 8 }} />
+                            <Select allowClear placeholder="Taken Status" value={pickupTakenFilter} onChange={setPickupTakenFilter} style={{ width: 160, borderRadius: 8 }}>
+                              <Option value="Taken">Taken</Option>
+                              <Option value="Pickup Dropped">Pickup Dropped</Option>
+                            </Select>
+                            <Select allowClear placeholder="Payment Status" value={pickupPayFilter} onChange={setPickupPayFilter} style={{ width: 160, borderRadius: 8 }}>
+                              <Option value="Paid">Paid</Option>
+                              <Option value="Unpaid">Unpaid</Option>
+                            </Select>
+                            <DatePicker.RangePicker
+                              style={{ borderRadius: 8 }}
+                              onChange={(dates) => setPickupDateRange(dates ? [dates[0].format('YYYY-MM-DD'), dates[1].format('YYYY-MM-DD')] : null)}
+                              allowClear
+                            />
+                          </div>
+                          {(() => {
+                            const rows = allPickupOrders.filter((r) => {
+                              const q = pickupSearch.toLowerCase();
+                              const matchSearch = !q || (r.orderId || '').toLowerCase().includes(q) || (r.client || '').toLowerCase().includes(q);
+                              const matchTaken = !pickupTakenFilter || r.takenStatus === pickupTakenFilter;
+                              const matchPay = !pickupPayFilter || r.paymentStatus === pickupPayFilter;
+                              const matchDate = !pickupDateRange || ((r.date || '') >= pickupDateRange[0] && (r.date || '') <= pickupDateRange[1]);
+                              return matchSearch && matchTaken && matchPay && matchDate;
+                            });
+                            if (allPickupOrders.length === 0) return (
+                              <div style={{ textAlign: 'center', padding: '40px 0', color: isDark ? '#aaa' : '#888' }}>
+                                <CarOutlined style={{ fontSize: 40, display: 'block', marginBottom: 10, color: '#B11E6A55' }} />
+                                <Text type="secondary">No pickup orders yet.</Text>
+                              </div>
+                            );
+                            if (rows.length === 0) return <div style={{ textAlign: 'center', padding: '24px', color: isDark ? '#aaa' : '#888' }}>No results match your filters.</div>;
+                            return (
+                              <Table
+                                size="small"
+                                dataSource={rows}
+                                rowKey="key"
+                                pagination={{ showSizeChanger: true, pageSizeOptions: ['10', '20', '50', '100'], defaultPageSize: 10, size: 'small' }}
+                                scroll={{ x: 'max-content' }}
+                                columns={pickupColumns}
+                              />
+                            );
+                          })()}
+                        </div>
+                      ),
+                    },
+                    {
+                      key: 'reimbursement_claims',
+                      label: (
+                        <Space>
+                          Reimbursement Claims
+                          {reimbExpenses.filter(r => r.reimbursementStatus !== 'Paid').length > 0 && (
+                            <Tag style={{ borderRadius: 20, background: '#ff4d4f22', color: '#ff4d4f', border: '1px solid #ff4d4f44', fontSize: 10, padding: '0 5px' }}>
+                              {reimbExpenses.filter(r => r.reimbursementStatus !== 'Paid').length} Pending
+                            </Tag>
+                          )}
+                        </Space>
+                      ),
+                      children: (
+                        <div>
+                          <div style={{ marginBottom: 12 }}>
+                            <Text strong style={{ color: textColor }}>Reimbursement Claims</Text>
+                            <Text type="secondary" style={{ display: 'block', fontSize: 12 }}>Pickups a Pickup Team member paid for out of pocket — reimbursement status from Finance</Text>
+                          </div>
+                          <div style={{ marginBottom: 12, display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                            <Input prefix={<SearchOutlined style={{ color: '#B11E6A' }} />} placeholder="Search order, client, employee..." allowClear value={reimbSearch} onChange={(e) => setReimbSearch(e.target.value)} style={{ width: 240, borderRadius: 8 }} />
+                            <Select allowClear placeholder="Reimbursement Status" value={reimbPayFilter} onChange={setReimbPayFilter} style={{ width: 180, borderRadius: 8 }}>
+                              <Option value="Pending">Pending</Option>
+                              <Option value="Partial">Partial</Option>
+                              <Option value="Paid">Paid</Option>
+                            </Select>
+                            <DatePicker.RangePicker
+                              style={{ borderRadius: 8 }}
+                              onChange={(dates) => setReimbDateRange(dates ? [dates[0].format('YYYY-MM-DD'), dates[1].format('YYYY-MM-DD')] : null)}
+                              allowClear
+                            />
+                          </div>
+                          {reimbExpenses.length === 0 ? (
+                            <div style={{ textAlign: 'center', padding: '40px 0', color: isDark ? '#aaa' : '#888' }}>
+                              <WalletOutlined style={{ fontSize: 40, display: 'block', marginBottom: 10, color: '#B11E6A55' }} />
+                              <Text type="secondary">No reimbursement claims yet.</Text>
+                            </div>
+                          ) : (
+                            <Table
+                              size="small"
+                              dataSource={reimbExpenses.filter((r) => {
+                                const q = reimbSearch.toLowerCase();
+                                const matchSearch = !q || (r.orderId || '').toLowerCase().includes(q) || (r.client || '').toLowerCase().includes(q) || (r.pickupEmpName || '').toLowerCase().includes(q);
+                                const matchPay = !reimbPayFilter || r.reimbursementStatus === reimbPayFilter;
+                                const matchDate = !reimbDateRange || ((r.date || '') >= reimbDateRange[0] && (r.date || '') <= reimbDateRange[1]);
+                                return matchSearch && matchPay && matchDate;
+                              })}
+                              rowKey="key"
+                              pagination={{ showSizeChanger: true, pageSizeOptions: ['10', '20', '50', '100'], defaultPageSize: 10, size: 'small' }}
+                              scroll={{ x: 'max-content' }}
+                              columns={reimbursementColumns}
+                            />
+                          )}
+                        </div>
+                      ),
+                    },
+                  ]}
+                />
+              </div>
+            ),
+          },
+          {
+            key: 'transport',
+            label: <Space><GlobalOutlined />Transport</Space>,
+            children: (
+              <div>
+                <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
+                  {[
+                    { label: 'Total Dispatched', val: transportData.length, color: '#B11E6A' },
+                    { label: 'In Transit', val: transportData.filter(t => t.status === 'In Transit').length, color: '#C94F8A' },
+                    { label: 'Delivered', val: transportData.filter(t => t.status === 'Delivered').length, color: '#6b1240' },
+                  ].map((s) => (
+                    <Col xs={8} key={s.label}>
+                      <Card style={{ borderRadius: 12, border: 'none', background: `linear-gradient(135deg, ${s.color}25 0%, ${s.color}10 100%)`, textAlign: 'center' }} styles={{ body: { padding: '12px 8px' } }}>
+                        <Title level={3} style={{ margin: 0, color: s.color }}>{s.val}</Title>
+                        <Text style={{ fontSize: 12, color: isDark ? '#aaa' : '#666' }}>{s.label}</Text>
+                      </Card>
+                    </Col>
+                  ))}
+                </Row>
+
+                <Card
+                  title={<Text strong style={{ color: textColor }}>Transport Records</Text>}
+                  style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }}
+                  styles={{ body: { padding: 0 } }}
+                >
+                  <div style={{ padding: '10px 16px 8px', borderBottom: `1px solid ${isDark ? '#2a2a3e' : '#f0f0f0'}`, display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                    <Input prefix={<SearchOutlined style={{ color: '#B11E6A' }} />} placeholder="Search LR No, order, client..." allowClear value={transportSearch} onChange={(e) => setTransportSearch(e.target.value)} style={{ width: 250, borderRadius: 8 }} />
+                    <Select allowClear placeholder="Status" value={transportStatusFilter} onChange={setTransportStatusFilter} style={{ width: 160, borderRadius: 8 }}>
+                      <Option value="In Transit">In Transit</Option>
+                      <Option value="Delivered">Delivered</Option>
+                    </Select>
+                    <DatePicker.RangePicker
+                      style={{ borderRadius: 8 }}
+                      onChange={(dates) => setTransportDateRange(dates ? [dates[0].format('YYYY-MM-DD'), dates[1].format('YYYY-MM-DD')] : null)}
+                      allowClear
+                    />
+                  </div>
+                  <div className="table-responsive" style={{ padding: '4px' }}>
+                    <Table
+                      dataSource={transportData.filter((t) => {
+                        const q = transportSearch.toLowerCase();
+                        const matchSearch = !q || (t.lrNumber || '').toLowerCase().includes(q) || (t.orderId || '').toLowerCase().includes(q) || (t.client || '').toLowerCase().includes(q) || (t.transport || '').toLowerCase().includes(q);
+                        const matchStatus = !transportStatusFilter || t.status === transportStatusFilter;
+                        const matchDate = !transportDateRange || ((t.dispatchDate || '') >= transportDateRange[0] && (t.dispatchDate || '') <= transportDateRange[1]);
+                        return matchSearch && matchStatus && matchDate;
+                      })}
+                      columns={transportColumns}
+                      pagination={{ showSizeChanger: true, pageSizeOptions: ['10', '20', '50', '100'], defaultPageSize: 10, size: 'small' }}
+                      size="small"
+                      scroll={{ x: 'max-content' }}
+                    />
+                  </div>
+                </Card>
+              </div>
+            ),
+          },
+        ])}
+        activeKey={activeKeyFor(activeTab)}
+      />
+
+      {/* ── Stat card list — the orders behind a header card's number. Row click opens the
+           order's Dispatch Detail. ── */}
+      <Modal
+        title={activeStat && (
+          <Space>
+            <span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: '50%', background: activeStat.color }} />
+            <span>{activeStat.label}</span>
+            <Tag style={{ borderRadius: 20, background: `${activeStat.color}22`, color: activeStat.color, border: `1px solid ${activeStat.color}44` }}>
+              {activeStatRows.length}
+            </Tag>
+          </Space>
+        )}
+        open={!!activeStat}
+        onCancel={() => setStatModalKey(null)}
+        footer={null}
+        width={1150}
+        centered
+      >
+        {activeStat && (
+          <>
+            <Text type="secondary" style={{ display: 'block', fontSize: 12, marginBottom: 12 }}>{activeStat.hint}</Text>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+              <Input
+                prefix={<SearchOutlined />}
+                placeholder="Search order, client, destination, sales person..."
+                allowClear
+                value={statSearch}
+                onChange={(e) => setStatSearch(e.target.value)}
+                style={{ flex: 1, minWidth: 200, maxWidth: 360, borderRadius: 8 }}
+              />
+              {activeStat.sumDue && (
+                <Tag style={{ borderRadius: 20, fontSize: 13, padding: '2px 12px', background: '#B11E6A14', color: '#B11E6A', border: '1px solid #B11E6A44' }}>
+                  Total due: <b>{fmtMoney(statModalDue)}</b>
+                </Tag>
+              )}
+            </div>
+            <div className="table-responsive">
+              <Table
+                key={activeStat.key}
+                dataSource={statModalRows}
+                columns={activeStat.columns.map((k) => statCols[k])}
+                rowKey="_id"
+                size="small"
+                loading={statsFetching && !statsData}
+                scroll={{ x: 'max-content' }}
+                pagination={{ showSizeChanger: true, pageSizeOptions: ['10', '20', '50', '100'], defaultPageSize: 10, size: 'small' }}
+                locale={{ emptyText: statSearch ? 'No orders match your search.' : `No orders under ${activeStat.label} right now.` }}
+                onRow={(r) => ({
+                  onClick: () => { setStatModalKey(null); navigate(`/dispatch/${r._id}`); },
+                  style: { cursor: 'pointer' },
+                })}
+              />
+            </div>
+          </>
+        )}
+      </Modal>
+
+      {/* ── Pickup Payment Modal — Pickup Team pays out of pocket, so this always
+           captures amount/GPay/proof to raise a reimbursement claim (Finance's choice
+           settles immediately with no form). ── */}
+      <Modal
+        title={<Space><WalletOutlined style={{ color: '#B11E6A' }} /><span>Pickup Team Payment — Upload Proof</span></Space>}
+        open={showPickupPayModal}
+        onCancel={() => { setShowPickupPayModal(false); setPickupPayTarget(null); pickupPayForm.resetFields(); }}
+        footer={null}
+        width={480}
+        centered
+        destroyOnClose
+      >
+        {pickupPayTarget && (
+          <Form form={pickupPayForm} layout="vertical" onFinish={handlePickupPaySubmit}>
+            <div style={{ background: '#fafcff', borderRadius: 10, padding: '12px 14px', marginBottom: 16, border: '1px solid #e8f4ff' }}>
+              <Text strong style={{ display: 'block' }}>{pickupPayTarget.client || '—'}</Text>
+              <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>
+                Order: {pickupPayTarget.orderId || '—'} &nbsp;·&nbsp; Pickup: {pickupPayTarget.pickupEmpName || '—'}
+              </Text>
+              <Tag color="green" style={{ marginTop: 6, borderRadius: 8 }}>Payment by Pickup Team</Tag>
+            </div>
+
+            <Form.Item label="Amount Paid (₹)" name="amount" initialValue={pickupPayTarget.amount || undefined} rules={[{ required: true, message: 'Enter amount paid' }]}>
+              <InputNumber
+                prefix="₹"
+                style={{ width: '100%' }}
+                min={0}
+                formatter={v => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
+                parser={v => v.replace(/₹\s?|(,*)/g, '')}
+                placeholder="0"
+              />
+            </Form.Item>
+
+            <Form.Item label="Pickup Employee Name" name="pickupEmpId" rules={[{ required: true, message: 'Select the pickup employee' }]}>
+              <Select
+                showSearch
+                placeholder="Select pickup employee"
+                style={{ width: '100%' }}
+                options={pickupStaffOptions}
+                filterOption={(input, option) => (option?.label || '').toLowerCase().includes(input.toLowerCase())}
+              />
+            </Form.Item>
+
+            <Form.Item label="GPay Number (Pickup employee who paid)" name="gPayNumber" rules={[{ required: true, message: 'Enter GPay / UPI number' }]}>
+              <Input prefix={<PhoneOutlined />} placeholder="Enter G Pay / UPI number" style={{ borderRadius: 8 }} />
+            </Form.Item>
+
+            <Form.Item label="Upload Payment Proof (Payment Screenshot / Receipt)" name="proof" rules={[{ required: true, message: 'Please upload proof' }]}>
+              <Upload.Dragger maxCount={1} customRequest={makeUpload('dispatch/proofs')} accept=".pdf,.jpg,.jpeg,.png">
+                <p className="ant-upload-drag-icon"><UploadOutlined style={{ color: '#B11E6A' }} /></p>
+                <p className="ant-upload-text" style={{ fontSize: 13 }}>Click or drag payment screenshot / receipt</p>
+              </Upload.Dragger>
+            </Form.Item>
+
+            <Alert
+              type="success"
+              showIcon
+              style={{ borderRadius: 8, marginBottom: 14, fontSize: 12 }}
+              message="This raises a reimbursement claim in Finance team's Reimbursement Expense tab — they'll pay it back in full or in part."
+            />
+
+            <div style={{ display: 'flex', gap: 8 }}>
+              <Button block onClick={() => { setShowPickupPayModal(false); pickupPayForm.resetFields(); }}>Cancel</Button>
+              <Button block type="primary" htmlType="submit" style={{ background: '#B11E6A', border: 'none', fontWeight: 600 }}>
+                Submit Payment Proof
+              </Button>
+            </div>
+          </Form>
+        )}
+      </Modal>
+
+      {/* ── Pickup Dropped — Received Confirmation Modal ──────────────────────── */}
+      <Modal
+        title={<Space><CheckCircleOutlined style={{ color: '#fa8c16' }} /><span>Pickup Dropped — Received Order Process</span></Space>}
+        open={showReceivedModal}
+        onCancel={() => { setShowReceivedModal(false); setReceivedTarget(null); }}
+        onOk={handlePickupDroppedConfirm}
+        okText="Confirm — Mark as Received"
+        okButtonProps={{ style: { background: '#B11E6A', border: 'none' } }}
+        centered
+        width={440}
+      >
+        {receivedTarget && (
+          <div>
+            <Alert
+              type="warning"
+              showIcon
+              message="Pickup Dropped"
+              description={`Order ${receivedTarget.orderId || '—'} from ${receivedTarget.client || '—'} will be marked as Pickup Dropped and the received order process will be initiated.`}
+              style={{ borderRadius: 8, marginBottom: 14 }}
+            />
+            <Text type="secondary" style={{ fontSize: 13 }}>
+              The order delivery status will be updated to <Text strong>Received</Text> and will be visible in the tracking view.
+            </Text>
+          </div>
+        )}
+      </Modal>
+
+      {/* ── Dispatch Label Modal ──────────────────────────────────────────────── */}
+      <Modal
+        title={<Space><PrinterOutlined style={{ color: '#B11E6A' }} /><span>Hotel Details Printout — {selectedPrintOrder?.id}</span></Space>}
+        open={printModalOpen}
+        onCancel={() => setPrintModalOpen(false)}
+        width={Math.min(640, window.innerWidth - 32)}
+        footer={[
+          <Button key="edit" icon={<EditOutlined />} onClick={() => setPrintEditMode(!printEditMode)}>
+            {printEditMode ? 'View Preview' : 'Manual Entry'}
+          </Button>,
+          <Button key="print" type="primary" icon={<PrinterOutlined />}
+            style={{ background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none' }}
+            onClick={handlePrint}>
+            Print Label
+          </Button>,
+          <Button key="close" onClick={() => setPrintModalOpen(false)}>Close</Button>,
+        ]}
+      >
+        {selectedPrintOrder && (
+          <div>
+            <Tabs
+              size="small"
+              defaultActiveKey="preview"
+              items={[
+                {
+                  key: 'preview',
+                  label: 'Label Preview',
+                  children: (
+                    <div style={{ display: 'flex', justifyContent: 'center', padding: '8px 0' }}>
+                      <div id="dispatch-label" style={{ border: '2px solid #333', borderRadius: 6, padding: 20, width: 380, background: '#fff', color: '#111', fontFamily: 'Arial, sans-serif' }}>
+                        <div style={{ background: '#B11E6A', color: '#fff', display: 'inline-block', padding: '2px 12px', borderRadius: 12, fontSize: 11, fontWeight: 700, marginBottom: 14, letterSpacing: 1 }}>
+                          HEAL N GLOW — DISPATCH LABEL
+                        </div>
+                        <div style={{ marginBottom: 12 }}>
+                          <div style={{ fontSize: 10, letterSpacing: 2, textTransform: 'uppercase', color: '#888', fontWeight: 700, marginBottom: 6 }}>From</div>
+                          <div style={{ fontWeight: 700, fontSize: 15 }}>{HNG.name}</div>
+                          <div style={{ fontSize: 12, color: '#444' }}>{HNG.address}</div>
+                          <div style={{ fontSize: 12, color: '#444' }}>{HNG.city}, {HNG.state} — {HNG.pincode}</div>
+                          <div style={{ fontSize: 12, color: '#444' }}>Ph: {HNG.phone}</div>
+                          <div style={{ fontSize: 11, color: '#888' }}>GSTIN: {HNG.gstin}</div>
+                        </div>
+                        <div style={{ borderTop: '1px dashed #aaa', margin: '12px 0' }} />
+                        <div>
+                          <div style={{ fontSize: 10, letterSpacing: 2, textTransform: 'uppercase', color: '#888', fontWeight: 700, marginBottom: 6 }}>To</div>
+                          <div style={{ fontWeight: 700, fontSize: 15 }}>{printForm.getFieldValue('toName') || selectedPrintOrder.client}</div>
+                          <div style={{ fontSize: 12, color: '#444' }}>Attn: {printForm.getFieldValue('toContact') || selectedPrintOrder.contactPerson}</div>
+                          <div style={{ fontSize: 12, color: '#444' }}>{printForm.getFieldValue('toAddress') || selectedPrintOrder.detailedAddress}</div>
+                          <div style={{ fontSize: 12, color: '#444' }}>
+                            {printForm.getFieldValue('toCity') || selectedPrintOrder.city},&nbsp;
+                            {printForm.getFieldValue('toState') || selectedPrintOrder.state}&nbsp;—&nbsp;
+                            {printForm.getFieldValue('toPincode') || selectedPrintOrder.pincode}
+                          </div>
+                          <div style={{ fontSize: 12, color: '#444' }}>Ph: {printForm.getFieldValue('toPhone') || selectedPrintOrder.phone}</div>
+                        </div>
+                        <div style={{ borderTop: '1px solid #eee', marginTop: 12, paddingTop: 8 }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#555' }}>
+                            <span>Order: <b>{printForm.getFieldValue('orderRef') || selectedPrintOrder.id}</b></span>
+                            <span>Boxes: <b>{printForm.getFieldValue('boxCount') || selectedPrintOrder.boxes}</b></span>
+                            <span>Wt: <b>{printForm.getFieldValue('weight') || selectedPrintOrder.weight}</b></span>
+                          </div>
+                          <div style={{ fontFamily: 'monospace', fontSize: 10, letterSpacing: 4, color: '#333', marginTop: 6, textAlign: 'center' }}>
+                            ||| {selectedPrintOrder.id} |||
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ),
+                },
+                {
+                  key: 'edit',
+                  label: 'Manual Entry',
+                  children: (
+                    <Form form={printForm} layout="vertical" size="small" style={{ marginTop: 8 }}>
+                      <Text style={{ fontSize: 11, color: '#B11E6A', fontWeight: 600, letterSpacing: 1, textTransform: 'uppercase', display: 'block', marginBottom: 12 }}>
+                        To (Recipient Details)
+                      </Text>
+                      <Row gutter={12}>
+                        <Col xs={24} sm={12}><Form.Item label="Hotel / Company Name" name="toName"><Input /></Form.Item></Col>
+                        <Col xs={24} sm={12}><Form.Item label="Point of Contact" name="toContact"><Input /></Form.Item></Col>
+                        <Col xs={24} sm={12}><Form.Item label="Phone Number" name="toPhone"><Input /></Form.Item></Col>
+                        <Col xs={24}><Form.Item label="Detailed Address" name="toAddress"><Input.TextArea rows={2} /></Form.Item></Col>
+                        <Col xs={24} sm={8}><Form.Item label="City" name="toCity"><Input /></Form.Item></Col>
+                        <Col xs={24} sm={8}><Form.Item label="State" name="toState"><Input /></Form.Item></Col>
+                        <Col xs={24} sm={8}><Form.Item label="Pincode" name="toPincode"><Input /></Form.Item></Col>
+                        <Col xs={24} sm={8}><Form.Item label="Location / Area" name="toLocation"><Input /></Form.Item></Col>
+                        <Col xs={24} sm={8}><Form.Item label="Box Count" name="boxCount"><Input type="number" prefix={<InboxOutlined />} /></Form.Item></Col>
+                        <Col xs={24} sm={8}><Form.Item label="Weight" name="weight"><Input suffix="Kg" /></Form.Item></Col>
+                      </Row>
+                      <Divider style={{ margin: '8px 0' }} />
+                      <Text style={{ fontSize: 11, color: '#888', display: 'block', marginBottom: 8 }}>From (HNG — fixed)</Text>
+                      <Descriptions size="small" column={2} style={{ borderRadius: 8 }}>
+                        <Descriptions.Item label="Company">{HNG.name}</Descriptions.Item>
+                        <Descriptions.Item label="Phone">{HNG.phone}</Descriptions.Item>
+                        <Descriptions.Item label="Address">{HNG.address}, {HNG.city} — {HNG.pincode}</Descriptions.Item>
+                        <Descriptions.Item label="GSTIN">{HNG.gstin}</Descriptions.Item>
+                      </Descriptions>
+                    </Form>
+                  ),
+                },
+              ]}
+            />
+          </div>
+        )}
+      </Modal>
+    </div>
+  );
+}

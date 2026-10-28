@@ -1,0 +1,42 @@
+const express = require('express');
+const router = express.Router();
+const ctrl = require('./tasks.controller');
+const timeConfigCtrl = require('./taskTimeConfig.controller');
+const assigneeTaskCtrl = require('./assigneeTask.controller');
+const { protect } = require('../../middleware/auth');
+
+router.use(protect);
+
+router.get('/', ctrl.getTasks);
+router.get('/suggested', ctrl.getSuggestedTasks);
+router.get('/suggested/insight', ctrl.getSuggestedTasksInsight);
+router.get('/suggested/insight/latest', ctrl.getLatestTaskInsight);
+router.get('/emergency-requests', ctrl.getEmergencyRequests);
+router.get('/order/:orderId/readiness', ctrl.getOrderDispatchReadiness);
+
+// ── Time Management config (must precede '/:id' so the literal isn't captured) ──
+router.get('/time-config', timeConfigCtrl.getAll);
+router.post('/time-config', timeConfigCtrl.create);
+router.put('/time-config/:id', timeConfigCtrl.update);
+router.delete('/time-config/:id', timeConfigCtrl.remove);
+
+// "Task to Assignee" tasks (New Task → Task For = Task to Assignee) — kept above '/:id'.
+router.get('/assignee-tasks', assigneeTaskCtrl.getAssigneeTasks);
+router.post('/assignee-tasks', assigneeTaskCtrl.createAssigneeTasks);
+router.get('/assignee-tasks/:id', assigneeTaskCtrl.getAssigneeTask);
+router.patch('/assignee-tasks/:id/status', assigneeTaskCtrl.updateAssigneeTaskStatus);
+
+router.post('/', ctrl.createTask);
+router.get('/:id', ctrl.getTask);
+router.patch('/:id/status', ctrl.updateTaskStatus);
+router.patch('/:id/dispatch', ctrl.dispatchOrder);
+router.patch('/:id/approve-emergency', ctrl.approveEmergency);
+router.patch('/:id/request-emergency', ctrl.requestEmergencyDispatch);
+router.patch('/order/:orderId/request-emergency', ctrl.requestEmergencyDispatchForOrder);
+router.patch('/:id/approve-emergency/sales', ctrl.approveEmergencySales);
+router.patch('/:id/approve-emergency/ops', ctrl.approveEmergencyOps);
+router.patch('/:id/reassign', ctrl.reassignTask);
+router.patch('/:id/switch', ctrl.switchInProgressTask);
+router.delete('/:id', ctrl.deleteTask);
+
+module.exports = router;

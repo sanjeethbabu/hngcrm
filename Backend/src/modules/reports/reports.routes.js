@@ -1,0 +1,32 @@
+const express = require('express');
+const router = express.Router();
+const ctrl = require('./reports.controller');
+const { protect } = require('../../middleware/auth');
+
+router.use(protect);
+
+router.get('/sales', ctrl.getSalesReport);
+router.get('/sales/export', ctrl.exportSalesReport);
+router.get('/purchase', ctrl.getPurchaseReport);
+router.get('/purchase/export', ctrl.exportPurchaseReport);
+router.get('/local-purchase', ctrl.getLocalPurchaseReport);
+router.get('/local-purchase/export', ctrl.exportLocalPurchaseReport);
+router.get('/profit-loss', ctrl.getProfitLoss);
+router.get('/bill-wise-pl', ctrl.getBillPL);
+router.get('/monthly-gst', ctrl.getMonthlyGst);
+router.get('/monthly-gst/export', ctrl.exportGstReport);
+router.get('/auditor-tax', ctrl.getAuditorTax);
+router.get('/auditor-tax/export', ctrl.exportSalesReport);
+router.get('/forwarding-courier', ctrl.getForwardingCourierReport);
+router.get('/my-performance', ctrl.getMyPerformance);
+router.get('/performance', ctrl.getPerformance);
+router.get('/task-performance', ctrl.getTaskPerformanceReport);
+router.get('/emergency-approvals', ctrl.getEmergencyApprovalsReport);
+router.get('/switches', ctrl.getSwitchReport);
+router.get('/damaged', ctrl.getDamagedReport);
+router.get('/damaged/export', ctrl.exportDamagedReport);
+router.get('/payment-bank', ctrl.getPaymentBankReport);
+router.get('/lead-followups', ctrl.getLeadFollowupReport);
+router.get('/assignee-tasks', ctrl.getAssigneeTaskReport);
+
+module.exports = router;

@@ -1,0 +1,143 @@
+const express = require('express');
+const cors = require('cors');
+const helmet = require('helmet');
+const morgan = require('morgan');
+const compression = require('compression');
+const rateLimit = require('express-rate-limit');
+const mongoSanitize = require('express-mongo-sanitize');
+const jwt = require('jsonwebtoken');
+const path = require('path');
+
+const errorHandler = require('./middleware/errorHandler');
+const AppError = require('./utils/AppError');
+
+// Route imports
+const authRoutes = require('./modules/auth/auth.routes');
+const settingsRoutes = require('./modules/settings/settings.routes');
+const salesRoutes = require('./modules/sales/sales.routes');
+const billingRoutes = require('./modules/billing/billing.routes');
+const inventoryRoutes = require('./modules/inventory/inventory.routes');
+const purchaseRoutes = require('./modules/purchase/purchase.routes');
+const financialRoutes = require('./modules/financial/financial.routes');
+const operationsRoutes = require('./modules/operations/operations.routes');
+const dispatchRoutes = require('./modules/dispatch/dispatch.routes');
+const tasksRoutes = require('./modules/tasks/tasks.routes');
+const staffRoutes = require('./modules/staff/staff.routes');
+const expensesRoutes = require('./modules/expenses/expenses.routes');
+const vendorsRoutes = require('./modules/vendors/vendors.routes');
+const partiesRoutes = require('./modules/parties/parties.routes');
+const notificationsRoutes = require('./modules/notifications/notifications.routes');
+const dashboardRoutes = require('./modules/dashboard/dashboard.routes');
+const reportsRoutes = require('./modules/reports/reports.routes');
+const whatsappRoutes = require('./modules/whatsapp/whatsapp.routes');
+const alertConfigRoutes = require('./modules/alertConfig/alertConfig.routes');
+const alertsRoutes = require('./modules/alerts/alerts.routes');
+const hrmsRoutes = require('./modules/hrms/hrms.routes');
+
+const app = express();
+
+app.set('trust proxy', 1);
+
+// ─── Security & Utility Middleware ───────────────────────────────────────────
+// Mirrors the frontend's env-based domain switching (Frontend/src/api/axios.js):
+// local dev, the development server (devhng.askeva.io → port 7008) and the
+// production domain (hngcrm.askeva.io → port 7007) are always allowed, so a
+// missing/stale CLIENT_URL on any box never breaks CORS. CLIENT_URL (if set) is
+// added on top, e.g. for a staging domain.
+const ALLOWED_ORIGINS = [
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+  'https://devhng.askeva.io',
+  'https://hngcrm.askeva.io',
+  process.env.CLIENT_URL,
+].filter(Boolean);
+
+app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
+app.use(cors({
+  origin: (origin, callback) => {
+    // No origin = server-to-server / curl / same-origin requests — allow.
+    if (!origin || ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+    callback(new Error(`CORS blocked for origin: ${origin}`));
+  },
+  credentials: true,
+}));
+app.use(mongoSanitize());
+app.use(compression());
+if (process.env.NODE_ENV === 'development') app.use(morgan('dev'));
+
+// Rate limiting
+app.use('/api/auth/login', rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  message: 'Too many login attempts. Try again in 15 minutes.',
+}));
+// Keyed per logged-in user (decoded from their JWT) rather than raw IP, so
+// staff sharing one office/NAT IP don't all draw from a single shared bucket
+// and trip each other's requests into 429s. Falls back to IP for
+// unauthenticated requests. `max` is sized to comfortably absorb the app's
+// normal background polling (alerts/notifications/tasks) plus the burst of
+// refetches RTK Query fires on window focus/reconnect, while still bounding
+// runaway/scripted traffic.
+const rateLimitKey = (req) => {
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    try {
+      const decoded = jwt.verify(authHeader.slice(7), process.env.JWT_SECRET);
+      if (decoded && decoded.id) return `user:${decoded.id}`;
+    } catch (_) {
+      // invalid/expired token — fall back to IP-based limiting below
+    }
+  }
+  return req.ip;
+};
+app.use('/api', rateLimit({
+  windowMs: 60 * 1000,
+  max: 600,
+  keyGenerator: rateLimitKey,
+  message: 'Too many requests. Please slow down and try again shortly.',
+}));
+
+// Body parsers
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Static uploads
+app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
+
+// ─── API Routes ──────────────────────────────────────────────────────────────
+app.use('/api/auth', authRoutes);
+app.use('/api/settings', settingsRoutes);
+app.use('/api/sales', salesRoutes);
+app.use('/api/billing', billingRoutes);
+app.use('/api/inventory', inventoryRoutes);
+app.use('/api/purchase', purchaseRoutes);
+app.use('/api/financial', financialRoutes);
+app.use('/api/operations', operationsRoutes);
+app.use('/api/dispatch', dispatchRoutes);
+app.use('/api/tasks', tasksRoutes);
+app.use('/api/staff', staffRoutes);
+app.use('/api/expenses', expensesRoutes);
+app.use('/api/vendors', vendorsRoutes);
+app.use('/api/parties', partiesRoutes);
+app.use('/api/notifications', notificationsRoutes);
+app.use('/api/dashboard', dashboardRoutes);
+app.use('/api/reports', reportsRoutes);
+app.use('/api/whatsapp', whatsappRoutes);
+app.use('/api/alert-config', alertConfigRoutes);
+app.use('/api/alerts', alertsRoutes);
+app.use('/api/hrms', hrmsRoutes);
+
+// Health check
+app.get('/api/health', (req, res) => {
+  res.status(200).json({ success: true, message: 'HNG CRM API is running', env: process.env.NODE_ENV });
+});
+
+// 404 handler
+app.all('*', (req, res, next) => {
+  next(new AppError(`Route ${req.originalUrl} not found`, 404));
+});
+
+// Global error handler
+app.use(errorHandler);
+
+module.exports = app;

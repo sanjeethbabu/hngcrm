@@ -1,0 +1,314 @@
+const mongoose = require('mongoose');
+
+// Per-item sub-schema. strict:false so dynamic product specifications
+// (shape, fragrance, stickerShape, productAttributes, attachments, etc.) and any
+// future field survive the lead → quotation → negotiation → order pipeline and
+// reach Operations. (An inline array sub-schema is implicitly strict:true even when
+// the parent doc is strict:false — that silently stripped these fields before.)
+const orderItemSchema = new mongoose.Schema({
+  itemId: { type: mongoose.Schema.Types.ObjectId, ref: 'InventoryItem' },
+  itemName: String,
+  unit: String,
+  price: Number,
+  qty: Number,
+  lineTotal: Number,
+  // ─── Operations / packaging fields ───
+  logoType: { type: String, enum: ['Sticker', 'Box', 'Frosted Ziplock', 'Butter Paper', 'Wooden Brush', 'Other', 'None', ''], default: '' },
+  // Normalize legacy/lowercase values (e.g. 'yes'/'no') to the enum BEFORE validation runs,
+  // so converting older quotations/negotiations whose items stored 'yes' doesn't 500.
+  sticker: {
+    type: String,
+    enum: ['YES', 'NO', ''],
+    default: '',
+    set: (v) => {
+      const s = String(v ?? '').trim().toUpperCase();
+      return s === 'YES' || s === 'NO' ? s : '';
+    },
+  },
+  // Direct printing flag (separate from sticker). Drives Operations routing: a printing item
+  // goes through the Sticker/Print tab first, then to its Box/Ziplock packaging tab.
+  printing: {
+    type: String,
+    enum: ['YES', 'NO', ''],
+    default: '',
+    set: (v) => {
+      const s = String(v ?? '').trim().toUpperCase();
+      return s === 'YES' || s === 'NO' ? s : '';
+    },
+  },
+  size: String,
+  // Sticker dimensions for this item's chosen packing material, sourced from the matching
+  // Inventory item's per-material size (boxStickerSize/ziplockStickerSize/butterPaperStickerSize).
+  stickerSize: String,
+  packaging: String,
+  packingMaterial: String,
+  // Chosen sub-type of the packing material (from Inventory > Packing Config > Packing
+  // Materials subtypes, e.g. "Small Box") and its physical dimensions. packingSize — NOT
+  // the product's fill size (`size` above) — is what Material Stock deduction matches on
+  // (falling back to stickerSize when Sticker = YES). Mirrors kitOrders[].displayUnitType /
+  // .size for standalone products.
+  packingMaterialType: String,
+  packingSize: String,
+  material: String,
+  rate: Number,
+  gst: Number,
+  boxes: Number,
+  inventoryStock: { type: Number, default: 0 },
+  // Cumulative units actually pulled from InventoryItem.currentStock for this line —
+  // across creation, later qty-increase edits, and auto-backfill on restock (see
+  // deductInventoryQty/backfillPendingDeductionsForItem in sales.controller.js). May be
+  // LESS than the required qty (isKit ? qty × kit count : qty) when stock was insufficient
+  // at deduction time — the gap is the order's outstanding "owed" inventory.
+  deductedQty: { type: Number, default: 0 },
+  // ─── Packing-material (Inventory > Material Stocks) tracking for THIS line ───
+  // Units actually decremented from a generic (non-hotel) MaterialStock row for this line's
+  // packing material at order creation / qty-raise, plus the row it came from — recorded so
+  // Operations' "Use Existing" action (draw from the hotel's own reserved stock instead) can
+  // credit that exact amount back to that exact row rather than guessing. 0 in the common
+  // case where the hotel keeps its own pre-printed packaging and no generic row matched.
+  materialDeductedQty: { type: Number, default: 0 },
+  materialDeductedFrom: String,
+  // Set by Operations > Order Management > "Use Existing" — this line's packing material is
+  // sourced from the hotel's own reserved MaterialStock (hotelName-tagged) rows, so the
+  // generic-pool deduction is skipped for it and the checklist packing/fill gate treats it
+  // as ready. packingExistingStockQty = how much has already been drawn from reserved stock.
+  packingFromExistingStock: { type: Boolean, default: false },
+  packingExistingStockQty: { type: Number, default: 0 },
+  packingExistingStockAt: Date,
+  packingExistingStockBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  verified: { type: Boolean, default: false },
+  // ─── Order-composition category (drives 3-bucket totals + Operations grouping) ───
+  // 'personalized'  = kit + extra products customized together as one unit
+  // 'separate_kit'  = a kit purchased as-is, standalone
+  // 'separate_product' = an individual non-kit product
+  category: { type: String, default: '' },
+  // Kit identity — kept on order items so Operations can group/route kit vs. separate.
+  isKit: { type: Boolean, default: false },
+  kitId: String,
+  kitName: String,
+  kitType: String,
+  // ─── Dynamic product specifications (carried so Operations & all downstream views see full detail) ───
+  shape: String,
+  stickerShape: String,
+  fragrance: String,
+  stickerPrinting: String,
+  color: String,
+  bottleType: String,
+  brand: String,
+  hsnCode: String,
+  discountPercent: Number,
+  logo: String,
+  materialCategory: String,
+  specification: String,
+  otherSpecs: mongoose.Schema.Types.Mixed,
+  productAttributes: { type: mongoose.Schema.Types.Mixed, default: {} },
+  // Per-product / per-kit file attachments (reference images, spec sheets)
+  attachments: [mongoose.Schema.Types.Mixed],
+  // Kit personalization (so Operations can render full kit detail per item)
+  displayUnit: String,
+  kitPrice: Number,
+  overallQty: Number,
+  kitIncludes: [mongoose.Schema.Types.Mixed],
+}, { strict: false });
+
+const orderSchema = new mongoose.Schema({
+  orderCode: { type: String, unique: true },
+  leadId: { type: mongoose.Schema.Types.ObjectId, ref: 'Lead' },
+  negotiationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Negotiation' },
+  quotationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Quotation' },
+  clientName: { type: String, required: true },
+  clientPartyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Party' },
+  product: String,
+  qty: Number,
+  amount: Number,
+  gstAmount: { type: Number, default: 0 },
+  total: Number,
+  advancePaid: { type: Number, default: 0 },
+  balance: Number,
+  type: { type: String, enum: ['GST', 'Non-GST'], default: 'GST' },
+  status: {
+    type: String,
+    enum: ['In Production', 'Dispatch Ready', 'Dispatched', 'Payment Pending', 'Completed', 'Closed', 'Cancelled'],
+    default: 'In Production',
+  },
+  paymentTerms: String,
+  paymentReminderDate: Date,
+  advancePaidAmount: { type: Number, default: 0 },
+  expectedDeliveryDate: Date,
+  items: [orderItemSchema],
+  // Resolved from selected display unit's tabMapping (Box | Ziplock | Sticker | Butter Paper)
+  displayUnitTab: { type: String, enum: ['Box', 'Ziplock', 'Sticker', 'Butter Paper', 'Wooden Brush', 'Other', ''], default: '' },
+  // Logo branding
+  logoRequired: { type: Boolean, default: false },
+  logoUrl: String,
+  assignedTo: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  // ─── Operations workflow tracking ───
+  isUrgent: { type: Boolean, default: false },
+  isEmergency: { type: Boolean, default: false },
+  // Emergency dispatch request + dual approval (sales head + ops head). Previously persisted
+  // only via strict:false; made explicit so they reliably round-trip on fetch.
+  emergencyDispatchRequested: { type: Boolean, default: false },
+  emergencySalesApproved: { type: Boolean, default: false },
+  emergencySalesApprovedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  emergencySalesApprovedAt: Date,
+  emergencyOpsApproved: { type: Boolean, default: false },
+  emergencyOpsApprovedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  emergencyOpsApprovedAt: Date,
+  emergencyApproved: { type: Boolean, default: false },
+  emergencyApprovedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  emergencyApprovedAt: Date,
+  emergencyTaskId: { type: mongoose.Schema.Types.ObjectId, ref: 'Task' },
+  emergencyReason: String,
+  // Dispatch LR transport-name mismatch (AI-scanned lorry receipt vs. the manually entered
+  // transport name) — flagged for the assigned sales person to approve/reject from the Sales
+  // Orders tab. Weight is intentionally NOT cross-checked/tracked here, only transport name.
+  dispatchTransportMismatchStatus: { type: String, enum: ['none', 'pending', 'approved', 'rejected'], default: 'none' },
+  dispatchTransportMismatchExpected: String,
+  dispatchTransportMismatchScanned: String,
+  dispatchTransportMismatchReportedAt: Date,
+  dispatchTransportMismatchRequestedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  dispatchTransportMismatchDecidedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  dispatchTransportMismatchDecidedAt: Date,
+  // Dispatch LR mismatch on fields OTHER than Weight/Transport Name (e.g. Packages/Boxes,
+  // Destination) — unlike the transport-name mismatch above (single sales sign-off, never
+  // blocking), this requires a reason + BOTH Sales and Operations to approve before the
+  // dispatcher can proceed with Finished Dispatch (see requestLrMismatchApproval).
+  dispatchLrMismatchStatus: { type: String, enum: ['none', 'pending', 'approved', 'rejected'], default: 'none' },
+  dispatchLrMismatchReason: String,
+  dispatchLrMismatchFields: [String],
+  dispatchLrMismatchDetails: mongoose.Schema.Types.Mixed,
+  dispatchLrMismatchRequestedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  dispatchLrMismatchRequestedAt: Date,
+  dispatchLrMismatchSalesApproved: { type: Boolean, default: false },
+  dispatchLrMismatchSalesApprovedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  dispatchLrMismatchSalesApprovedAt: Date,
+  dispatchLrMismatchOpsApproved: { type: Boolean, default: false },
+  dispatchLrMismatchOpsApprovedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  dispatchLrMismatchOpsApprovedAt: Date,
+  // General dispatch invoice/lorry-receipt mismatch — a free-text reason the dispatcher
+  // raises for ANY discrepancy noticed while reviewing the AI-scanned invoice (replaces
+  // the old self-service "Edit Details" toggle). Unlike dispatchLrMismatch* above (dual
+  // Sales+Operations, Packages/Destination only), this needs only the order's own
+  // assigned sales person to approve (see requestInvoiceMismatchApproval / decideInvoiceMismatch).
+  // Approval sets AwaitingReupload so Dispatch can re-upload the corrected invoice —
+  // the next successful scan-lr clears it automatically (see scanLorryReceipt).
+  dispatchInvoiceMismatchStatus: { type: String, enum: ['none', 'pending', 'approved', 'rejected'], default: 'none' },
+  dispatchInvoiceMismatchReason: String,
+  dispatchInvoiceMismatchRequestedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  dispatchInvoiceMismatchRequestedAt: Date,
+  dispatchInvoiceMismatchDecidedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  dispatchInvoiceMismatchDecidedAt: Date,
+  dispatchInvoiceMismatchDecisionNote: String,
+  dispatchInvoiceMismatchAwaitingReupload: { type: Boolean, default: false },
+  // Dispatch Confirmation Approval — before EITHER "Confirm Partial Dispatch" or "Confirm
+  // Full Dispatch" (Dispatch module) can be used, the dispatcher must send an approval
+  // request and get sign-off from Operations (single approver, no Sales side — see
+  // requestDispatchApproval in dispatch.controller.js / decideDispatchApproval in
+  // operations.controller.js, surfaced as the "Dispatch Approve" row action on
+  // Operations > Order Management). This can recur more than once per order — a fresh
+  // approval is required before EVERY confirm round (a Partial round, a later Partial
+  // round, the final Full round) — so confirmDispatch resets these live fields back to
+  // 'none' once a round is actually confirmed. Past decisions are preserved in
+  // dispatchApprovalHistory (one entry per round) so a multi-round dispatch still shows
+  // every approval on Reports > Approval Report — same history-flattening approach used
+  // for Task/StickerRequest switchHistory on the Switch Report.
+  dispatchApprovalStatus: { type: String, enum: ['none', 'pending', 'approved', 'rejected'], default: 'none' },
+  dispatchApprovalRequestedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  dispatchApprovalRequestedByName: String,
+  dispatchApprovalRequestedByRole: String,
+  dispatchApprovalRequestedAt: Date,
+  dispatchApprovalDecidedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  dispatchApprovalDecidedByName: String,
+  dispatchApprovalDecidedAt: Date,
+  // Denormalized name/role snapshots (rather than relying on populate) mirror the
+  // Task/StickerRequest switchHistory convention — one entry per confirmed round.
+  dispatchApprovalHistory: [{
+    status: { type: String, enum: ['approved', 'rejected'] },
+    requestedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    requestedByName: String,
+    requestedByRole: String,
+    requestedAt: Date,
+    decidedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    decidedByName: String,
+    decidedAt: Date,
+  }],
+  // Delivery routing (copied from the originating lead/negotiation at conversion).
+  deliveryBy: String,
+  transportationBy: String,
+  // Planned transport / carrier from the Lead — Dispatch Details pre-selects it in its
+  // Transport Name dropdown (the dispatcher can still pick another or add a new one).
+  transportName: String,
+  forwardingCharge: { type: Boolean, default: false },
+  deliveryType: { type: String, enum: ['Full', 'Partial', ''], default: '' },
+  // Partial-delivery tracking: partial qty processed now, balance as a follow-on entry (same order ID).
+  partialQty: { type: Number, default: 0 },
+  balanceQty: { type: Number, default: 0 },
+  partialDeliveries: [{
+    qty: Number,
+    balanceQty: Number,
+    note: String,
+    status: { type: String, default: 'Pending' },
+    at: { type: Date, default: Date.now },
+  }],
+  designStatus: { type: String, default: '' },
+  printingStatus: { type: String, enum: ['Yet to Receive', 'Received', 'Closed', ''], default: '' },
+  // Per-product printing status, keyed by lowercase product name. Used as a fallback by
+  // updateItemPrintingStatus when `items` has no matching entry (e.g. legacy/sample orders whose
+  // product list only exists on the Lead, not on this order's own `items` array) — writing there
+  // instead of pushing a synthetic entry into `items` avoids making Operations' "items?.length ?
+  // items : leadProducts" fallback (Operations/data.js, OperationDetail.jsx) switch away from the
+  // Lead's full product list, which would hide the order's other products.
+  printingStatusOverrides: { type: Map, of: String, default: {} },
+  stockStatus: { type: String, default: '' },
+  operationStage: { type: String, default: '' },
+  taskStatus: { type: String, default: '' },
+  orderCategory: { type: String, enum: ['ORDER', 'SAMPLE'], default: 'ORDER' },
+  location: String,
+  clientPhone: String,
+  contactPerson: String,
+  billingName: String,
+  gstNumber: String,
+  gstPercent: { type: Number, default: 18 },
+  salesPerson: String,
+  billType: { type: String, enum: ['GST', 'NON_GST'], default: 'GST' },
+  detailedAddress: String,
+  city: String,
+  state: String,
+  pincode: String,
+  // Shipping address — dispatch reads this; invoices continue to use the billing address above.
+  shippingAddress: String,
+  shippingCity: String,
+  shippingState: String,
+  shippingPincode: String,
+  forwardingChargeAmount: { type: Number, default: 0 },
+  paymentProofs: [mongoose.Schema.Types.Mixed],
+  splitDates: [mongoose.Schema.Types.Mixed],
+  // Field-level audit trail for order edits (see utils/orderEditHistory.js), rendered as the
+  // Activity Timeline card in Sales' Order Detail view. Declared explicitly (rather than left
+  // to strict:false) so it reliably round-trips like the other previously-implicit fields above.
+  editHistory: [{
+    field: String,
+    oldValue: String,
+    newValue: String,
+    changedAt: { type: Date, default: Date.now },
+    changedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    changedByName: String,
+  }],
+  deletedAt: Date,
+  deletedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  // True when at least one item's deductedQty is still short of what the order actually
+  // needs (isKit ? qty × kit count : qty) — set/cleared by deductInventoryQty in
+  // sales.controller.js. Since stock is now deducted per task at assignment time (see
+  // utils/taskQuantity.js's deductStockForTask) rather than in bulk at order creation, this
+  // only ever gets set by a legacy pre-migration order's backfillPendingDeductionsForItem
+  // payoff; it no longer drives the Task Management assignment gate (that's
+  // checkLiveStockAvailability now), just the "Stock Pending" badge on Orders.
+  hasPendingStockDeduction: { type: Boolean, default: false },
+}, { timestamps: true, strict: false });
+
+orderSchema.index({ status: 1, deletedAt: 1 });
+orderSchema.index({ clientPartyId: 1 });
+orderSchema.index({ hasPendingStockDeduction: 1, deletedAt: 1 });
+
+module.exports = mongoose.model('Order', orderSchema);

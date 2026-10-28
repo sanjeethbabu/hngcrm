@@ -1,0 +1,2024 @@
+import React, { useState, useMemo, useEffect } from 'react'; // data from RTK Query — useEffect only syncs the Pay Now form
+import dayjs from 'dayjs';
+import { useCloudinaryUpload } from '../../hooks/useCloudinaryUpload';
+import {
+  Row, Col, Card, Table, Tag, Button, Typography, Space, Select, Tabs, Statistic, Divider,
+  Modal, Descriptions, Upload, InputNumber, Form, Input, Badge, Tooltip, Alert,
+  Image, DatePicker,
+} from 'antd';
+import { enqueueSnackbar } from 'notistack';
+import {
+  WhatsAppOutlined, ShopOutlined, CheckCircleOutlined, CloseCircleOutlined, WalletOutlined,
+  ContainerOutlined, ArrowUpOutlined, ClockCircleOutlined, EyeOutlined, UploadOutlined, DollarCircleOutlined, AuditOutlined, FileTextOutlined,
+  SearchOutlined, MessageOutlined, EditOutlined,
+  CarOutlined, UserOutlined, PhoneOutlined, SendOutlined, ShoppingOutlined, TruckOutlined
+} from '@ant-design/icons';
+import { useSelector } from 'react-redux';
+import { motion } from 'framer-motion';
+import PageBreadcrumb from '../../components/common/PageBreadcrumb';
+import useTabAccess from '../../hooks/useTabAccess';
+import usePageAccess from '../../hooks/usePageAccess';
+import useDebouncedValue from '../../hooks/useDebouncedValue';
+import {
+  useGetPendingRequestsQuery,
+  useApproveFinancialRequestMutation,
+  useBatchApproveRequestsMutation,
+  useRejectFinancialRequestMutation,
+  useUpdateFinancialQuotationMutation,
+  useRequestQuotationModificationMutation,
+  usePayPurchaseOrderMutation,
+  useGetExpensePaymentsQuery,
+  usePayExpenseMutation,
+  useGetPickupExpensesQuery,
+  usePayPickupExpenseMutation,
+  useGetLocalPurchaseExpensesQuery,
+  usePayLocalPurchaseExpenseMutation,
+  useGetLrPaymentsQuery,
+  usePayLrPaymentMutation,
+  useAddPurchaseNoteMutation,
+  useGetVendorsQuery,
+} from '../../store/api/apiSlice';
+
+const { Title, Text } = Typography;
+const { Option } = Select;
+
+
+export default function Financial() {
+  const makeUpload = useCloudinaryUpload();
+  const { filterTabs } = useTabAccess('Financial');
+  const { requireAccess } = usePageAccess('Financial');
+  const isDark = useSelector((s) => s.theme.isDark);
+  const cardBg = isDark ? '#1E1E2E' : '#ffffff';
+  const textColor = isDark ? '#e0e0e0' : '#1a1a2e';
+  const borderColor = isDark ? '#2a2a3a' : '#f0f0f0';
+
+  // Pagination / filter state (must be declared before RTK Query hooks that use them)
+  const [purchaseReqStatusFilter, setPurchaseReqStatusFilter] = useState(null);
+  const [reqPage, setReqPage] = useState(1);
+  const [reqPageSize, setReqPageSize] = useState(10);
+  const [purchaseReqSearch, setPurchaseReqSearch] = useState('');
+  const [expStatusFilter, setExpStatusFilter] = useState(null);
+  const [expPage, setExpPage] = useState(1);
+  const [expPageSize, setExpPageSize] = useState(10);
+  const [expSearch, setExpSearch] = useState('');
+  const [pickupPayFilter, setPickupPayFilter] = useState(null);
+  const [pickupPage, setPickupPage] = useState(1);
+  const [pickupPageSize, setPickupPageSize] = useState(10);
+  const [pickupSearch, setPickupSearch] = useState('');
+  const [localExpPayFilter, setLocalExpPayFilter] = useState(null);
+  const [localExpPage, setLocalExpPage] = useState(1);
+  const [localExpPageSize, setLocalExpPageSize] = useState(10);
+  const [localExpSearch, setLocalExpSearch] = useState('');
+  const [lrPayFilter, setLrPayFilter] = useState(null);
+  const [lrPayPage, setLrPayPage] = useState(1);
+  const [lrPayPageSize, setLrPayPageSize] = useState(10);
+  const [lrPaySearch, setLrPaySearch] = useState('');
+  // Search terms are sent to the server (across ALL records) — debounced so typing fires one
+  // request per pause instead of one per keystroke.
+  const dPurchaseReqSearch = useDebouncedValue(purchaseReqSearch.trim());
+  const dExpSearch = useDebouncedValue(expSearch.trim());
+  const dPickupSearch = useDebouncedValue(pickupSearch.trim());
+  const dLocalExpSearch = useDebouncedValue(localExpSearch.trim());
+  const dLrPaySearch = useDebouncedValue(lrPaySearch.trim());
+
+  // RTK Query data
+  const { data: pendingReqData } = useGetPendingRequestsQuery({ page: reqPage, limit: reqPageSize, ...(purchaseReqStatusFilter ? { status: purchaseReqStatusFilter } : {}), ...(dPurchaseReqSearch ? { search: dPurchaseReqSearch } : {}) });
+  const [approveReq] = useApproveFinancialRequestMutation();
+  const [batchApproveReqs] = useBatchApproveRequestsMutation();
+  const [rejectReq] = useRejectFinancialRequestMutation();
+  const [updateQuotation] = useUpdateFinancialQuotationMutation();
+  const [requestModification] = useRequestQuotationModificationMutation();
+  const [payOrder] = usePayPurchaseOrderMutation();
+  const { data: expensePaymentsData } = useGetExpensePaymentsQuery({ page: expPage, limit: expPageSize, ...(expStatusFilter ? { status: expStatusFilter } : {}), ...(dExpSearch ? { search: dExpSearch } : {}) });
+  const [payExpense] = usePayExpenseMutation();
+  const { data: pickupExpData } = useGetPickupExpensesQuery({ page: pickupPage, limit: pickupPageSize, ...(pickupPayFilter ? { paymentStatus: pickupPayFilter } : {}), ...(dPickupSearch ? { search: dPickupSearch } : {}) });
+  const [payPickup] = usePayPickupExpenseMutation();
+  const { data: localPurchaseExpData } = useGetLocalPurchaseExpensesQuery({ page: localExpPage, limit: localExpPageSize, ...(localExpPayFilter ? { paymentStatus: localExpPayFilter } : {}), ...(dLocalExpSearch ? { search: dLocalExpSearch } : {}) });
+  const [payLocalPurchase] = usePayLocalPurchaseExpenseMutation();
+  const { data: lrPaymentsData } = useGetLrPaymentsQuery({ page: lrPayPage, limit: lrPayPageSize, ...(lrPayFilter ? { paymentStatus: lrPayFilter } : {}), ...(dLrPaySearch ? { search: dLrPaySearch } : {}) });
+  const [payLrPayment] = usePayLrPaymentMutation();
+  const [addPurchaseNote] = useAddPurchaseNoteMutation();
+  const { data: vendorData } = useGetVendorsQuery({ limit: 500 });
+
+  const raisedRequests = useMemo(() => (pendingReqData?.data || []).map((r) => ({
+    ...r,
+    key: r._id,
+    item: r.itemId?.itemName || r.itemName,
+    supplier: r.vendorId?.name || '—',
+    qty: r.qty,
+    unit: r.unit,
+    payment_terms: r.paymentTerms,
+    date: r.createdAt?.slice(0, 10),
+    notes: r.notes || [],
+    quotation_file_url: r.quotationFileUrl || null,
+    quotation_file: r.quotationFileUrl ? r.quotationFileUrl.split('/').pop() : null,
+    quotationFiles: r.quotationFiles || [],
+    finance_note: r.financeNote || '',
+    batchId: r.batchId || null,
+    requestType: r.requestType || 'individual',
+  })), [pendingReqData]);
+
+  const purchaseOrders = useMemo(() => raisedRequests
+    .filter((r) => r.linkedOrder)
+    .map((r) => {
+      const o = r.linkedOrder;
+      return {
+        ...o,
+        key: o._id,
+        requestKey: r._id,
+        item: r.item,
+        supplier: r.supplier,
+        unit: r.unit,
+        vendor: r.vendorId || null,
+        // Normalize backend (camelCase) → field names the table/Details modal read
+        bill_no: o.billNo || o.poCode || '—',
+        inv_no: o.invNo || '—',
+        status: o.paymentStatus || 'Unpaid',
+        payment_terms: o.paymentTerms || r.payment_terms,
+        date: (o.createdAt || r.createdAt)?.slice(0, 10),
+        amount: o.amount || 0,
+        paid_amount: o.paidAmount || 0,
+        notes: o.notes || [],
+      };
+    }), [raisedRequests]);
+
+  const [viewRequest, setViewRequest] = useState(null);
+  const [viewQuotationFile, setViewQuotationFile] = useState(null);
+  const [showPaymentModal, setShowPaymentModal] = useState(false);
+  const [selectedForPayment, setSelectedForPayment] = useState(null);
+  const [paymentForm] = Form.useForm();
+
+  // The Pay Now form instance is shared by every row, and antd keeps its stored values over a
+  // remount's initialValues — so set the LR Copy Reminder Date explicitly for the row being
+  // opened. Otherwise the previous row's date carries over (and a carried-over blank would
+  // clear this row's existing reminder on submit).
+  useEffect(() => {
+    if (!showPaymentModal || !selectedForPayment) return;
+    paymentForm.setFieldsValue({
+      lr_reminder_date: selectedForPayment.lrReminderDate ? dayjs(selectedForPayment.lrReminderDate.slice(0, 10)) : null,
+    });
+  }, [showPaymentModal, selectedForPayment, paymentForm]);
+
+  /* ── Notes: Quotation Requests table (uses Redux raisedRequests.notes) ── */
+  const [openReqNotes, setOpenReqNotes] = useState(null);
+  const [reqNoteInput, setReqNoteInput] = useState('');
+
+  /* ── Bulk-batch grouping: rows sharing a batchId collapse into one expandable parent row ── */
+  const [openBulkBatches, setOpenBulkBatches] = useState([]);
+
+  /* ── Notes: Purchase Payments table (Redux purchaseOrders.notes) ── */
+  const [openOrderNotes, setOpenOrderNotes] = useState(null);
+  const [orderNoteInput, setOrderNoteInput] = useState({});
+
+  /* ── Edit Quotation modal (Finance can edit & resend) ── */
+  const [showEditReqModal, setShowEditReqModal] = useState(false);
+  const [editReqTarget, setEditReqTarget] = useState(null);
+  const [editReqForm] = Form.useForm();
+
+  /* ── Reject reason modal — so Purchase sees why a request was rejected ── */
+  const [showRejectReasonModal, setShowRejectReasonModal] = useState(false);
+  const [rejectReasonTarget, setRejectReasonTarget] = useState(null);
+  const [rejectReasonInput, setRejectReasonInput] = useState('');
+
+  const handleAddReqNote = async (key) => {
+    const text = reqNoteInput.trim();
+    if (!text) return;
+    try {
+      await addPurchaseNote({ id: key, text }).unwrap();
+      enqueueSnackbar('Note added', { variant: 'success' });
+    } catch { /* silent */ }
+    setReqNoteInput('');
+  };
+
+  const handleAddOrderNote = (orderKey) => {
+    setOrderNoteInput(prev => ({ ...prev, [orderKey]: '' }));
+  };
+
+  /* Finance sends a quotation back to Purchase for corrections → status becomes "Modification" */
+  const handleReRequest = async (key) => {
+    const text = reqNoteInput.trim();
+    if (!text) {
+      enqueueSnackbar('Please describe the corrections / details needed.', { variant: 'warning' });
+      return;
+    }
+    try {
+      await requestModification({ id: key, note: text }).unwrap();
+      enqueueSnackbar('Quotation sent back for modification.', { variant: 'success' });
+      setReqNoteInput('');
+      setOpenReqNotes(null);
+    } catch {
+      enqueueSnackbar('Failed to send back for modification.', { variant: 'error' });
+    }
+  };
+
+  // ── Reimbursement Expense tab — pickups a Pickup Team member paid for out of
+  // pocket (Finance-settled pickups need no reimbursement, so they never appear here).
+  const reimbursementExpenses = useMemo(() => (pickupExpData?.data || []).map((r) => ({
+    key: r._id,
+    orderId: r.orderCode || '—',
+    date: r.createdAt?.slice(0, 10),
+    vendor: r.clientName || '—',
+    amount: r.amount || 0,
+    reimbursedAmount: r.reimbursedAmount || 0,
+    balance: Math.max(0, (r.amount || 0) - (r.reimbursedAmount || 0)),
+    pickupEmpId: r.pickupEmpId?.staffCode || '—',
+    pickupEmpName: r.pickupPersonName || r.pickupEmpId?.fullName || '—',
+    gPayNumber: r.gPayNumber,
+    paymentStatus: r.reimbursementStatus || 'Pending',
+    paymentProof: r.proofUrl,
+    reimbursementProof: r.reimbursementProofUrl,
+    paidDate: r.paidDate,
+    paidBy: r.paidBy,
+  })), [pickupExpData]);
+
+  const [showReimbPaymentModal, setShowReimbPaymentModal] = useState(false);
+  const [reimbPayTarget, setReimbPayTarget] = useState(null);
+  const [reimbPayForm] = Form.useForm();
+
+  // ── Local Purchase Expense sub-tab — from RTK Query ──
+  const localPurchaseExpenses = useMemo(() => (localPurchaseExpData?.data || []).map((lp) => ({
+    key: lp._id,
+    date: lp.createdAt?.slice(0, 10),
+    invoiceNo: lp.invoiceNo,
+    invoiceFile: lp.invoiceFileUrl,
+    vendorName: lp.vendorName,
+    vendorPhone: lp.vendorPhone,
+    items: lp.items || [],
+    totalAmount: lp.totalAmount,
+    gstAmount: lp.gstAmount || 0,
+    paymentType: lp.paymentType,
+    paymentStatus: lp.paymentStatus,
+    paymentProof: lp.paymentProofUrl,
+    gPayNumber: lp.gPayNumber,
+    paidDate: lp.paidDate,
+    paidBy: lp.paidBy,
+    purchasePersonName: lp.purchasePersonName || '',
+    purchasePersonPhone: lp.purchasePersonPhone || '',
+    paidAmount: lp.paidAmount || 0,
+    balance: Math.max(0, (lp.totalAmount || 0) - (lp.paidAmount || 0)),
+  })), [localPurchaseExpData]);
+
+  const [showLocalPaymentModal, setShowLocalPaymentModal] = useState(false);
+  const [localPayTarget, setLocalPayTarget] = useState(null);
+  const [localPayForm] = Form.useForm();
+
+  // ── LR Payment sub-tab — vendor LRs marked "Not Paid" at Purchase's LR-upload
+  // time (PurchaseOrder.lrPaymentStatus). Finance settles these directly with the
+  // vendor/transporter based on the expected delivery date shown here.
+  const lrPayments = useMemo(() => (lrPaymentsData?.data || []).map((o) => ({
+    key: o._id,
+    poCode: o.poCode,
+    item: o.itemId?.itemName || o.itemName,
+    // Bulk requests are consolidated into ONE PurchaseOrder (see upsertOrderForApprovedRequest)
+    // whose top-level itemId/itemName only mirrors the FIRST product — the real per-product
+    // breakdown lives in `items[]`. Only exposed when there's more than one product, so
+    // single-item orders keep rendering exactly as before (same convention as Purchase's
+    // Dispatch Order Tracking tab).
+    items: (o.items && o.items.length > 1) ? o.items.map((it) => ({ itemName: it.itemName, qty: it.qty, unit: it.unit, amount: it.amount })) : null,
+    vendorName: o.vendorId?.name || '—',
+    vendorPhone: o.vendorId?.phone || '',
+    lrNumber: o.lrNumber || '—',
+    lrFileUrl: o.lrFileUrl || null,
+    expectedDeliveryDate: o.expectedDeliveryDate ? o.expectedDeliveryDate.slice(0, 10) : null,
+    // The LR copy's Bill Total Amount — what's actually payable here, not the vendor's
+    // goods `amount`.
+    amount: o.billTotalAmount || 0,
+    lrPaidAmount: o.lrPaidAmount || 0,
+    balance: Math.max(0, (o.billTotalAmount || 0) - (o.lrPaidAmount || 0)),
+    paymentStatus: o.lrPaymentStatus || 'Not Paid',
+    dispatchStatus: o.dispatchStatus,
+  })), [lrPaymentsData]);
+
+  const [showLrPaymentModal, setShowLrPaymentModal] = useState(false);
+  const [lrPayTarget, setLrPayTarget] = useState(null);
+  const [lrPayForm] = Form.useForm();
+
+  const handleLrPayment = async (vals) => {
+    try {
+      const fd = new FormData();
+      fd.append('paid_by', vals.paid_by || 'Finance Team');
+      fd.append('amount', vals.amount ?? lrPayTarget.balance ?? lrPayTarget.amount);
+      const lrProofFile = Array.isArray(vals.payment_proof) ? vals.payment_proof[0] : vals.payment_proof?.fileList?.[0];
+      if (lrProofFile?.url) {
+        fd.append('proofUrl', lrProofFile.url);
+      } else if (lrProofFile?.originFileObj) {
+        fd.append('proof', lrProofFile.originFileObj);
+      }
+      await payLrPayment({ id: lrPayTarget.key, formData: fd }).unwrap();
+      enqueueSnackbar(vals.amount >= lrPayTarget.balance ? 'LR payment paid in full!' : 'Partial LR payment recorded!', { variant: 'success' });
+    } catch { enqueueSnackbar('Payment failed', { variant: 'error' }); }
+    setShowLrPaymentModal(false);
+    setLrPayTarget(null);
+    lrPayForm.resetFields();
+  };
+
+  const handleLocalPayment = async (vals) => {
+    try {
+      const fd = new FormData();
+      fd.append('paid_by', vals.paid_by || 'Finance Team');
+      fd.append('amount', vals.amount ?? localPayTarget.balance ?? localPayTarget.totalAmount);
+      const localProofFile = Array.isArray(vals.payment_proof) ? vals.payment_proof[0] : vals.payment_proof?.fileList?.[0];
+      if (localProofFile?.url) {
+        fd.append('proofUrl', localProofFile.url);
+      } else if (localProofFile?.originFileObj) {
+        fd.append('proof', localProofFile.originFileObj);
+      }
+      await payLocalPurchase({ id: localPayTarget.key, formData: fd }).unwrap();
+      enqueueSnackbar('Local purchase payment processed!', { variant: 'success' });
+    } catch { enqueueSnackbar('Payment failed', { variant: 'error' }); }
+    setShowLocalPaymentModal(false);
+    setLocalPayTarget(null);
+    localPayForm.resetFields();
+  };
+
+  const handleReimbPayment = async (vals) => {
+    try {
+      const fd = new FormData();
+      fd.append('paid_by', vals.paid_by || 'Finance Team');
+      fd.append('amount', vals.amount);
+      const reimbProofFile = Array.isArray(vals.payment_proof) ? vals.payment_proof[0] : vals.payment_proof?.fileList?.[0];
+      if (reimbProofFile?.url) {
+        fd.append('proofUrl', reimbProofFile.url);
+      } else if (reimbProofFile?.originFileObj) {
+        fd.append('proof', reimbProofFile.originFileObj);
+      }
+      await payPickup({ id: reimbPayTarget.key, formData: fd }).unwrap();
+      enqueueSnackbar(vals.amount >= reimbPayTarget.balance ? 'Reimbursement paid in full!' : 'Partial reimbursement recorded!', { variant: 'success' });
+    } catch { enqueueSnackbar('Payment failed', { variant: 'error' }); }
+    setShowReimbPaymentModal(false);
+    setReimbPayTarget(null);
+    reimbPayForm.resetFields();
+  };
+
+  // ── Date-range filter state (per table) ──
+  const [purchaseReqDateRange, setPurchaseReqDateRange] = useState(null);
+  const [expDateRange, setExpDateRange] = useState(null);
+  const [pickupDateRange, setPickupDateRange] = useState(null);
+  const [localExpDateRange, setLocalExpDateRange] = useState(null);
+  const [lrPayDateRange, setLrPayDateRange] = useState(null);
+
+  const [partiesSearch, setPartiesSearch] = useState('');
+  const [viewPartyLedger, setViewPartyLedger] = useState(null);
+  const [partiesData, setPartiesData] = useState([]);
+  const [partyLedgerData, setPartyLedgerData] = useState([]);
+  // Real vendor lookup by name — used as a fallback wherever a request/order's
+  // vendorId wasn't populated (e.g. pre-migration data), so Phone/Email/Address/Bank
+  // still resolve instead of always showing "—".
+  const suppliersData = useMemo(() => {
+    const map = {};
+    (vendorData?.data || []).forEach((v) => {
+      map[v.name] = { id: v._id, name: v.name, phone: v.phone, email: v.email, address: v.address, bankDetails: v.bankDetails };
+    });
+    return map;
+  }, [vendorData]);
+
+  // ── Expense Payments — from RTK Query ──
+  const expenseRequests = useMemo(() => (expensePaymentsData?.data || []).map((e) => ({
+    key: e._id, date: e.expenseDate?.slice(0, 10),
+    category: e.category, customCategory: e.customCategory, desc: e.description,
+    amount: e.amount, paid_amount: e.paidAmount || 0, status: e.paymentStatus,
+    vendor: e.vendorPayee, bill_no: e.expenseCode,
+    proofUrl: e.proofUrl,
+  })), [expensePaymentsData]);
+
+  const EXPENSE_CATEGORY_META = {
+    'Raw Material':               { color: '#B11E6A' },
+    'Shipping / Transportation':  { color: '#1890ff' },
+    'Utility':                    { color: '#fa8c16' },
+    'Utilities (Rent/Elec)':      { color: '#fa8c16' },
+    'Other':                      { color: '#722ed1' },
+    'Purchase':                   { color: '#52c41a' },
+  };
+
+  const handleProcessPayment = async (values) => {
+    const paidAmt = values.amount_paid || selectedForPayment.amount;
+    const alreadyPaid = selectedForPayment.paid_amount || 0;
+    const totalPaid = alreadyPaid + paidAmt;
+    const finalStatus = totalPaid >= selectedForPayment.amount ? 'Paid' : 'Partially Paid';
+    try {
+      const fd = new FormData();
+      fd.append('amountPaid', paidAmt);
+      fd.append('status', finalStatus);
+      const proofFile = values.proof?.fileList?.[0];
+      if (proofFile?.url) fd.append('proofUrl', proofFile.url);
+      else if (proofFile?.originFileObj) fd.append('proof', proofFile.originFileObj);
+
+      let reminderMsg = '';
+      if (selectedForPayment.bill_no?.startsWith('EXP')) {
+        await payExpense({ id: selectedForPayment.key, formData: fd }).unwrap();
+      } else {
+        // LR Copy Reminder Date — only sent when the field was shown (LR copy not uploaded
+        // yet); a cleared picker sends '' so the backend drops an earlier reminder.
+        if (selectedForPayment.poCode && !selectedForPayment.lrFileUrl) {
+          const d = values.lr_reminder_date;
+          if (d) {
+            fd.append('lrReminderDate', d.format('YYYY-MM-DD'));
+            reminderMsg = ` LR copy reminder set for ${d.format('DD MMM YYYY')}.`;
+          } else if (selectedForPayment.lrReminderDate) {
+            fd.append('lrReminderDate', '');
+          }
+        }
+        await payOrder({ id: selectedForPayment.key, formData: fd }).unwrap();
+      }
+      enqueueSnackbar(`Payment of ₹${paidAmt.toLocaleString()} processed. Status: ${finalStatus}.${reminderMsg}`, { variant: 'success' });
+    } catch {
+      enqueueSnackbar('Payment failed', { variant: 'error' });
+    }
+    setShowPaymentModal(false);
+    setSelectedForPayment(null);
+    paymentForm.resetFields();
+  };
+
+  const getStatusColor = (status) => {
+    if (status === 'Paid') return 'success';
+    if (status === 'Partially Paid' || status === 'Partial Paid') return 'warning';
+    return 'error';
+  };
+
+  // Collapse quotation requests that share a batchId (raised via Bulk Purchase) into one expandable parent row
+  const groupRequestsByBatch = (items) => {
+    const batchMap = {};
+    const singles = [];
+    items.forEach((it) => {
+      if (it.batchId) {
+        if (!batchMap[it.batchId]) batchMap[it.batchId] = [];
+        batchMap[it.batchId].push(it);
+      } else {
+        singles.push(it);
+      }
+    });
+    const rows = [];
+    Object.values(batchMap).forEach((batchItems) => {
+      if (batchItems.length > 1) {
+        const first = batchItems[0];
+        const statuses = batchItems.map(b => b.status);
+        const status = statuses.every(s => s === 'Approved') ? 'Approved'
+          : statuses.some(s => s === 'Rejected') ? 'Rejected'
+          : statuses.some(s => s === 'Modification') ? 'Modification'
+          : 'Pending';
+        rows.push({
+          key: `batch-${first.batchId}`,
+          isBatchGroup: true,
+          item: `${batchItems.length} Products`,
+          supplier: first.supplier,
+          payment_terms: first.payment_terms,
+          date: first.date,
+          status,
+          notes: [],
+          batchId: first.batchId,
+          // Flagged so the nested table's Amount column shows each product's OWN
+          // quoted amount instead of the consolidated order total (findOrderForRequest
+          // resolves every child to the SAME batch order, so without this flag every
+          // row in the expanded table showed the whole batch's total repeated).
+          batchItems: batchItems.map(b => ({ ...b, isBatchChild: true })),
+        });
+      } else {
+        rows.push(batchItems[0]);
+      }
+    });
+    rows.push(...singles);
+    return rows;
+  };
+
+  // A batch's PurchaseOrder is consolidated into ONE document (batchId) — resolve it
+  // that way first so a batch-group row (and every sibling in it) all show the same
+  // order instead of only the first-approved sibling's requestKey matching.
+  const findOrderForRequest = (r) => purchaseOrders.find(o =>
+    (r.batchId && o.batchId === r.batchId) || o.requestKey === r.key
+  );
+
+  // Shows every quotation file uploaded (including re-uploads) and every partial/full
+  // payment recorded against the linked order — satisfies "if I have multiple paid and
+  // uploads I need to display all if I click row".
+  const renderPaymentAndFilesPanel = (order, quotationFiles) => (
+    <Row gutter={16} style={{ marginTop: 12 }}>
+      <Col xs={24} md={12}>
+        <Text style={{ fontSize: 12, fontWeight: 600, color: '#722ed1', display: 'block', marginBottom: 8 }}>
+          <FileTextOutlined style={{ marginRight: 4 }} />Quotation Files
+        </Text>
+        {(!quotationFiles || quotationFiles.length === 0) && <Text type="secondary" style={{ fontSize: 11 }}>No files uploaded yet.</Text>}
+        {(quotationFiles || []).slice().reverse().map((f, i) => (
+          <div key={i} style={{ marginBottom: 4 }}>
+            <Button size="small" type="link" icon={<FileTextOutlined />} onClick={() => window.open(f.url, '_blank')} style={{ padding: 0, fontSize: 12, height: 'auto' }}>
+              {f.itemName ? `${f.itemName} — ` : ''}{f.uploadedAt ? new Date(f.uploadedAt).toLocaleString() : `File ${i + 1}`}
+            </Button>
+          </div>
+        ))}
+      </Col>
+      <Col xs={24} md={12}>
+        <Text style={{ fontSize: 12, fontWeight: 600, color: '#52c41a', display: 'block', marginBottom: 8 }}>
+          <DollarCircleOutlined style={{ marginRight: 4 }} />Payment History
+        </Text>
+        {(!order?.paymentHistory || order.paymentHistory.length === 0) && <Text type="secondary" style={{ fontSize: 11 }}>No payments recorded yet.</Text>}
+        {(order?.paymentHistory || []).slice().reverse().map((p, i) => (
+          <div key={i} style={{ padding: '5px 10px', marginBottom: 5, borderRadius: 6, background: isDark ? '#0d2010' : '#f6ffed', border: `1px solid ${isDark ? '#1a3a20' : '#b7eb8f'}` }}>
+            <Text strong style={{ fontSize: 12, color: '#52c41a' }}>₹{(p.amount || 0).toLocaleString()}</Text>
+            <Text type="secondary" style={{ fontSize: 11 }}> — {p.paidBy || 'Finance Team'}</Text>
+            <br />
+            <Text type="secondary" style={{ fontSize: 10 }}>{p.paidDate ? new Date(p.paidDate).toLocaleString() : ''}</Text>
+          </div>
+        ))}
+      </Col>
+    </Row>
+  );
+
+  const pendingRequests = raisedRequests.filter(r => r.status === 'Pending').length;
+  const stats = [
+    { label: 'Pending Approvals', value: pendingRequests, color: '#B11E6A', icon: <ClockCircleOutlined /> },
+    { label: 'Unpaid Orders', value: purchaseOrders.filter(r => r.status === 'Unpaid').length, color: '#1890ff', icon: <ShopOutlined /> },
+    { label: 'Unpaid Expenses', value: expenseRequests.filter(r => r.status === 'Unpaid').length, color: '#fa8c16', icon: <WalletOutlined /> },
+    { label: 'Total Paid (MTD)', value: `₹${purchaseOrders.filter(r => r.status === 'Paid').reduce((s, r) => s + (r.amount || 0), 0).toLocaleString()}`, color: '#52c41a', icon: <ArrowUpOutlined /> },
+  ];
+
+
+  const expenseColumns = [
+    { title: 'Date', dataIndex: 'date', key: 'date', width: 100, render: v => <Text style={{ fontSize: 13 }}>{v}</Text> },
+    { title: 'Bill No', dataIndex: 'bill_no', width: 120, render: v => <Text style={{ fontSize: 13 }}>{v}</Text> },
+    {
+      title: 'Category', key: 'category', width: 160,
+      render: (_, r) => {
+        const label = r.category === 'Other' && r.customCategory ? r.customCategory : (r.category || '—');
+        const meta = EXPENSE_CATEGORY_META[r.category] || { color: '#722ed1' };
+        return <Tag color={meta.color} style={{ borderRadius: 10, padding: '0 10px', fontSize: 12 }}>{label}</Tag>;
+      }
+    },
+    { title: 'Description', dataIndex: 'desc', key: 'desc', render: v => <Text style={{ fontSize: 13 }}>{v}</Text> },
+    { title: 'Amount', dataIndex: 'amount', key: 'amount', width: 120, align: 'right', render: (v) => <Text strong style={{ color: '#B11E6A', fontSize: 13 }}>₹{v.toLocaleString()}</Text> },
+    {
+      title: 'Status', key: 'status', width: 140,
+      render: (_, r) => (
+        <Space direction="vertical" size={2}>
+          <Tag color={getStatusColor(r.status)} style={{ fontSize: 12, borderRadius: 8, margin: 0 }}>{r.status || 'Unpaid'}</Tag>
+          {r.paid_amount > 0 && r.status !== 'Paid' && (
+            <Text type="secondary" style={{ fontSize: 11 }}>Paid: ₹{r.paid_amount.toLocaleString()} / ₹{r.amount.toLocaleString()}</Text>
+          )}
+        </Space>
+      )
+    },
+    {
+      title: 'Actions', key: 'actions', width: 115,
+      render: (_, r) => r.status === 'Paid' ? (
+        <Tag color="success" style={{ borderRadius: 8, fontSize: 12 }}>Paid</Tag>
+      ) : (
+        <Button size="small" type="primary" icon={<DollarCircleOutlined />} onClick={() => { if (!requireAccess('edit')) return; setSelectedForPayment(r); setShowPaymentModal(true); }} style={{ background: '#B11E6A', border: 'none', fontSize: 13 }}>Pay Now</Button>
+      )
+    }
+  ];
+
+  const reqColumns = [
+    {
+      title: 'Date', dataIndex: 'date', key: 'date', width: 95,
+      render: v => <Text type="secondary">{v}</Text>
+    },
+    {
+      title: 'Item & Supplier', key: 'item_sup', width: 190,
+      render: (_, r) => (
+        <Space direction="vertical" size={1}>
+          <Space size={4} align="center">
+            <Text strong>{r.item}</Text>
+            {r.isBatchGroup && (
+              <Tag color="blue" style={{ borderRadius: 10, fontSize: 10, margin: 0, padding: '0 6px' }}>
+                Bulk ×{r.batchItems.length}
+              </Tag>
+            )}
+          </Space>
+          <Text style={{ color: '#B11E6A', fontWeight: 600 }}>{r.supplier}</Text>
+        </Space>
+      )
+    },
+    {
+      title: 'Qty', key: 'qty', width: 80, align: 'center',
+      render: (_, r) => r.isBatchGroup ? (
+        <Text type="secondary" style={{ fontSize: 12 }}>{r.batchItems.length} items</Text>
+      ) : (
+        <Space direction="vertical" size={0}>
+          <Text strong>{r.qty}</Text>
+          <Text type="secondary">{r.unit}</Text>
+        </Space>
+      )
+    },
+    {
+      title: 'Payment Terms', dataIndex: 'payment_terms', key: 'payment_terms', width: 160,
+      render: v => <Text>{v}</Text>
+    },
+    {
+      title: 'Bill / Inv No', key: 'bill_inv', width: 130,
+      render: (_, r) => {
+        const order = findOrderForRequest(r);
+        if (!order) return <Text type="secondary">—</Text>;
+        return (
+          <Space direction="vertical" size={1}>
+            <Text strong>{order.bill_no}</Text>
+            <Text style={{ color: '#B11E6A' }}>{order.inv_no}</Text>
+          </Space>
+        );
+      }
+    },
+    {
+      title: 'Amount', key: 'order_amount', width: 100, align: 'right',
+      render: (_, r) => {
+        // A batch child's own quoted amount, not the whole batch's consolidated
+        // order total (every child in a batch shares one order — see batchItems above).
+        if (r.isBatchChild) {
+          return r.amount != null
+            ? <Text strong style={{ color: '#B11E6A' }}>₹{r.amount.toLocaleString()}</Text>
+            : <Text type="secondary">—</Text>;
+        }
+        const order = findOrderForRequest(r);
+        if (!order) return <Text type="secondary">—</Text>;
+        return <Text strong style={{ color: '#B11E6A' }}>₹{order.amount?.toLocaleString()}</Text>;
+      }
+    },
+    {
+      title: 'Pay Status', key: 'payment_status', width: 110, align: 'center',
+      render: (_, r) => {
+        const order = findOrderForRequest(r);
+        if (!order) return <Text type="secondary">—</Text>;
+        const tag = <Tag color={getStatusColor(order.status)} style={{ borderRadius: 10, margin: 0 }}>{order.status}</Tag>;
+        if (r.isBatchChild || !order.lrReminderDate || order.lrFileUrl) return tag;
+        return (
+          <Space direction="vertical" size={2}>
+            {tag}
+            <Tooltip title="LR Copy Reminder Date — Purchase is alerted from this date until the LR copy is uploaded">
+              <Text type="secondary" style={{ fontSize: 10, whiteSpace: 'nowrap' }}>LR copy by {dayjs(order.lrReminderDate.slice(0, 10)).format('DD MMM')}</Text>
+            </Tooltip>
+          </Space>
+        );
+      }
+    },
+    {
+      title: 'Quotation Status', dataIndex: 'status', key: 'status', width: 120, align: 'center',
+      render: v => {
+        const colorMap = { Approved: 'success', Rejected: 'error', Pending: 'processing', Modification: 'warning' };
+        return <Tag color={colorMap[v]} style={{ borderRadius: 12, margin: 0 }}>{v}</Tag>;
+      }
+    },
+    {
+      title: 'Actions', key: 'actions', width: 220, fixed: 'right',
+      render: (_, r) => {
+        if (r.isBatchGroup) {
+          const groupOrder = findOrderForRequest(r);
+          return (
+            <Space wrap size={[4, 4]}>
+              <Text type="secondary" style={{ fontSize: 11 }}>Expand to view {r.batchItems.length} items</Text>
+              {groupOrder && (
+                <>
+                  <Button size="small" icon={<EyeOutlined />} onClick={() => setViewRequest(groupOrder)} style={{ fontSize: 11 }}>Details</Button>
+                  {groupOrder.status !== 'Paid' && (
+                    <Button size="small" type="primary" icon={<DollarCircleOutlined />}
+                      onClick={() => { if (!requireAccess('edit')) return; setSelectedForPayment(groupOrder); setShowPaymentModal(true); }}
+                      style={{ background: '#B11E6A', border: 'none', fontSize: 11 }}>Pay Now</Button>
+                  )}
+                </>
+              )}
+            </Space>
+          );
+        }
+        const noteCount = (r.notes || []).length;
+        const noteBtn = (
+          <Badge count={noteCount} size="small" offset={[-2, 2]}>
+            <Button size="small" icon={<MessageOutlined />}
+              onClick={() => { setOpenReqNotes(openReqNotes === r.key ? null : r.key); setReqNoteInput(''); }}
+              style={{ color: openReqNotes === r.key ? '#fff' : '#B11E6A', background: openReqNotes === r.key ? '#B11E6A' : 'transparent', borderColor: '#B11E6A55' }}
+            >Re-Request Quotation</Button>
+          </Badge>
+        );
+        const order = findOrderForRequest(r);
+        return (
+          <Space wrap size={[4, 4]}>
+            {(r.quotationFiles?.length > 0 || r.quotation_file) && (
+              <Button size="small" icon={<FileTextOutlined />} onClick={() => setViewQuotationFile(r)}
+                style={{ borderColor: '#B11E6A', color: '#B11E6A' }}>
+                File{r.quotationFiles?.length > 1 ? ` (${r.quotationFiles.length})` : ''}
+              </Button>
+            )}
+            {r.status === 'Pending' && (() => {
+              const batchPendingCount = r.batchId
+                ? raisedRequests.filter(req => req.batchId === r.batchId && req.status === 'Pending').length
+                : 0;
+              return (
+                <>
+                  <Button size="small" type="primary" icon={<CheckCircleOutlined />}
+                    onClick={async () => {
+                      try { await approveReq(r.key).unwrap(); enqueueSnackbar('Approved', { variant: 'success' }); }
+                      catch { enqueueSnackbar('Approval failed', { variant: 'error' }); }
+                    }}
+                    style={{ background: '#52c41a', border: 'none' }}>Approve</Button>
+                  {batchPendingCount > 1 && (
+                    <Button size="small" type="primary" icon={<CheckCircleOutlined />}
+                      onClick={async () => {
+                        try {
+                          await batchApproveReqs(r.batchId).unwrap();
+                          enqueueSnackbar(`All ${batchPendingCount} items in this batch approved`, { variant: 'success' });
+                        } catch { enqueueSnackbar('Batch approval failed', { variant: 'error' }); }
+                      }}
+                      style={{ background: 'linear-gradient(135deg,#52c41a,#389e0d)', border: 'none', fontWeight: 600 }}>
+                      Approve All ({batchPendingCount})
+                    </Button>
+                  )}
+                  <Button size="small" danger icon={<CloseCircleOutlined />}
+                    onClick={() => { setRejectReasonTarget(r); setRejectReasonInput(''); setShowRejectReasonModal(true); }}
+                  >Reject</Button>
+                </>
+              );
+            })()}
+            {order && (
+              <>
+                <Button size="small" icon={<EyeOutlined />} onClick={() => setViewRequest(order)}
+                  style={{ fontSize: 11 }}>Details</Button>
+                {order.status !== 'Paid' && (
+                  <Button size="small" type="primary" icon={<DollarCircleOutlined />}
+                    onClick={() => { if (!requireAccess('edit')) return; setSelectedForPayment(order); setShowPaymentModal(true); }}
+                    style={{ background: '#B11E6A', border: 'none', fontSize: 11 }}>Pay Now</Button>
+                )}
+              </>
+            )}
+            {(r.status === 'Pending' || r.status === 'Modification') && (
+              <Button size="small" icon={<EditOutlined />}
+                onClick={() => {
+                  setEditReqTarget(r);
+                  editReqForm.setFieldsValue({ qty: r.qty, payment_terms: r.payment_terms, amount: r.amount ?? null });
+                  setShowEditReqModal(true);
+                }}
+                style={{ borderColor: '#722ed1', color: '#722ed1' }}
+              >Edit</Button>
+            )}
+            {r.status !== 'Approved' && noteBtn}
+          </Space>
+        );
+      }
+    }
+  ];
+
+  return (
+    <div className="page-container fade-in">
+      <div style={{ marginBottom: 20 }}>
+        <PageBreadcrumb title="Financial & Payments" items={[{ label: 'Financial' }]} style={{ marginBottom: 0 }} />
+      </div>
+
+      <Row gutter={[12, 12]} style={{ marginBottom: 20 }}>
+        {stats.map((s, i) => (
+          <Col xs={12} sm={6} key={s.label}>
+            <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.08 }}>
+              <Card style={{ borderRadius: 12, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }} styles={{ body: { padding: '16px' } }}>
+                <Statistic
+                  title={<Text type="secondary" style={{ fontSize: 13 }}>{s.label}</Text>}
+                  value={s.value}
+                  prefix={s.icon}
+                  valueStyle={{ color: s.color, fontWeight: 700, fontSize: 24 }}
+                />
+              </Card>
+            </motion.div>
+          </Col>
+        ))}
+      </Row>
+
+      <Card 
+        style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }}
+        styles={{ body: { padding: '8px 16px 16px' } }}
+      >
+        <Tabs
+          defaultActiveKey="purchase_requests"
+          items={filterTabs([
+            {
+              key: 'purchase_requests',
+              label: <Space><AuditOutlined /> Quotation Requests</Space>,
+              children: (
+                <div style={{ marginTop: 12 }}>
+                  <div style={{ marginBottom: 16 }}>
+                    <Title level={5} style={{ margin: 0, color: textColor }}>Quotation Requests — Approve / Reject</Title>
+                    <Text type="secondary">Review quotation requests raised by the procurement team and approve or reject them</Text>
+                  </div>
+                  <div style={{ marginBottom: 10, paddingBottom: 10, borderBottom: `1px solid ${borderColor}`, display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                    <Input
+                      prefix={<SearchOutlined style={{ color: '#B11E6A' }} />}
+                      placeholder="Search item, supplier..."
+                      allowClear
+                      value={purchaseReqSearch}
+                      onChange={(e) => { setPurchaseReqSearch(e.target.value); setReqPage(1); }}
+                      style={{ width: 220, borderRadius: 8 }}
+                    />
+                    <Select
+                      allowClear
+                      placeholder="Quotation Status"
+                      value={purchaseReqStatusFilter}
+                      onChange={(val) => { setPurchaseReqStatusFilter(val); setReqPage(1); }}
+                      style={{ width: 170, borderRadius: 8 }}
+                    >
+                      <Option value="Pending">Pending</Option>
+                      <Option value="Approved">Approved</Option>
+                      <Option value="Rejected">Rejected</Option>
+                      <Option value="Modification">Modification</Option>
+                    </Select>
+                    <DatePicker.RangePicker
+                      style={{ borderRadius: 8 }}
+                      onChange={(dates) => setPurchaseReqDateRange(dates ? [dates[0].format('YYYY-MM-DD'), dates[1].format('YYYY-MM-DD')] : null)}
+                      allowClear
+                    />
+                  </div>
+                  <Table
+                    size="small"
+                    dataSource={groupRequestsByBatch(raisedRequests.filter((r) => {
+                      // purchaseReqSearch is sent to useGetPendingRequestsQuery as a `search`
+                      // param and filtered server-side (across ALL requests, not just this page).
+                      if (purchaseReqDateRange) {
+                        const d = r.date || '';
+                        if (d < purchaseReqDateRange[0] || d > purchaseReqDateRange[1]) return false;
+                      }
+                      return true;
+                    }))}
+                    pagination={{
+                      current: reqPage,
+                      pageSize: reqPageSize,
+                      total: pendingReqData?.total || 0,
+                      showSizeChanger: true,
+                      pageSizeOptions: ['10', '20', '50', '100'],
+                      onChange: (p, ps) => { setReqPage(p); setReqPageSize(ps); },
+                      size: 'small',
+                    }}
+                    rowKey="key"
+                    scroll={{ x: 'max-content' }}
+                    locale={{ emptyText: 'No quotation requests yet.' }}
+                    expandable={{
+                      expandedRowKeys: [...(openReqNotes ? [openReqNotes] : []), ...openBulkBatches],
+                      onExpand: (expanded, record) => {
+                        if (!record.isBatchGroup) return;
+                        setOpenBulkBatches(prev => expanded ? [...prev, record.key] : prev.filter(k => k !== record.key));
+                      },
+                      // Every row must stay expandable (individual rows are expanded programmatically
+                      // via the "Re-Request Quotation" notes button setting openReqNotes, not by clicking
+                      // an arrow) — only the arrow itself is hidden for non-batch rows.
+                      rowExpandable: () => true,
+                      expandIcon: ({ expanded, onExpand, record }) => record.isBatchGroup ? (
+                        <span onClick={(e) => onExpand(record, e)} style={{ cursor: 'pointer' }}>
+                          {expanded ? '−' : '+'}
+                        </span>
+                      ) : null,
+                      expandedRowRender: (r) => {
+                        if (r.isBatchGroup) {
+                          const groupOrder = findOrderForRequest(r);
+                          // Every item in the batch may have its own uploaded quotation file(s) —
+                          // aggregate across all of them (not just the first) so none go missing.
+                          const groupFiles = (r.batchItems || []).flatMap((it) =>
+                            (it.quotationFiles || []).map((f) => ({ ...f, itemName: it.item }))
+                          );
+                          return (
+                            <div style={{ padding: '8px 16px', background: isDark ? '#16192a' : '#fafcff', borderRadius: 8, margin: '4px 0' }}>
+                              {renderPaymentAndFilesPanel(groupOrder, groupFiles)}
+                              <Divider style={{ margin: '12px 0' }} />
+                              <Table
+                                size="small"
+                                dataSource={r.batchItems}
+                                rowKey="key"
+                                pagination={false}
+                                columns={reqColumns}
+                                scroll={{ x: 'max-content' }}
+                              />
+                            </div>
+                          );
+                        }
+                        const notes = r.notes || [];
+                        const linkedOrder = findOrderForRequest(r);
+                        const orderNotes = linkedOrder?.notes || [];
+                        return (
+                          <div style={{ padding: '12px 16px', background: isDark ? '#16192a' : '#fafcff', borderRadius: 8, margin: '4px 0' }}>
+                            <Row gutter={16}>
+                              <Col xs={24} md={linkedOrder ? 12 : 24}>
+                                <Text style={{ fontSize: 12, fontWeight: 600, color: '#B11E6A', display: 'block', marginBottom: 8 }}>
+                                  <MessageOutlined style={{ marginRight: 4 }} />Quotation Notes
+                                </Text>
+                                {notes.length === 0 && <Text type="secondary" style={{ fontSize: 11 }}>No notes yet.</Text>}
+                                {notes.map((n, i) => (
+                                  <div key={i} style={{ padding: '5px 10px', marginBottom: 5, borderRadius: 6, background: isDark ? '#1e2235' : '#f0f4ff', border: `1px solid ${isDark ? '#2a2d40' : '#d6e4ff'}` }}>
+                                    <Text style={{ fontSize: 12 }}>{n.text}</Text>
+                                    <br />
+                                    <Text type="secondary" style={{ fontSize: 10 }}><ClockCircleOutlined style={{ marginRight: 3 }} />{n.timestamp}</Text>
+                                  </div>
+                                ))}
+                                <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+                                  <Input size="small" placeholder="Add a note..." value={reqNoteInput}
+                                    onChange={e => setReqNoteInput(e.target.value)}
+                                    onPressEnter={() => handleAddReqNote(r.key)}
+                                    style={{ flex: 1, borderRadius: 6 }} />
+                                  <Button size="small" type="primary" onClick={() => handleAddReqNote(r.key)}
+                                    style={{ background: '#B11E6A', border: 'none', borderRadius: 6 }}>Add</Button>
+                                </div>
+                                {r.status === 'Pending' && (
+                                  <Button size="small" icon={<EditOutlined />} onClick={() => handleReRequest(r.key)}
+                                    style={{ marginTop: 8, width: '100%', borderColor: '#fa8c16', color: '#fa8c16', borderRadius: 6 }}>
+                                    Send Back for Modification
+                                  </Button>
+                                )}
+                              </Col>
+                              {linkedOrder && (
+                                <Col xs={24} md={12}>
+                                  <Text style={{ fontSize: 12, fontWeight: 600, color: '#1890ff', display: 'block', marginBottom: 8 }}>
+                                    <MessageOutlined style={{ marginRight: 4 }} />Order Notes — <Text style={{ fontSize: 11, color: '#888' }}>{linkedOrder.bill_no}</Text>
+                                  </Text>
+                                  {orderNotes.length === 0 && <Text type="secondary" style={{ fontSize: 11 }}>No order notes yet.</Text>}
+                                  {orderNotes.map((n, i) => (
+                                    <div key={i} style={{ padding: '5px 10px', marginBottom: 5, borderRadius: 6, background: isDark ? '#1e2535' : '#f0f7ff', border: `1px solid ${isDark ? '#2a3040' : '#bae0ff'}` }}>
+                                      <Text style={{ fontSize: 12 }}>{n.text}</Text>
+                                      <br />
+                                      <Text type="secondary" style={{ fontSize: 10 }}><ClockCircleOutlined style={{ marginRight: 3 }} />{n.timestamp}</Text>
+                                    </div>
+                                  ))}
+                                  <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+                                    <Input size="small" placeholder="Add order note..."
+                                      value={orderNoteInput[linkedOrder.key] || ''}
+                                      onChange={e => setOrderNoteInput(prev => ({ ...prev, [linkedOrder.key]: e.target.value }))}
+                                      onPressEnter={() => handleAddOrderNote(linkedOrder.key)}
+                                      style={{ flex: 1, borderRadius: 6 }} />
+                                    <Button size="small" type="primary" onClick={() => handleAddOrderNote(linkedOrder.key)}
+                                      style={{ background: '#1890ff', border: 'none', borderRadius: 6 }}>Add</Button>
+                                  </div>
+                                </Col>
+                              )}
+                            </Row>
+                            {(linkedOrder || (r.quotationFiles || []).length > 0) && (
+                              <>
+                                <Divider style={{ margin: '12px 0' }} />
+                                {renderPaymentAndFilesPanel(linkedOrder, r.quotationFiles)}
+                              </>
+                            )}
+                          </div>
+                        );
+                      },
+                    }}
+                    columns={reqColumns}
+                  />
+                </div>
+              )
+            },
+            {
+              key: 'expenses',
+              label: <Space><ContainerOutlined /> Expense Payments</Space>,
+              children: (
+                <div style={{ marginTop: 12 }}>
+                  <div style={{ marginBottom: 10, paddingBottom: 10, borderBottom: `1px solid ${borderColor}`, display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                    <Input
+                      prefix={<SearchOutlined style={{ color: '#B11E6A' }} />}
+                      placeholder="Search description, bill no, vendor..."
+                      allowClear
+                      value={expSearch}
+                      onChange={(e) => { setExpSearch(e.target.value); setExpPage(1); }}
+                      style={{ width: 260, borderRadius: 8 }}
+                    />
+                    <Select
+                      allowClear
+                      placeholder="Payment Status"
+                      value={expStatusFilter}
+                      onChange={(val) => { setExpStatusFilter(val); setExpPage(1); }}
+                      style={{ width: 160, borderRadius: 8 }}
+                    >
+                      <Option value="Unpaid">Unpaid</Option>
+                      <Option value="Paid">Paid</Option>
+                      <Option value="Partial Paid">Partial Paid</Option>
+                    </Select>
+                    <DatePicker.RangePicker
+                      style={{ borderRadius: 8 }}
+                      onChange={(dates) => setExpDateRange(dates ? [dates[0].format('YYYY-MM-DD'), dates[1].format('YYYY-MM-DD')] : null)}
+                      allowClear
+                    />
+                  </div>
+                  <Table
+                    size="small"
+                    dataSource={expenseRequests.filter((e) => {
+                      // expSearch is sent to useGetExpensePaymentsQuery as a `search` param
+                      // and filtered server-side (across ALL expenses, not just this page).
+                      if (expDateRange) {
+                        const d = e.date || '';
+                        if (d < expDateRange[0] || d > expDateRange[1]) return false;
+                      }
+                      return true;
+                    })}
+                    columns={expenseColumns}
+                    pagination={{
+                      current: expPage,
+                      pageSize: expPageSize,
+                      total: expensePaymentsData?.total || 0,
+                      showSizeChanger: true,
+                      pageSizeOptions: ['10', '20', '50', '100'],
+                      onChange: (p, ps) => { setExpPage(p); setExpPageSize(ps); },
+                      size: 'small',
+                    }}
+                    scroll={{ x: 'max-content' }}
+                  />
+                </div>
+              )
+            },
+            {
+              key: 'reimbursement',
+              label: <Space><WalletOutlined /> Reimbursement Expense</Space>,
+              children: (
+                <div style={{ marginTop: 12 }}>
+                  <Tabs
+                    defaultActiveKey="pickup_expense"
+                    type="card"
+                    items={[
+                      {
+                        key: 'pickup_expense',
+                        label: <Space><CarOutlined />Pickup Expense</Space>,
+                        children: (
+                          <div style={{ marginTop: 8 }}>
+                            <div style={{ marginBottom: 12 }}>
+                              <Title level={5} style={{ margin: 0, color: textColor }}>Pickup Expense Reimbursement</Title>
+                              <Text type="secondary">Pickup Team out-of-pocket payments from Dispatch's Pick Up Order tab — review and reimburse in full or in part</Text>
+                            </div>
+                            <div style={{ marginBottom: 10, paddingBottom: 10, borderBottom: `1px solid ${borderColor}`, display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                              <Input
+                                prefix={<SearchOutlined style={{ color: '#B11E6A' }} />}
+                                placeholder="Search order, supplier, employee..."
+                                allowClear
+                                value={pickupSearch}
+                                onChange={(e) => { setPickupSearch(e.target.value); setPickupPage(1); }}
+                                style={{ width: 250, borderRadius: 8 }}
+                              />
+                              <Select
+                                allowClear
+                                placeholder="Reimbursement Status"
+                                value={pickupPayFilter}
+                                onChange={(val) => { setPickupPayFilter(val); setPickupPage(1); }}
+                                style={{ width: 180, borderRadius: 8 }}
+                              >
+                                <Option value="Pending">Pending</Option>
+                                <Option value="Partial">Partial</Option>
+                                <Option value="Paid">Paid</Option>
+                              </Select>
+                              <DatePicker.RangePicker
+                                style={{ borderRadius: 8 }}
+                                onChange={(dates) => setPickupDateRange(dates ? [dates[0].format('YYYY-MM-DD'), dates[1].format('YYYY-MM-DD')] : null)}
+                                allowClear
+                              />
+                            </div>
+                            {reimbursementExpenses.length === 0 ? (
+                              <div style={{ textAlign: 'center', padding: '40px 0' }}>
+                                <WalletOutlined style={{ fontSize: 40, display: 'block', marginBottom: 10, color: '#B11E6A55' }} />
+                                <Text type="secondary">No pickup reimbursement expenses yet.</Text>
+                              </div>
+                            ) : (
+                              <Table
+                                size="small"
+                                dataSource={reimbursementExpenses.filter((r) => {
+                                  // pickupSearch is sent to useGetPickupExpensesQuery as a
+                                  // `search` param, filtered server-side across ALL records.
+                                  if (pickupDateRange) {
+                                    const d = r.date || '';
+                                    if (d < pickupDateRange[0] || d > pickupDateRange[1]) return false;
+                                  }
+                                  return true;
+                                })}
+                                rowKey="key"
+                                pagination={{
+                                  current: pickupPage,
+                                  pageSize: pickupPageSize,
+                                  total: pickupExpData?.total || 0,
+                                  showSizeChanger: true,
+                                  pageSizeOptions: ['10', '20', '50', '100'],
+                                  onChange: (p, ps) => { setPickupPage(p); setPickupPageSize(ps); },
+                                  size: 'small',
+                                }}
+                                scroll={{ x: 'max-content' }}
+                                columns={[
+                                  { title: 'Date', dataIndex: 'date', key: 'date', width: 95 },
+                                  { title: 'Order ID', dataIndex: 'orderId', key: 'orderId', width: 90, render: v => <Text strong style={{ color: '#B11E6A' }}>{v}</Text> },
+                                  { title: 'Vendor', dataIndex: 'vendor', key: 'vendor', width: 150, render: v => <Text style={{ color: '#B11E6A', fontWeight: 600 }}>{v}</Text> },
+                                  {
+                                    title: 'Pickup Employee', key: 'employee', width: 165,
+                                    render: (_, r) => (
+                                      <Space direction="vertical" size={0}>
+                                        <Space size={4}><UserOutlined style={{ color: '#B11E6A', fontSize: 13 }} /><Text strong style={{ fontSize: 13 }}>{r.pickupEmpName}</Text></Space>
+                                        <Text type="secondary" style={{ fontSize: 11 }}>{r.pickupEmpId}</Text>
+                                      </Space>
+                                    )
+                                  },
+                                  { title: 'G Pay Number', dataIndex: 'gPayNumber', key: 'gpay', width: 135, render: v => v ? <Space size={4}><PhoneOutlined style={{ color: '#52c41a' }} /><Text style={{ fontSize: 13 }}>{v}</Text></Space> : <Text type="secondary">—</Text> },
+                                  { title: 'Amount', dataIndex: 'amount', key: 'amount', width: 105, align: 'right', render: v => <Text strong style={{ color: '#B11E6A', fontSize: 13 }}>&#8377;{v?.toLocaleString()}</Text> },
+                                  {
+                                    title: 'Uploaded Proof', dataIndex: 'paymentProof', key: 'proof', width: 130,
+                                    render: v => v
+                                      ? <Button size="small" icon={<FileTextOutlined />} onClick={() => window.open(v, '_blank')} style={{ color: '#B11E6A', borderColor: '#B11E6A', fontSize: 12 }}>View</Button>
+                                      : <Tag color="warning" style={{ borderRadius: 8, fontSize: 11 }}>Not Uploaded</Tag>
+                                  },
+                                  {
+                                    title: 'Reimbursement Status', dataIndex: 'paymentStatus', key: 'pay_status', width: 150, align: 'center',
+                                    render: (v, r) => (
+                                      <Space direction="vertical" size={2} style={{ textAlign: 'center' }}>
+                                        <Tag color={v === 'Paid' ? 'success' : v === 'Partial' ? 'warning' : 'error'} style={{ borderRadius: 10, margin: 0, fontSize: 13 }}>{v || 'Pending'}</Tag>
+                                        {v === 'Partial' && <Text type="secondary" style={{ fontSize: 11 }}>&#8377;{r.reimbursedAmount} of &#8377;{r.amount}</Text>}
+                                        {r.paidDate && <Text type="secondary" style={{ fontSize: 11 }}>{(r.paidDate || '').slice(0, 10)}</Text>}
+                                      </Space>
+                                    )
+                                  },
+                                  {
+                                    title: 'Paid By', dataIndex: 'paidBy', key: 'paidBy', width: 120, align: 'center',
+                                    render: v => v
+                                      ? <Tag color="blue" style={{ borderRadius: 8, fontSize: 12, fontWeight: 600 }}>{v}</Tag>
+                                      : <Text type="secondary" style={{ fontSize: 13 }}>—</Text>
+                                  },
+                                  {
+                                    title: 'Finance Payment Proof', dataIndex: 'reimbursementProof', key: 'pay_proof', width: 155,
+                                    render: v => v
+                                      ? <Button size="small" icon={<FileTextOutlined />} onClick={() => window.open(v, '_blank')} style={{ fontSize: 12, color: '#52c41a', borderColor: '#52c41a' }}>View Proof</Button>
+                                      : <Tag color="default" style={{ borderRadius: 8, fontSize: 11 }}>Not Yet Uploaded</Tag>
+                                  },
+                                  {
+                                    title: 'Actions', key: 'actions', fixed: 'right', width: 115,
+                                    render: (_, r) => r.paymentStatus === 'Paid' ? (
+                                      <Tag color="success" style={{ borderRadius: 8, fontSize: 13 }}>Paid</Tag>
+                                    ) : (
+                                      <Button size="small" type="primary" icon={<DollarCircleOutlined />} style={{ background: '#B11E6A', border: 'none', fontSize: 13 }} onClick={() => { if (!requireAccess('edit')) return; setReimbPayTarget(r); setShowReimbPaymentModal(true); }}>
+                                        {r.paymentStatus === 'Partial' ? 'Pay Remaining' : 'Pay Now'}
+                                      </Button>
+                                    )
+                                  },
+                                ]}
+                              />
+                            )}
+                          </div>
+                        )
+                      },
+                      {
+                        key: 'lr_payment',
+                        label: <Space><TruckOutlined />LR Payment</Space>,
+                        children: (
+                          <div style={{ marginTop: 8 }}>
+                            <div style={{ marginBottom: 12 }}>
+                              <Title level={5} style={{ margin: 0, color: textColor }}>LR Payment — Freight/Transport Settlement</Title>
+                              <Text type="secondary">Vendor LRs marked "Not Paid" at Purchase's LR-upload — Finance settles these directly with the vendor/transporter by the expected delivery date</Text>
+                            </div>
+                            <div style={{ marginBottom: 10, paddingBottom: 10, borderBottom: `1px solid ${borderColor}`, display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                              <Input
+                                prefix={<SearchOutlined style={{ color: '#B11E6A' }} />}
+                                placeholder="Search PO, item, vendor, LR number..."
+                                allowClear
+                                value={lrPaySearch}
+                                onChange={(e) => { setLrPaySearch(e.target.value); setLrPayPage(1); }}
+                                style={{ width: 260, borderRadius: 8 }}
+                              />
+                              <Select
+                                allowClear
+                                placeholder="Payment Status"
+                                value={lrPayFilter}
+                                onChange={(val) => { setLrPayFilter(val); setLrPayPage(1); }}
+                                style={{ width: 160, borderRadius: 8 }}
+                              >
+                                <Option value="Not Paid">Not Paid</Option>
+                                <Option value="Partial Paid">Partial Paid</Option>
+                                <Option value="Paid">Paid</Option>
+                              </Select>
+                              <DatePicker.RangePicker
+                                style={{ borderRadius: 8 }}
+                                onChange={(dates) => setLrPayDateRange(dates ? [dates[0].format('YYYY-MM-DD'), dates[1].format('YYYY-MM-DD')] : null)}
+                                allowClear
+                                placeholder={['Delivery from', 'Delivery to']}
+                              />
+                            </div>
+                            {lrPayments.length === 0 ? (
+                              <div style={{ textAlign: 'center', padding: '40px 0' }}>
+                                <TruckOutlined style={{ fontSize: 40, display: 'block', marginBottom: 10, color: '#B11E6A55' }} />
+                                <Text type="secondary">No LR payments yet — they'll appear here once Purchase uploads an LR.</Text>
+                              </div>
+                            ) : (
+                              <Table
+                                size="small"
+                                dataSource={lrPayments.filter((r) => {
+                                  // lrPaySearch is sent to useGetLrPaymentsQuery as a `search`
+                                  // param, filtered server-side across ALL LR payments.
+                                  if (lrPayDateRange) {
+                                    const d = r.expectedDeliveryDate || '';
+                                    if (d < lrPayDateRange[0] || d > lrPayDateRange[1]) return false;
+                                  }
+                                  return true;
+                                })}
+                                rowKey="key"
+                                pagination={{
+                                  current: lrPayPage,
+                                  pageSize: lrPayPageSize,
+                                  total: lrPaymentsData?.total || 0,
+                                  showSizeChanger: true,
+                                  pageSizeOptions: ['10', '20', '50', '100'],
+                                  onChange: (p, ps) => { setLrPayPage(p); setLrPayPageSize(ps); },
+                                  size: 'small',
+                                }}
+                                scroll={{ x: 'max-content' }}
+                                expandable={{
+                                  rowExpandable: (r) => !!r.items,
+                                  expandedRowRender: (r) => (
+                                    <div style={{ padding: '10px 16px', background: isDark ? '#1a1225' : '#fdf2f8', borderRadius: 8 }}>
+                                      <Text strong style={{ color: '#B11E6A', display: 'block', marginBottom: 8, fontSize: 12 }}>
+                                        Products in this order — {r.poCode}
+                                      </Text>
+                                      <Table
+                                        size="small"
+                                        dataSource={r.items.map((it, idx) => ({ ...it, key: `${r.key}-item-${idx}` }))}
+                                        rowKey="key"
+                                        pagination={false}
+                                        columns={[
+                                          { title: 'Item', dataIndex: 'itemName', key: 'itemName', render: v => <Text strong>{v}</Text> },
+                                          { title: 'Qty', key: 'qty', render: (_, it) => <Text>{it.qty} {it.unit}</Text> },
+                                          {
+                                            title: 'Amount', key: 'amount', align: 'right',
+                                            render: (_, it) => it.amount != null
+                                              ? <Text style={{ color: '#B11E6A', fontWeight: 600 }}>&#8377;{it.amount.toLocaleString()}</Text>
+                                              : <Text type="secondary">—</Text>
+                                          },
+                                        ]}
+                                      />
+                                    </div>
+                                  ),
+                                }}
+                                columns={[
+                                  { title: 'PO Code', dataIndex: 'poCode', key: 'poCode', width: 110, render: v => <Text strong style={{ color: '#B11E6A' }}>{v}</Text> },
+                                  {
+                                    title: 'Item', dataIndex: 'item', key: 'item', width: 160,
+                                    render: (v, r) => r.items ? (
+                                      <Space direction="vertical" size={1}>
+                                        <Text strong>{r.items.length} Products</Text>
+                                        <Tag color="blue" style={{ borderRadius: 10, fontSize: 10, margin: 0, padding: '0 6px' }}>
+                                          Bulk &times;{r.items.length}
+                                        </Tag>
+                                      </Space>
+                                    ) : <Text style={{ fontWeight: 600, fontSize: 13 }}>{v}</Text>
+                                  },
+                                  {
+                                    title: 'Vendor', key: 'vendor', width: 165,
+                                    render: (_, r) => (
+                                      <Space direction="vertical" size={0}>
+                                        <Text style={{ color: '#B11E6A', fontWeight: 600, fontSize: 13 }}>{r.vendorName}</Text>
+                                        {r.vendorPhone && <Text type="secondary" style={{ fontSize: 11 }}>{r.vendorPhone}</Text>}
+                                      </Space>
+                                    )
+                                  },
+                                  { title: 'LR Number', dataIndex: 'lrNumber', key: 'lrNumber', width: 140, render: v => <Text style={{ fontSize: 13 }}>{v}</Text> },
+                                  {
+                                    title: 'LR Copy', dataIndex: 'lrFileUrl', key: 'lrFileUrl', width: 110,
+                                    render: v => v ? <Button size="small" icon={<FileTextOutlined />} onClick={() => window.open(v, '_blank')} style={{ fontSize: 12, color: '#B11E6A', borderColor: '#B11E6A' }}>View</Button> : <Tag color="default" style={{ fontSize: 11 }}>None</Tag>
+                                  },
+                                  {
+                                    title: 'Expected Delivery', dataIndex: 'expectedDeliveryDate', key: 'expectedDeliveryDate', width: 155, align: 'center',
+                                    render: (v, r) => {
+                                      if (!v) return <Text type="secondary">—</Text>;
+                                      const todayStr = new Date().toISOString().slice(0, 10);
+                                      const overdue = r.paymentStatus !== 'Paid' && v < todayStr;
+                                      const dueToday = r.paymentStatus !== 'Paid' && v === todayStr;
+                                      return (
+                                        <Space direction="vertical" size={2} style={{ textAlign: 'center' }}>
+                                          <Text style={{ fontSize: 13 }}>{v}</Text>
+                                          {overdue && <Tag color="error" style={{ borderRadius: 8, fontSize: 11, margin: 0 }}>Overdue — Pay Now</Tag>}
+                                          {dueToday && <Tag color="warning" style={{ borderRadius: 8, fontSize: 11, margin: 0 }}>Due Today</Tag>}
+                                        </Space>
+                                      );
+                                    }
+                                  },
+                                  { title: 'Bill Total Amount', dataIndex: 'amount', key: 'amount', width: 105, align: 'right', render: v => <Text strong style={{ color: '#B11E6A', fontSize: 13 }}>&#8377;{v?.toLocaleString()}</Text> },
+                                  {
+                                    title: 'Payment Status', dataIndex: 'paymentStatus', key: 'paymentStatus', width: 150, align: 'center',
+                                    render: (v, r) => (
+                                      <Space direction="vertical" size={2} style={{ textAlign: 'center' }}>
+                                        <Tag color={v === 'Paid' ? 'success' : v === 'Partial Paid' ? 'warning' : 'error'} style={{ borderRadius: 10, margin: 0, fontSize: 13 }}>{v}</Tag>
+                                        {v === 'Partial Paid' && <Text type="secondary" style={{ fontSize: 11 }}>&#8377;{r.lrPaidAmount.toLocaleString()} of &#8377;{r.amount.toLocaleString()}</Text>}
+                                      </Space>
+                                    )
+                                  },
+                                  {
+                                    title: 'Actions', key: 'actions', fixed: 'right', width: 115,
+                                    render: (_, r) => r.paymentStatus === 'Paid' ? (
+                                      <Tag color="success" style={{ borderRadius: 8, fontSize: 13 }}>Paid</Tag>
+                                    ) : (
+                                      <Button size="small" type="primary" icon={<DollarCircleOutlined />} style={{ background: '#B11E6A', border: 'none', fontSize: 13 }} onClick={() => { if (!requireAccess('edit')) return; setLrPayTarget(r); setShowLrPaymentModal(true); }}>
+                                        {r.paymentStatus === 'Partial Paid' ? 'Pay Remaining' : 'Pay Now'}
+                                      </Button>
+                                    )
+                                  },
+                                ]}
+                              />
+                            )}
+                          </div>
+                        )
+                      },
+                      {
+                        key: 'local_purchase_expense',
+                        label: <Space><ShoppingOutlined />Local Purchase Expense</Space>,
+                        children: (
+                          <div style={{ marginTop: 8 }}>
+                            <div style={{ marginBottom: 12 }}>
+                              <Title level={5} style={{ margin: 0, color: textColor }}>Local Purchase Payments</Title>
+                              <Text type="secondary">Local purchases from vendors — review and process credit payments, upload proof</Text>
+                            </div>
+                            <div style={{ marginBottom: 10, paddingBottom: 10, borderBottom: `1px solid ${borderColor}`, display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                              <Input
+                                prefix={<SearchOutlined style={{ color: '#B11E6A' }} />}
+                                placeholder="Search vendor, invoice, item..."
+                                allowClear
+                                value={localExpSearch}
+                                onChange={(e) => { setLocalExpSearch(e.target.value); setLocalExpPage(1); }}
+                                style={{ width: 240, borderRadius: 8 }}
+                              />
+                              <Select
+                                allowClear
+                                placeholder="Payment Status"
+                                value={localExpPayFilter}
+                                onChange={(val) => { setLocalExpPayFilter(val); setLocalExpPage(1); }}
+                                style={{ width: 160, borderRadius: 8 }}
+                              >
+                                <Option value="Paid">Paid</Option>
+                                <Option value="Partially Paid">Partially Paid</Option>
+                                <Option value="Pending">Pending</Option>
+                              </Select>
+                              <DatePicker.RangePicker
+                                style={{ borderRadius: 8 }}
+                                onChange={(dates) => setLocalExpDateRange(dates ? [dates[0].format('YYYY-MM-DD'), dates[1].format('YYYY-MM-DD')] : null)}
+                                allowClear
+                              />
+                            </div>
+                            {localPurchaseExpenses.length === 0 ? (
+                              <div style={{ textAlign: 'center', padding: '40px 0' }}>
+                                <ShoppingOutlined style={{ fontSize: 40, display: 'block', marginBottom: 10, color: '#B11E6A55' }} />
+                                <Text type="secondary">No local purchase expenses yet.</Text>
+                              </div>
+                            ) : (
+                              <Table
+                                size="small"
+                                dataSource={localPurchaseExpenses.filter((lp) => {
+                                  // localExpSearch is sent to useGetLocalPurchaseExpensesQuery
+                                  // as a `search` param, filtered server-side across ALL records.
+                                  if (localExpDateRange) {
+                                    const d = lp.date || '';
+                                    if (d < localExpDateRange[0] || d > localExpDateRange[1]) return false;
+                                  }
+                                  return true;
+                                })}
+                                rowKey="key"
+                                pagination={{
+                                  current: localExpPage,
+                                  pageSize: localExpPageSize,
+                                  total: localPurchaseExpData?.total || 0,
+                                  showSizeChanger: true,
+                                  pageSizeOptions: ['10', '20', '50', '100'],
+                                  onChange: (p, ps) => { setLocalExpPage(p); setLocalExpPageSize(ps); },
+                                  size: 'small',
+                                }}
+                                scroll={{ x: 'max-content' }}
+                                columns={[
+                                  { title: 'Date', dataIndex: 'date', key: 'date', width: 95 },
+                                  { title: 'Invoice No', dataIndex: 'invoiceNo', key: 'invoiceNo', width: 145, render: v => <Text style={{ color: '#B11E6A', fontWeight: 600, fontSize: 13 }}>{v}</Text> },
+                                  {
+                                    title: 'Invoice File', dataIndex: 'invoiceFile', key: 'invoiceFile', width: 115,
+                                    render: v => v ? <Button size="small" icon={<FileTextOutlined />} style={{ fontSize: 13, color: '#B11E6A', borderColor: '#B11E6A' }} onClick={() => window.open(v, '_blank')}>Open</Button> : <Tag color="default" style={{ fontSize: 12 }}>None</Tag>
+                                  },
+                                  { title: 'Vendor', dataIndex: 'vendorName', key: 'vendorName', width: 155, render: v => <Text style={{ fontWeight: 600, fontSize: 13 }}>{v}</Text> },
+                                  { title: 'Vendor Phone', dataIndex: 'vendorPhone', key: 'vendorPhone', width: 135, render: v => v ? <Space size={4}><PhoneOutlined style={{ color: '#52c41a' }} /><Text style={{ fontSize: 13 }}>{v}</Text></Space> : <Text type="secondary">—</Text> },
+                                  {
+                                    title: 'Items', key: 'items', width: 185,
+                                    render: (_, r) => (r.items || []).map((it, i) => (
+                                      <div key={i}><Text strong style={{ fontSize: 13 }}>{it.name}</Text><Text type="secondary" style={{ fontSize: 12 }}> — {it.qty} {it.unit}</Text></div>
+                                    ))
+                                  },
+                                  { title: 'Total', dataIndex: 'totalAmount', key: 'totalAmount', width: 105, align: 'right', render: v => <Text strong style={{ color: '#B11E6A', fontSize: 13 }}>₹{v?.toLocaleString()}</Text> },
+                                  { title: 'GST Amount', dataIndex: 'gstAmount', key: 'gstAmount', width: 105, align: 'right', render: v => v > 0 ? <Text style={{ fontSize: 13 }}>₹{v.toLocaleString()}</Text> : <Text type="secondary">—</Text> },
+                                  { title: 'Balance', dataIndex: 'balance', key: 'balance', width: 105, align: 'right', render: v => v > 0 ? <Text strong style={{ color: '#fa8c16', fontSize: 13 }}>₹{v?.toLocaleString()}</Text> : <Text type="secondary">—</Text> },
+                                  { title: 'Payment Type', dataIndex: 'paymentType', key: 'paymentType', width: 115, align: 'center', render: v => <Tag color={v === 'instant' ? 'green' : 'orange'} style={{ borderRadius: 8, fontSize: 13 }}>{v === 'instant' ? 'Instant' : 'Credit'}</Tag> },
+                                  {
+                                    title: 'Paid By', dataIndex: 'paidBy', key: 'paidBy', width: 165,
+                                    render: (v, r) => v === 'Purchase Person' ? (
+                                      <div>
+                                        <Tag color="purple" style={{ borderRadius: 8, fontSize: 12, marginBottom: 2 }}>Purchase Person</Tag>
+                                        {r.purchasePersonName && <div><Text style={{ fontSize: 12 }}>{r.purchasePersonName}</Text></div>}
+                                        {r.purchasePersonPhone && <div><Text type="secondary" style={{ fontSize: 11 }}>{r.purchasePersonPhone}</Text></div>}
+                                      </div>
+                                    ) : v ? <Tag color="blue" style={{ borderRadius: 8, fontSize: 13 }}>{v}</Tag> : <Text type="secondary">—</Text>
+                                  },
+                                  {
+                                    title: 'Purchase Person GPay Number', dataIndex: 'gPayNumber', key: 'gPayNumber', width: 135,
+                                    render: v => v ? <Space size={4}><PhoneOutlined style={{ color: '#52c41a' }} /><Text style={{ fontSize: 13 }}>{v}</Text></Space> : <Text type="secondary">—</Text>
+                                  },
+                                  {
+                                    title: 'Payment Status', dataIndex: 'paymentStatus', key: 'paymentStatus', width: 125, align: 'center',
+                                    render: (v, r) => (
+                                      <Space direction="vertical" size={2} style={{ textAlign: 'center' }}>
+                                        <Tag color={v === 'Paid' ? 'success' : v === 'Partially Paid' ? 'warning' : 'error'} style={{ borderRadius: 10, margin: 0, fontSize: 13 }}>{v || 'Pending'}</Tag>
+                                        {r.paidDate && <Text type="secondary" style={{ fontSize: 11 }}>{r.paidDate}</Text>}
+                                      </Space>
+                                    )
+                                  },
+                                  {
+                                    title: 'Payment Proof', dataIndex: 'paymentProof', key: 'paymentProof', width: 125,
+                                    render: v => v ? <Button size="small" icon={<CheckCircleOutlined />} onClick={() => window.open(v, '_blank')} style={{ fontSize: 13, color: '#52c41a', borderColor: '#52c41a' }}>View Proof</Button> : <Text type="secondary" style={{ fontSize: 13 }}>—</Text>
+                                  },
+                                  {
+                                    title: 'Actions', key: 'actions', fixed: 'right', width: 115,
+                                    render: (_, r) => r.paymentStatus === 'Paid' ? (
+                                      <Tag color="success" style={{ borderRadius: 8, fontSize: 13 }}>Paid</Tag>
+                                    ) : (
+                                      <Button size="small" type="primary" icon={<DollarCircleOutlined />} style={{ background: '#B11E6A', border: 'none', fontSize: 13 }} onClick={() => { if (!requireAccess('edit')) return; setLocalPayTarget(r); setShowLocalPaymentModal(true); }}>
+                                        {r.paymentStatus === 'Partially Paid' ? 'Pay Balance' : 'Pay Now'}
+                                      </Button>
+                                    )
+                                  },
+                                ]}
+                              />
+                            )}
+                          </div>
+                        )
+                      }
+                    ]}
+                  />
+                </div>
+              )
+            }
+          ])}
+        />
+      </Card>
+
+      {/* Edit Quotation & Resend Modal (Finance) */}
+      <Modal
+        title={
+          <Space>
+            <EditOutlined style={{ color: '#722ed1' }} />
+            <Text strong style={{ fontSize: 15 }}>Edit Quotation & Resend</Text>
+          </Space>
+        }
+        open={showEditReqModal}
+        onCancel={() => { setShowEditReqModal(false); setEditReqTarget(null); editReqForm.resetFields(); }}
+        footer={null}
+        width={480}
+        centered
+        destroyOnClose
+      >
+        {editReqTarget && (
+          <Form form={editReqForm} layout="vertical" style={{ marginTop: 8 }}>
+            <div style={{ marginBottom: 14, padding: '10px 14px', background: isDark ? '#16192a' : '#f9f0ff', borderRadius: 8, border: '1px solid #d3adf7' }}>
+              <Text type="secondary" style={{ fontSize: 11 }}>ITEM</Text>
+              <div><Text strong style={{ fontSize: 14 }}>{editReqTarget.item}</Text></div>
+              <Text type="secondary" style={{ fontSize: 11, marginTop: 4, display: 'block' }}>
+                Supplier: <Text strong style={{ color: '#B11E6A' }}>{editReqTarget.supplier}</Text>
+              </Text>
+            </div>
+            <Row gutter={12}>
+              <Col span={12}>
+                <Form.Item label="Quantity" name="qty" rules={[{ required: true }]}>
+                  <InputNumber min={1} style={{ width: '100%' }} addonAfter={editReqTarget.unit} />
+                </Form.Item>
+              </Col>
+              <Col span={12}>
+                <Form.Item label="Payment Terms" name="payment_terms" rules={[{ required: true }]}>
+                  <Select>
+                    <Option value="100% Payment">100% Payment</Option>
+                    <Option value="50% Advance, 50% on Dispatch">50% Advance, 50% on Dispatch</Option>
+                    <Option value="50% Advance, 50% After Delivery (Max 15 days)">50% Advance, 50% After Delivery</Option>
+                    <Option value="Credit 30 Days">Credit 30 Days</Option>
+                  </Select>
+                </Form.Item>
+              </Col>
+              <Col span={24}>
+                <Form.Item label="Quoted Amount (₹)" name="amount">
+                  <InputNumber min={0} style={{ width: '100%' }} placeholder="Correct the quoted amount if needed" />
+                </Form.Item>
+              </Col>
+            </Row>
+            {(editReqTarget.notes || []).length > 0 && (
+              <div style={{ marginBottom: 14, padding: '8px 12px', background: isDark ? '#1e2235' : '#f0f4ff', borderRadius: 8, border: '1px solid #d6e4ff' }}>
+                <Text style={{ fontSize: 11, color: '#722ed1', fontWeight: 600 }}>Latest Note:</Text>
+                <Text style={{ fontSize: 12, display: 'block' }}>{(editReqTarget.notes || []).at(-1)?.text}</Text>
+              </div>
+            )}
+            <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+              <Button style={{ flex: 1, height: 40, borderRadius: 8 }} onClick={() => { setShowEditReqModal(false); editReqForm.resetFields(); }}>Cancel</Button>
+              <Button style={{ flex: 1, height: 40, borderRadius: 8, borderColor: '#722ed1', color: '#722ed1' }}
+                onClick={() => {
+                  editReqForm.validateFields().then(async (vals) => {
+                    try {
+                      await updateQuotation({ id: editReqTarget.key, qty: vals.qty, paymentTerms: vals.payment_terms, amount: vals.amount }).unwrap();
+                      enqueueSnackbar('Quotation details updated.', { variant: 'success' });
+                    } catch { enqueueSnackbar('Update failed', { variant: 'error' }); }
+                    setShowEditReqModal(false); editReqForm.resetFields();
+                  });
+                }}>Save Only</Button>
+              <Button type="primary" style={{ flex: 2, height: 40, borderRadius: 8, background: '#25D366', border: 'none', fontWeight: 700 }}
+                icon={<WhatsAppOutlined />}
+                onClick={() => {
+                  editReqForm.validateFields().then(async (vals) => {
+                    try {
+                      await updateQuotation({ id: editReqTarget.key, qty: vals.qty, paymentTerms: vals.payment_terms, amount: vals.amount }).unwrap();
+                    } catch { /* silent */ }
+                    const phone = (editReqTarget.vendorId?.phone || suppliersData[editReqTarget.supplier]?.phone || '').replace(/\D/g, '');
+                    const latestNote = (editReqTarget.notes || []).at(-1);
+                    const msg = `*Updated Quotation Request*\n\n*Item:* ${editReqTarget.item}\n*Quantity:* ${vals.qty} ${editReqTarget.unit}\n*Payment Terms:* ${vals.payment_terms}${latestNote ? `\n\nNote: ${latestNote.text}` : ''}\n\nKindly provide an updated quotation at the earliest.`;
+                    window.open(`https://wa.me/${phone}?text=${encodeURIComponent(msg)}`, '_blank');
+                    enqueueSnackbar('Updated quotation sent via WhatsApp!', { variant: 'success' });
+                    setShowEditReqModal(false); editReqForm.resetFields();
+                  });
+                }}>Save & Send via WhatsApp</Button>
+            </div>
+          </Form>
+        )}
+      </Modal>
+
+      {/* Reject Reason Modal — reason is passed to Purchase so they know why & can re-request */}
+      <Modal
+        title={
+          <Space>
+            <CloseCircleOutlined style={{ color: '#ff4d4f' }} />
+            <Text strong style={{ fontSize: 15 }}>Reject Request</Text>
+          </Space>
+        }
+        open={showRejectReasonModal}
+        onCancel={() => { setShowRejectReasonModal(false); setRejectReasonTarget(null); setRejectReasonInput(''); }}
+        footer={null}
+        width={420}
+        centered
+      >
+        {rejectReasonTarget && (
+          <>
+            <Text style={{ fontSize: 13, display: 'block', marginBottom: 10 }}>
+              Rejecting <Text strong>{rejectReasonTarget.item}</Text> ({rejectReasonTarget.qty} {rejectReasonTarget.unit}) from <Text strong>{rejectReasonTarget.supplier}</Text>.
+            </Text>
+            <Input.TextArea
+              rows={3}
+              placeholder="Reason for rejection (shown to Purchase, e.g. price too high, wrong vendor)..."
+              value={rejectReasonInput}
+              onChange={(e) => setRejectReasonInput(e.target.value)}
+              style={{ marginBottom: 14 }}
+            />
+            <div style={{ display: 'flex', gap: 8 }}>
+              <Button style={{ flex: 1 }} onClick={() => { setShowRejectReasonModal(false); setRejectReasonTarget(null); setRejectReasonInput(''); }}>Cancel</Button>
+              <Button
+                danger
+                type="primary"
+                style={{ flex: 2 }}
+                onClick={async () => {
+                  try {
+                    await rejectReq({ id: rejectReasonTarget.key, reason: rejectReasonInput.trim() }).unwrap();
+                    enqueueSnackbar('Rejected', { variant: 'warning' });
+                    setShowRejectReasonModal(false);
+                    setRejectReasonTarget(null);
+                    setRejectReasonInput('');
+                  } catch { enqueueSnackbar('Rejection failed', { variant: 'error' }); }
+                }}
+              >
+                Confirm Reject
+              </Button>
+            </div>
+          </>
+        )}
+      </Modal>
+
+      {/* Payment Proof Modal */}
+      <Modal
+        title={<Text strong style={{ fontSize: 18 }}>Process Payment & Upload Proof</Text>}
+        open={showPaymentModal}
+        onCancel={() => { setShowPaymentModal(false); paymentForm.resetFields(); }}
+        footer={null}
+        width={500}
+        centered
+      >
+        {selectedForPayment && (
+          <Form form={paymentForm} layout="vertical" onFinish={handleProcessPayment} initialValues={{ amount_paid: selectedForPayment.amount - (selectedForPayment.paid_amount || 0), lr_reminder_date: selectedForPayment.lrReminderDate ? dayjs(selectedForPayment.lrReminderDate.slice(0, 10)) : null }}>
+            <Descriptions bordered column={1} size="small">
+              <Descriptions.Item label="Payee">{selectedForPayment.item || selectedForPayment.desc}</Descriptions.Item>
+              <Descriptions.Item label="Total Amount Due"><Text strong style={{ color: '#B11E6A', fontSize: 18 }}>₹{selectedForPayment.amount.toLocaleString()}</Text></Descriptions.Item>
+              <Descriptions.Item label="Paid Till Now">₹{(selectedForPayment.paid_amount || 0).toLocaleString()}</Descriptions.Item>
+              <Descriptions.Item label="Balance Remaining"><Text strong style={{ color: '#fa8c16' }}>₹{(selectedForPayment.amount - (selectedForPayment.paid_amount || 0)).toLocaleString()}</Text></Descriptions.Item>
+            </Descriptions>
+
+            <Row gutter={12} style={{ marginTop: 20 }}>
+              <Col span={14}>
+                <Form.Item
+                  label="Enter Amount to Pay Now"
+                  name="amount_paid"
+                  rules={[
+                    { required: true, message: 'Please enter amount' },
+                    ({ getFieldValue }) => ({
+                      validator(_, value) {
+                        const balance = selectedForPayment.amount - (selectedForPayment.paid_amount || 0);
+                        if (!value || value <= 0) return Promise.reject('Amount must be greater than 0');
+                        if (value > balance) return Promise.reject(`Cannot exceed balance ₹${balance.toLocaleString()}`);
+                        return Promise.resolve();
+                      },
+                    }),
+                  ]}
+                >
+                  <InputNumber
+                    prefix="₹"
+                    style={{ width: '100%' }}
+                    placeholder="0.00"
+                    min={1}
+                    max={selectedForPayment.amount - (selectedForPayment.paid_amount || 0)}
+                    formatter={value => `${value}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
+                    parser={value => value.replace(/\₹\s?|(,*)/g, '')}
+                  />
+                </Form.Item>
+              </Col>
+              <Col span={10}>
+                <Form.Item label="Payment Status (Auto)">
+                  <Form.Item noStyle dependencies={['amount_paid']}>
+                    {({ getFieldValue }) => {
+                      const entered = getFieldValue('amount_paid') || 0;
+                      const alreadyPaid = selectedForPayment.paid_amount || 0;
+                      const isFullyPaid = (alreadyPaid + entered) >= selectedForPayment.amount;
+                      return (
+                        <Tag
+                          color={isFullyPaid ? 'success' : 'warning'}
+                          style={{ borderRadius: 10, padding: '4px 14px', fontSize: 13, fontWeight: 600, width: '100%', textAlign: 'center', display: 'block' }}
+                        >
+                          {isFullyPaid ? 'Paid' : 'Partially Paid'}
+                        </Tag>
+                      );
+                    }}
+                  </Form.Item>
+                </Form.Item>
+              </Col>
+            </Row>
+
+            {/* Purchase orders only — rings the Purchase users picked in Settings → Alert
+                Configuration → LR Copy Reminder Alert from this date until the LR copy is
+                uploaded in Purchase → Upload LR Copies. */}
+            {selectedForPayment.poCode && !selectedForPayment.bill_no?.startsWith('EXP') && (
+              selectedForPayment.lrFileUrl ? (
+                <div style={{ marginBottom: 16 }}>
+                  <Tag color="success" style={{ borderRadius: 8 }}><CheckCircleOutlined style={{ marginRight: 4 }} />LR copy already uploaded by Purchase</Tag>
+                </div>
+              ) : (
+                <Form.Item
+                  label="LR Copy Reminder Date"
+                  name="lr_reminder_date"
+                  extra="Optional — from this date Purchase is alerted until the LR copy is uploaded."
+                >
+                  <DatePicker
+                    style={{ width: '100%' }}
+                    format="DD MMM YYYY"
+                    placeholder="Select reminder date"
+                    disabledDate={(d) => d && d.isBefore(dayjs(), 'day')}
+                  />
+                </Form.Item>
+              )
+            )}
+
+            {selectedForPayment?.proofUrl && (
+              <div style={{ marginBottom: 16 }}>
+                <Text strong style={{ display: 'block', marginBottom: 8, fontSize: 13 }}>
+                  Expense Proof (submitted during expense entry)
+                </Text>
+                <div style={{ border: `1px solid ${isDark ? '#2a2a3a' : '#B11E6A33'}`, borderRadius: 8, overflow: 'hidden', maxHeight: 220, overflowY: 'auto', background: isDark ? '#16192a' : '#fafcff', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 8 }}>
+                  {/\.(jpg|jpeg|png|gif|webp)$/i.test(selectedForPayment.proofUrl) ? (
+                    <Image
+                      src={selectedForPayment.proofUrl}
+                      style={{ maxWidth: '100%', maxHeight: 200, objectFit: 'contain', borderRadius: 6 }}
+                      preview={{ mask: <EyeOutlined style={{ fontSize: 14 }} /> }}
+                    />
+                  ) : (
+                    <Button icon={<FileTextOutlined />} onClick={() => window.open(selectedForPayment.proofUrl, '_blank')} style={{ color: '#B11E6A', borderColor: '#B11E6A' }}>
+                      View Expense Proof Document
+                    </Button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            <Form.Item label="Upload Payment Proof (Receipt/Screenshot)" name="proof">
+              <Upload.Dragger
+                style={{ background: isDark ? '#1a1a2e' : '#fafafa' }}
+                maxCount={1}
+                customRequest={makeUpload('financial/proofs')}
+              >
+                <p className="ant-upload-drag-icon"><UploadOutlined style={{ color: '#B11E6A' }} /></p>
+                <p className="ant-upload-text">Click or drag payment receipt</p>
+              </Upload.Dragger>
+            </Form.Item>
+
+            <div style={{ display: 'flex', gap: 12, marginTop: 24 }}>
+              <Button onClick={() => { setShowPaymentModal(false); paymentForm.resetFields(); }} style={{ flex: 1 }}>Cancel</Button>
+              <Button 
+                type="primary" 
+                htmlType="submit"
+                style={{ flex: 2, background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none', fontWeight: 700 }}
+              >
+                Submit Payment Proof
+              </Button>
+            </div>
+          </Form>
+        )}
+      </Modal>
+
+      {/* Quotation File View Modal */}
+      <Modal
+        title={
+          <Space>
+            <div style={{ width: 36, height: 36, borderRadius: 8, background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <FileTextOutlined style={{ color: '#fff', fontSize: 16 }} />
+            </div>
+            <div>
+              <Text strong style={{ fontSize: 15, display: 'block' }}>Uploaded Quotation File</Text>
+              <Text type="secondary" style={{ fontSize: 11 }}>File attached with purchase request</Text>
+            </div>
+          </Space>
+        }
+        open={!!viewQuotationFile}
+        onCancel={() => setViewQuotationFile(null)}
+        footer={
+          <div style={{ display: 'flex', gap: 8 }}>
+            <Button style={{ flex: 1 }} onClick={() => setViewQuotationFile(null)}>Close</Button>
+            <Button
+              type="primary"
+              icon={<UploadOutlined />}
+              disabled={!(viewQuotationFile?.quotationFiles?.length > 0 || viewQuotationFile?.quotation_file_url)}
+              style={{ flex: 2, background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none', fontWeight: 700 }}
+              onClick={() => {
+                const files = viewQuotationFile?.quotationFiles || [];
+                const url = files.length > 0 ? files[files.length - 1].url : viewQuotationFile?.quotation_file_url;
+                if (!url) return;
+                window.open(url, '_blank');
+              }}
+            >
+              Open Latest File
+            </Button>
+          </div>
+        }
+        width={500}
+        centered
+      >
+        {viewQuotationFile && (
+          <div style={{ marginTop: 16 }}>
+            {/* All uploaded quotation files — every re-request/re-submit is kept, not just the latest */}
+            <div style={{ borderRadius: 10, background: 'linear-gradient(135deg,#B11E6A12,#D85C9E08)', border: '1.5px solid #B11E6A33', marginBottom: 16, padding: '12px 16px' }}>
+              <Text strong style={{ color: '#B11E6A', fontSize: 12, display: 'block', marginBottom: 8 }}>
+                <FileTextOutlined style={{ marginRight: 6 }} />
+                Uploaded Quotation Files{viewQuotationFile.quotationFiles?.length > 1 ? ` (${viewQuotationFile.quotationFiles.length})` : ''}
+              </Text>
+              {(!viewQuotationFile.quotationFiles || viewQuotationFile.quotationFiles.length === 0) && (
+                <Text type="secondary" style={{ fontSize: 12 }}>No file uploaded</Text>
+              )}
+              {(viewQuotationFile.quotationFiles || []).slice().reverse().map((f, i, arr) => (
+                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', borderTop: i > 0 ? `1px solid ${isDark ? '#2a2d40' : '#f0f0f0'}` : 'none' }}>
+                  <FileTextOutlined style={{ color: '#B11E6A' }} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <Text style={{ fontSize: 12, fontWeight: i === 0 ? 700 : 500, color: i === 0 ? '#B11E6A' : textColor }}>
+                      {i === 0 && arr.length > 1 ? 'Latest — ' : ''}{f.uploadedAt ? new Date(f.uploadedAt).toLocaleString() : `File ${arr.length - i}`}
+                    </Text>
+                  </div>
+                  <Button size="small" type="link" onClick={() => window.open(f.url, '_blank')} style={{ padding: 0, fontWeight: 600 }}>
+                    View
+                  </Button>
+                </div>
+              ))}
+            </div>
+
+            {/* Request summary */}
+            <Descriptions bordered size="small" column={2}>
+              <Descriptions.Item label="Item" span={2}><Text strong>{viewQuotationFile.item}</Text></Descriptions.Item>
+              <Descriptions.Item label="Supplier"><Text style={{ color: '#B11E6A', fontWeight: 600 }}>{viewQuotationFile.supplier}</Text></Descriptions.Item>
+              <Descriptions.Item label="Qty"><Text strong>{viewQuotationFile.qty} {viewQuotationFile.unit}</Text></Descriptions.Item>
+              <Descriptions.Item label="Payment Terms" span={2}><Text style={{ fontSize: 11 }}>{viewQuotationFile.payment_terms}</Text></Descriptions.Item>
+              <Descriptions.Item label="Date">{viewQuotationFile.date}</Descriptions.Item>
+              <Descriptions.Item label="Status">
+                <Tag color={{ Approved: 'success', Rejected: 'error', Modification: 'warning', Pending: 'processing' }[viewQuotationFile.status] || 'processing'} style={{ borderRadius: 10 }}>
+                  {viewQuotationFile.status}
+                </Tag>
+              </Descriptions.Item>
+              {viewQuotationFile.finance_note && (
+                <Descriptions.Item label="Finance Note" span={2}><Text type="warning">{viewQuotationFile.finance_note}</Text></Descriptions.Item>
+              )}
+            </Descriptions>
+          </div>
+        )}
+      </Modal>
+
+      {/* Details Modal */}
+      <Modal
+        title={<Text strong style={{ fontSize: 18 }}>Order & Payment Details</Text>}
+        open={!!viewRequest}
+        onCancel={() => setViewRequest(null)}
+        footer={null}
+        width={600}
+        centered
+      >
+        {viewRequest && (() => {
+          const sup = viewRequest.vendor || suppliersData[viewRequest.supplier] || null;
+          const bank = sup?.bankDetails || sup?.bank;
+          const bankText = bank
+            ? (typeof bank === 'string' ? bank : [bank.bankName, bank.accountNo, bank.ifsc].filter(Boolean).join(' · '))
+            : '—';
+          return (
+            <div style={{ marginTop: 16 }}>
+              <Descriptions bordered size="small" column={2}>
+                <Descriptions.Item label="Date">{viewRequest.date || '—'}</Descriptions.Item>
+                <Descriptions.Item label="Status"><Tag color={getStatusColor(viewRequest.status)}>{viewRequest.status || 'Unpaid'}</Tag></Descriptions.Item>
+                <Descriptions.Item label="Item" span={2}><Text strong>{viewRequest.item || viewRequest.itemName || '—'}</Text></Descriptions.Item>
+                <Descriptions.Item label="Qty">{viewRequest.qty} {viewRequest.unit}</Descriptions.Item>
+                <Descriptions.Item label="Amount"><Text strong style={{ color: '#B11E6A' }}>₹{(viewRequest.amount || 0).toLocaleString()}</Text></Descriptions.Item>
+                <Descriptions.Item label="Bill / PO No">{viewRequest.bill_no || '—'}</Descriptions.Item>
+                <Descriptions.Item label="Invoice No">{viewRequest.inv_no || '—'}</Descriptions.Item>
+                <Descriptions.Item label="Payment Terms" span={2}>{viewRequest.payment_terms || 'N/A'}</Descriptions.Item>
+              </Descriptions>
+              {viewRequest.supplier && (
+                <>
+                  <Divider orientation="left" style={{ marginTop: 16 }}>Supplier / Vendor Details</Divider>
+                  <Descriptions bordered size="small" column={2}>
+                    <Descriptions.Item label="Name"><Text strong style={{ color: '#B11E6A' }}>{sup?.name || viewRequest.supplier}</Text></Descriptions.Item>
+                    <Descriptions.Item label="Phone">{sup?.phone || '—'}</Descriptions.Item>
+                    <Descriptions.Item label="Email">{sup?.email || '—'}</Descriptions.Item>
+                    <Descriptions.Item label="Address" span={2}>{sup?.address || '—'}</Descriptions.Item>
+                  </Descriptions>
+                  <Divider orientation="left" style={{ marginTop: 16 }}>Bank Details</Divider>
+                  <Descriptions bordered size="small" column={1}>
+                    <Descriptions.Item label="Bank / A/C">{bankText}</Descriptions.Item>
+                  </Descriptions>
+                </>
+              )}
+              {viewRequest.stock_context && (
+                 <>
+                   <Divider orientation="left">Inventory Impact</Divider>
+                   <Descriptions size="small" column={2}>
+                     <Descriptions.Item label="Current Stock">{viewRequest.stock_context.current} {viewRequest.unit}</Descriptions.Item>
+                     <Descriptions.Item label="Min. Requirement">{viewRequest.stock_context.min} {viewRequest.unit}</Descriptions.Item>
+                   </Descriptions>
+                 </>
+              )}
+              <Divider />
+              <Button block type="primary" onClick={() => setViewRequest(null)}>Close</Button>
+            </div>
+          );
+        })()}
+      </Modal>
+
+      {/* ── Reimbursement Payment Modal ── */}
+      <Modal
+        title={<Space><WalletOutlined style={{ color: '#B11E6A' }} /><Text strong>Process Reimbursement Payment</Text></Space>}
+        open={showReimbPaymentModal}
+        onCancel={() => { setShowReimbPaymentModal(false); setReimbPayTarget(null); reimbPayForm.resetFields(); }}
+        footer={null}
+        width={500}
+        centered
+      >
+        {reimbPayTarget && (
+          <Form form={reimbPayForm} layout="vertical" onFinish={handleReimbPayment}>
+            <div style={{ background: isDark ? '#1a1a2e' : '#fafcff', borderRadius: 10, padding: '12px 14px', marginBottom: 16, border: `1px solid ${isDark ? '#2a2d40' : '#e8f4ff'}` }}>
+              <Text strong style={{ display: 'block', marginBottom: 4 }}>{reimbPayTarget.vendor}</Text>
+              <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>Order: {reimbPayTarget.orderId} · Pickup: {reimbPayTarget.pickupEmpName} ({reimbPayTarget.pickupEmpId})</Text>
+              <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>Amount: &#8377;{reimbPayTarget.amount?.toLocaleString()}</Text>
+              {reimbPayTarget.reimbursedAmount > 0 && (
+                <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>Already Reimbursed: &#8377;{reimbPayTarget.reimbursedAmount.toLocaleString()} · Balance: &#8377;{reimbPayTarget.balance.toLocaleString()}</Text>
+              )}
+              {reimbPayTarget.gPayNumber && (
+                <Text style={{ display: 'block', fontSize: 12, color: '#52c41a', marginTop: 4 }}>
+                  G Pay: {reimbPayTarget.gPayNumber}
+                </Text>
+              )}
+            </div>
+            <Form.Item
+              label="Amount to Pay"
+              name="amount"
+              initialValue={reimbPayTarget.balance ?? reimbPayTarget.amount}
+              tooltip="Pay the full balance, or a lesser amount to record a partial reimbursement"
+              rules={[{ required: true, message: 'Enter the amount being paid' }]}
+            >
+              <InputNumber prefix="₹" style={{ width: '100%', borderRadius: 8 }} min={0} max={reimbPayTarget.balance ?? reimbPayTarget.amount} />
+            </Form.Item>
+            <Form.Item label="Paid By" name="paid_by" initialValue="Finance Team">
+              <Input placeholder="Finance team member name" style={{ borderRadius: 8 }} />
+            </Form.Item>
+            <Form.Item
+              label="Upload Payment Proof"
+              name="payment_proof"
+              valuePropName="fileList"
+              getValueFromEvent={(e) => Array.isArray(e) ? e : e?.fileList}
+              rules={[{ required: true, message: 'Please upload payment proof' }]}
+            >
+              <Upload maxCount={1} customRequest={makeUpload('financial/proofs')} accept=".pdf,.jpg,.jpeg,.png">
+                <Button icon={<UploadOutlined />} style={{ borderColor: '#B11E6A', color: '#B11E6A' }}>Upload Proof (PDF / Image)</Button>
+              </Upload>
+            </Form.Item>
+            <div style={{ padding: '10px 12px', background: isDark ? '#1e2235' : '#f0f7ff', borderRadius: 8, border: `1px solid ${isDark ? '#2a3040' : '#bae0ff'}`, marginBottom: 14, fontSize: 12 }}>
+              <SendOutlined style={{ color: '#1890ff', marginRight: 6 }} />
+              A partial payment sets status to <Text strong>Partial</Text>; paying the full balance sets it to <Text strong>Paid</Text>. This updates in the <Text strong>Dispatch Pick Up Order — Reimbursement Claims</Text> tab.
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <Button block onClick={() => { setShowReimbPaymentModal(false); reimbPayForm.resetFields(); }}>Cancel</Button>
+              <Button block type="primary" htmlType="submit" style={{ background: '#B11E6A', border: 'none' }}>Confirm Payment Done</Button>
+            </div>
+          </Form>
+        )}
+      </Modal>
+
+      {/* ── Local Purchase Payment Modal ── */}
+      <Modal
+        title={<Space><ShoppingOutlined style={{ color: '#B11E6A' }} /><Text strong>Process Local Purchase Payment</Text></Space>}
+        open={showLocalPaymentModal}
+        onCancel={() => { setShowLocalPaymentModal(false); setLocalPayTarget(null); localPayForm.resetFields(); }}
+        footer={null}
+        width={500}
+        centered
+      >
+        {localPayTarget && (
+          <Form form={localPayForm} layout="vertical" onFinish={handleLocalPayment}>
+            <div style={{ background: isDark ? '#1a1a2e' : '#fafcff', borderRadius: 10, padding: '12px 14px', marginBottom: 16, border: `1px solid ${isDark ? '#2a2d40' : '#e8f4ff'}` }}>
+              <Text strong style={{ display: 'block', marginBottom: 4 }}>{localPayTarget.invoiceNo}</Text>
+              <Text style={{ color: '#B11E6A' }}>{localPayTarget.vendorName}</Text>
+              <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>Date: {localPayTarget.date} · Payment Type: {localPayTarget.paymentType === 'credit' ? 'Credit' : 'Instant'}</Text>
+              <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>Total Amount: ₹{localPayTarget.totalAmount?.toLocaleString()}</Text>
+              {localPayTarget.paidAmount > 0 && (
+                <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>Already Paid: ₹{localPayTarget.paidAmount.toLocaleString()} · Balance: ₹{localPayTarget.balance.toLocaleString()}</Text>
+              )}
+              {(localPayTarget.items || []).map((item, i) => (
+                <Text key={i} style={{ display: 'block', fontSize: 11, color: '#888' }}>• {item.name} — {item.qty} {item.unit}</Text>
+              ))}
+              {localPayTarget.gPayNumber && (
+                <Text style={{ display: 'block', fontSize: 12, color: '#52c41a', marginTop: 4 }}>
+                  <PhoneOutlined style={{ marginRight: 4 }} />GPay: {localPayTarget.gPayNumber}
+                </Text>
+              )}
+            </div>
+            <Form.Item
+              label="Amount to Pay"
+              name="amount"
+              initialValue={localPayTarget.balance ?? localPayTarget.totalAmount}
+              tooltip="Pay the full balance, or a lesser amount to record a partial payment"
+              rules={[{ required: true, message: 'Enter the amount being paid' }]}
+            >
+              <InputNumber prefix="₹" style={{ width: '100%', borderRadius: 8 }} min={0} max={localPayTarget.balance ?? localPayTarget.totalAmount} />
+            </Form.Item>
+            <Form.Item label="Paid By" name="paid_by" initialValue="Finance Team">
+              <Input placeholder="Finance team member name" style={{ borderRadius: 8 }} />
+            </Form.Item>
+            <Form.Item
+              label="Upload Payment Proof"
+              name="payment_proof"
+              valuePropName="fileList"
+              getValueFromEvent={(e) => Array.isArray(e) ? e : e?.fileList}
+              rules={[{ required: true, message: 'Please upload payment proof' }]}
+            >
+              <Upload maxCount={1} customRequest={makeUpload('financial/proofs')} accept=".pdf,.jpg,.jpeg,.png">
+                <Button icon={<UploadOutlined />} style={{ borderColor: '#B11E6A', color: '#B11E6A' }}>Upload Proof (PDF / Image)</Button>
+              </Upload>
+            </Form.Item>
+            <div style={{ padding: '10px 12px', background: isDark ? '#1e2235' : '#f6fff8', borderRadius: 8, border: `1px solid #52c41a33`, marginBottom: 14, fontSize: 12 }}>
+              <CheckCircleOutlined style={{ color: '#52c41a', marginRight: 6 }} />
+              A partial payment sets status to <Text strong>Partially Paid</Text>; paying the full balance sets it to <Text strong>Paid</Text>. Status and proof update in the <Text strong>Local Purchase</Text> tab in Purchase page.
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <Button block onClick={() => { setShowLocalPaymentModal(false); localPayForm.resetFields(); }}>Cancel</Button>
+              <Button block type="primary" htmlType="submit" style={{ background: '#B11E6A', border: 'none' }}>Confirm Payment Done</Button>
+            </div>
+          </Form>
+        )}
+      </Modal>
+
+      {/* ── LR Payment Modal ── */}
+      <Modal
+        title={<Space><TruckOutlined style={{ color: '#B11E6A' }} /><Text strong>Settle LR Payment</Text></Space>}
+        open={showLrPaymentModal}
+        onCancel={() => { setShowLrPaymentModal(false); setLrPayTarget(null); lrPayForm.resetFields(); }}
+        footer={null}
+        width={480}
+        centered
+        destroyOnClose
+      >
+        {lrPayTarget && (
+          <Form form={lrPayForm} layout="vertical" onFinish={handleLrPayment} style={{ marginTop: 8 }}>
+            <div style={{ background: isDark ? '#1a1a2e' : '#fafcff', borderRadius: 10, padding: '12px 14px', marginBottom: 16, border: `1px solid ${isDark ? '#2a2d40' : '#e8f4ff'}` }}>
+              <Text strong style={{ display: 'block', marginBottom: 4 }}>{lrPayTarget.item} ({lrPayTarget.poCode})</Text>
+              <Text style={{ color: '#B11E6A' }}>{lrPayTarget.vendorName}</Text>
+              <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>LR Number: {lrPayTarget.lrNumber} · Expected Delivery: {lrPayTarget.expectedDeliveryDate || '—'}</Text>
+              <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>Bill Total Amount: ₹{lrPayTarget.amount?.toLocaleString()}</Text>
+              {lrPayTarget.lrPaidAmount > 0 && (
+                <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>Already Paid: ₹{lrPayTarget.lrPaidAmount.toLocaleString()} · Balance: ₹{lrPayTarget.balance.toLocaleString()}</Text>
+              )}
+            </div>
+            <Form.Item
+              label="Amount to Pay"
+              name="amount"
+              initialValue={lrPayTarget.balance ?? lrPayTarget.amount}
+              tooltip="Pay the full balance, or a lesser amount to record a partial payment"
+              rules={[{ required: true, message: 'Enter the amount being paid' }]}
+            >
+              <InputNumber prefix="₹" style={{ width: '100%', borderRadius: 8 }} min={0} max={lrPayTarget.balance ?? lrPayTarget.amount} />
+            </Form.Item>
+            <Form.Item label="Paid By" name="paid_by" initialValue="Finance Team">
+              <Input placeholder="Finance team member name" style={{ borderRadius: 8 }} />
+            </Form.Item>
+            <Form.Item
+              label="Upload Payment Proof"
+              name="payment_proof"
+              valuePropName="fileList"
+              getValueFromEvent={(e) => Array.isArray(e) ? e : e?.fileList}
+              rules={[{ required: true, message: 'Please upload payment proof' }]}
+            >
+              <Upload maxCount={1} customRequest={makeUpload('financial/proofs')} accept=".pdf,.jpg,.jpeg,.png">
+                <Button icon={<UploadOutlined />} style={{ borderColor: '#B11E6A', color: '#B11E6A' }}>Upload Proof (PDF / Image)</Button>
+              </Upload>
+            </Form.Item>
+            <div style={{ padding: '10px 12px', background: isDark ? '#1e2235' : '#f6fff8', borderRadius: 8, border: `1px solid #52c41a33`, marginBottom: 14, fontSize: 12 }}>
+              <CheckCircleOutlined style={{ color: '#52c41a', marginRight: 6 }} />
+              A partial payment sets status to <Text strong>Partial Paid</Text>; paying the full balance sets it to <Text strong>Paid</Text>. Status syncs back to Purchase's Quotation & Raise Request tab and Dispatch's Pick Up Order tab.
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <Button block onClick={() => { setShowLrPaymentModal(false); lrPayForm.resetFields(); }}>Cancel</Button>
+              <Button block type="primary" htmlType="submit" style={{ background: '#B11E6A', border: 'none' }}>Confirm Payment Done</Button>
+            </div>
+          </Form>
+        )}
+      </Modal>
+    </div>
+  );
+}

@@ -1,0 +1,105 @@
+const User = require('../models/User');
+const AlertConfig = require('../models/AlertConfig');
+
+const MODULES = [
+  'Dashboard', 'Sales Team', 'Operations', 'Task Management', 'Dispatch Team',
+  'Staff Management', 'HRMS Geo', 'Inventory', 'Purchase', 'Vendors & Suppliers', 'Billing',
+  'Ledgers', 'Financial', 'Expenses', 'Reports', 'Notifications',
+  'Integration', 'Settings',
+];
+
+const MODULE_TABS = {
+  'Sales Team':       ['Leads', 'Quotations', 'Orders', 'Negotiations', 'Follow-ups'],
+  'Operations':       ['Orders', 'Queue', 'Design', 'Tasks'],
+  'Task Management':  ['All Tasks', 'In Progress', 'Done'],
+  'Dispatch Team':    ['Active', 'History'],
+  'Staff Management': ['Staff', 'Attendance'],
+  'Inventory':        ['Products', 'Kits'],
+  'Purchase':         ['Purchase Orders', 'History'],
+  'Vendors & Suppliers': ['Vendors', 'Printing Suppliers'],
+  'Billing':          ['Invoices', 'Order in Process'],
+  'Ledgers': ['Parties', 'Ledger'],
+  'Financial':        ["P&L", 'Balance Sheet'],
+  'Expenses':         ['All Expenses', 'Categories'],
+  'Reports':          ['Sales', 'Operations', 'Financial'],
+  'Integration':      ['WhatsApp', 'AI Integration'],
+  'Settings':         ['General', 'Users', 'Notifications', 'GST & Tax', 'Invoice', 'Deleted Records'],
+};
+
+// Full permissions — every module read/add/edit/delete = true
+const adminPermissions = {};
+MODULES.forEach((m) => { adminPermissions[m] = { read: true, add: true, edit: true, delete: true }; });
+
+// Full tab access — every tab true for every module that has tabs
+const adminTabAccess = {};
+MODULES.forEach((m) => {
+  if (MODULE_TABS[m]?.length) {
+    adminTabAccess[m] = {};
+    MODULE_TABS[m].forEach((tab) => { adminTabAccess[m][tab] = true; });
+  }
+});
+
+const ADMIN_DATA = {
+  fullName:   'HNG Admin',
+  email:      'superadmin@gmail.com',
+  mobile:     '9000000000',
+  password:   'Hng@123',
+  role:       'Admin',
+  department: 'Management',
+  status:     'Active',
+  permissions: adminPermissions,
+  tabAccess:   adminTabAccess,
+};
+
+/**
+ * Creates the admin user only when the users collection is empty.
+ * Safe to call on every server start — no-op when users already exist.
+ */
+const seedAdminIfEmpty = async () => {
+  const count = await User.countDocuments({ deletedAt: null });
+  if (count === 0) {
+    await User.create(ADMIN_DATA);
+    console.log('✅  Auto-seed: admin user created.');
+    console.log('    Login → email: superadmin@gmail.com | password: Hng@123');
+  }
+};
+
+// Alert Configuration always edits a fixed set of rows (6 design roles + sales +
+// operations approval + task + dispatch reason + dispatch status + LR payment +
+// short received + low stock + quotation request + consumption forecast + sample
+// follow-up + lead follow-up) — seed them idempotently so the Settings tab never has to handle a
+// create/delete flow, only edit.
+const ALERT_CONFIG_ROWS = [
+  { group: 'design', role: 'Sticker' },
+  { group: 'design', role: 'Box' },
+  { group: 'design', role: 'Ziplock' },
+  { group: 'design', role: 'Butter Paper' },
+  { group: 'design', role: 'Wooden Brush' },
+  { group: 'design', role: 'Other' },
+  { group: 'sales_approval', role: null },
+  { group: 'operations_approval', role: null },
+  { group: 'task', role: null },
+  { group: 'dispatch_reason', role: null },
+  { group: 'dispatch_status', role: null },
+  { group: 'lr_payment', role: null },
+  { group: 'low_stock', role: null },
+  { group: 'quotation_request', role: null },
+  { group: 'short_received', role: null },
+  { group: 'consumption_forecast', role: null },
+  { group: 'sample_followup', role: null },
+  { group: 'lead_followup', role: null },
+  { group: 'assignee_task', role: null },
+  { group: 'lr_copy_reminder', role: null },
+];
+
+const seedAlertConfigsIfMissing = async () => {
+  for (const row of ALERT_CONFIG_ROWS) {
+    await AlertConfig.findOneAndUpdate(
+      { group: row.group, role: row.role },
+      { $setOnInsert: row },
+      { upsert: true }
+    );
+  }
+};
+
+module.exports = { seedAdminIfEmpty, seedAlertConfigsIfMissing, ADMIN_DATA, adminPermissions, adminTabAccess, MODULES };

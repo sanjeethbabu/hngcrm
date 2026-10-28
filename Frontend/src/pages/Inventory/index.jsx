@@ -1,0 +1,3761 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { useCloudinaryUpload } from '../../hooks/useCloudinaryUpload';
+import {
+  Row, Col, Card, Table, Tag, Button, Modal, Form, Input, Select,
+  Typography, Space, Progress, Alert, InputNumber, List,
+  Avatar, Divider, Drawer, Tabs, DatePicker, Upload, Switch, Descriptions,
+  Badge, Tooltip,
+} from 'antd';
+import { enqueueSnackbar } from 'notistack';
+import {
+  PlusOutlined, WarningOutlined, CalculatorOutlined, SearchOutlined, CheckOutlined,
+  DownloadOutlined, ShoppingOutlined, LeftOutlined, CloseOutlined, EditOutlined,
+  InfoCircleOutlined, MinusOutlined,
+  EyeOutlined, UploadOutlined, SafetyCertificateOutlined, HistoryOutlined,
+  ClockCircleOutlined, CheckCircleOutlined, CloseCircleOutlined, SwapOutlined,
+  ExclamationCircleOutlined, AuditOutlined,
+  BellOutlined, BarChartOutlined, ContainerOutlined,
+  SettingOutlined, DeleteOutlined, TagOutlined,
+} from '@ant-design/icons';
+import { useSelector } from 'react-redux';
+import { motion, AnimatePresence } from 'framer-motion';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as ReTooltip, ResponsiveContainer } from 'recharts';
+import PageBreadcrumb from '../../components/common/PageBreadcrumb';
+import DamagedReport from '../../components/reports/DamagedReport';
+import StockCheckLog from './StockCheckLog';
+import useTabAccess from '../../hooks/useTabAccess';
+import usePageAccess from '../../hooks/usePageAccess';
+import dayjs from 'dayjs';
+import {
+  useGetItemsQuery,
+  useCreateItemMutation,
+  useUpdateItemMutation,
+  useDeleteItemMutation,
+  useAddStockRequestMutation,
+  useSellStockRequestMutation,
+  useFillStockMutation,
+  useGetStockApprovalsQuery,
+  useApproveMovementMutation,
+  useRejectMovementMutation,
+  useGetStockHistoryQuery,
+  useGetStockHistoryReportQuery,
+  useGetPartiesQuery,
+  useSubmitStockCheckMutation,
+  useGetVendorsQuery,
+  useCreateVendorMutation,
+  useGetKitsQuery,
+  useCreateKitMutation,
+  useUpdateKitMutation,
+  useDeleteKitMutation,
+  useGetPackingConfigQuery,
+  useCreatePackingConfigMutation,
+  useUpdatePackingConfigMutation,
+  useDeletePackingConfigMutation,
+  useGetMaterialStocksQuery,
+  useCreateMaterialStockMutation,
+  useUpdateMaterialStockMutation,
+  useDeleteMaterialStockMutation,
+  useUploadMaterialStockInvoiceMutation,
+  useGetUsersQuery,
+  useGetHotelNamesQuery,
+  useGetOptionsQuery,
+} from '../../store/api/apiSlice';
+import SelectWithAdd from '../../components/common/SelectWithAdd';
+import PhoneInput from '../../components/common/PhoneInput';
+import VendorBankFields from '../../components/common/VendorBankFields';
+import { emailRules, phoneValidator } from '../../utils/validation';
+import { downloadFile } from '../../utils/fileDownload';
+import { formatQty, formatRate } from '../../utils/numberFormat';
+
+const { Title, Text } = Typography;
+const { Option } = Select;
+
+
+const YES_NO = [{ value: 'yes', label: 'Yes' }, { value: 'no', label: 'No' }];
+const KIT_PACKING = [{ value: 'Box', label: 'Box' }, { value: 'Butter paper pouch', label: 'Butter paper pouch' }];
+const SOAP_SHAPES = [{ value: 'Square', label: 'Square' }, { value: 'Round', label: 'Round' }];
+const BOTTLE_TYPES = [{ value: 'Fliptop bottle', label: 'Fliptop bottle' }, { value: 'Screw type', label: 'Screw type' }];
+const CAP_TYPES = [{ value: 'Golden cap', label: 'Golden cap' }, { value: 'Normal cap', label: 'Normal cap' }];
+const BRUSH_TYPES = [{ value: 'Wooden', label: 'Wooden' }, { value: 'Plastic', label: 'Plastic' }];
+const SIZES_SOAP = ['15', '20', '30'].map(v => ({ value: v, label: `${v}g` }));
+const SIZES_LIQUID = ['15', '20', '25', '30'].map(v => ({ value: v, label: `${v}ml` }));
+const PASTE_BRANDS = ['Promise', 'Meswak', 'Anchor', 'Colgate'].map(v => ({ value: v, label: v }));
+const BRUSH_BRANDS = ['Promise', 'Anchor', 'Pristin'].map(v => ({ value: v, label: v }));
+const UNIT_OPTIONS = [
+  { value: 'Kg', label: 'Kg' },
+  { value: 'Gram', label: 'Gram' },
+  { value: 'Litres', label: 'Litres' },
+  { value: 'ml', label: 'ml' },
+  { value: 'Pcs', label: 'Pieces (Pcs)' },
+  { value: 'Units', label: 'Units' },
+  { value: 'Box', label: 'Box' },
+  { value: 'Pack', label: 'Pack' },
+];
+
+// Fill unit → how many of it make up 1 unit of its linked bulk item (mirrors the backend's
+// UNIT_TO_BULK_FACTOR in inventory.controller.js) — ml/gram are 1000-to-1 sub-units of
+// Litres/Kg, while a Litres/Kg fill unit draws 1:1 from a same-unit bulk item.
+const UNIT_TO_BULK_FACTOR = { ml: 1000, Litres: 1, gram: 1000, Kg: 1 };
+
+// Max whole pieces of a Filled item fillable from all of its linked bulk item's stock
+// currently on hand — same formula the backend uses (mirrors inventory.controller.js's
+// fillStock auto-fallback), so Fill Stock never needs the piece count worked out by hand.
+const computeMaxFillQty = (filledItem, inventoryItems) => {
+  const bulkSrc = inventoryItems.find((b) => b.key === filledItem.bulkSourceItemId);
+  const fillSize = Number(filledItem.unitValue) || 0;
+  if (!bulkSrc || fillSize <= 0) return null;
+  const wastage = Math.min(Number(filledItem.fillWastagePercent) || 0, 99);
+  const factor = UNIT_TO_BULK_FACTOR[filledItem.unit] || 1000;
+  const maxQty = Math.floor(((bulkSrc.current || 0) * factor * (1 - wastage / 100)) / fillSize);
+  return maxQty > 0 ? maxQty : null;
+};
+
+// usePackingConfig: true → options are populated at render time from the packing config state
+const PRODUCT_FIELD_DEFS = {
+  soap: [
+    { key: 'shape', label: 'Shape', field: 'soap_shape', options: SOAP_SHAPES },
+    { key: 'size', label: 'Sizes (gram)', field: 'soap_size', options: SIZES_SOAP, mode: 'multiple' },
+    { key: 'stickerShape', label: 'Sticker Shape', field: 'soap_stickerShape', options: SOAP_SHAPES },
+    { key: 'fragrance', label: 'Fragrance', field: 'soap_fragrance', options: [], mode: 'multiple' },
+    { key: 'color', label: 'Color', field: 'soap_color', options: [], mode: 'multiple' },
+    { key: 'packingMaterial', label: 'Packing Material', field: 'soap_packingMaterial', usePackingConfig: true, options: [], mode: 'multiple' },
+    { key: 'stickerPrinting', label: 'Sticker Printing', field: 'soap_stickerPrinting', options: YES_NO },
+    { key: 'printing', label: 'Printing', field: 'soap_printing', options: YES_NO },
+  ],
+  shampoo: [
+    { key: 'bottleType', label: 'Bottle Type', field: 'shampoo_bottleType', options: BOTTLE_TYPES, mode: 'multiple' },
+    { key: 'capType', label: 'Cap Type', field: 'shampoo_capType', options: CAP_TYPES },
+    { key: 'size', label: 'Sizes (ml)', field: 'shampoo_size', options: SIZES_LIQUID, mode: 'multiple' },
+    { key: 'fragrance', label: 'Fragrance', field: 'shampoo_fragrance', options: [], mode: 'multiple' },
+    { key: 'color', label: 'Color', field: 'shampoo_color', options: [], mode: 'multiple' },
+    { key: 'stickerPrinting', label: 'Sticker Printing', field: 'shampoo_stickerPrinting', options: YES_NO },
+  ],
+  moisturizer: [
+    { key: 'bottleType', label: 'Bottle Type', field: 'moisturizer_bottleType', options: BOTTLE_TYPES, mode: 'multiple' },
+    { key: 'capType', label: 'Cap Type', field: 'moisturizer_capType', options: CAP_TYPES },
+    { key: 'size', label: 'Sizes (ml)', field: 'moisturizer_size', options: SIZES_LIQUID, mode: 'multiple' },
+    { key: 'fragrance', label: 'Fragrance', field: 'moisturizer_fragrance', options: [], mode: 'multiple' },
+    { key: 'color', label: 'Color', field: 'moisturizer_color', options: [], mode: 'multiple' },
+    { key: 'stickerPrinting', label: 'Sticker Printing', field: 'moisturizer_stickerPrinting', options: YES_NO },
+  ],
+  shower_gel: [
+    { key: 'bottleType', label: 'Bottle Type', field: 'shower_gel_bottleType', options: BOTTLE_TYPES, mode: 'multiple' },
+    { key: 'capType', label: 'Cap Type', field: 'shower_gel_capType', options: CAP_TYPES },
+    { key: 'size', label: 'Sizes (ml)', field: 'shower_gel_size', options: SIZES_LIQUID, mode: 'multiple' },
+    { key: 'fragrance', label: 'Fragrance', field: 'shower_gel_fragrance', options: [], mode: 'multiple' },
+    { key: 'color', label: 'Color', field: 'shower_gel_color', options: [], mode: 'multiple' },
+    { key: 'stickerPrinting', label: 'Sticker Printing', field: 'shower_gel_stickerPrinting', options: YES_NO },
+  ],
+  brush: [
+    { key: 'brushType', label: 'Brush Type', field: 'brush_brushType', options: BRUSH_TYPES },
+    { key: 'brand', label: 'Brand', field: 'brush_brand', options: BRUSH_BRANDS, mode: 'multiple' },
+    { key: 'packingMaterial', label: 'Packing Material', field: 'brush_packingMaterial', usePackingConfig: true, options: [], mode: 'multiple' },
+    { key: 'sticker', label: 'Sticker', field: 'brush_sticker', options: YES_NO },
+    { key: 'printing', label: 'Printing', field: 'brush_printing', options: YES_NO },
+  ],
+  paste: [
+    { key: 'brand', label: 'Brand', field: 'paste_brand', options: PASTE_BRANDS, mode: 'multiple' },
+    { key: 'size', label: 'Sizes (gram)', field: 'paste_size', options: SIZES_SOAP, mode: 'multiple' },
+    { key: 'packingMaterial', label: 'Packing Material', field: 'paste_packingMaterial', usePackingConfig: true, options: [], mode: 'multiple' },
+    { key: 'sticker', label: 'Sticker', field: 'paste_sticker', options: YES_NO },
+    { key: 'printing', label: 'Printing', field: 'paste_printing', options: YES_NO },
+  ],
+  razor: [
+    { key: 'brand', label: 'Brand', field: 'razor_brand', options: [{ value: 'Gillette', label: 'Gillette' }, { value: 'darco', label: 'darco' }, { value: 'glide', label: 'glide' }], mode: 'multiple' },
+    { key: 'packingMaterial', label: 'Packing Material', field: 'razor_packingMaterial', usePackingConfig: true, options: [], mode: 'multiple' },
+    { key: 'sticker', label: 'Sticker', field: 'razor_sticker', options: YES_NO },
+    { key: 'printing', label: 'Printing', field: 'razor_printing', options: YES_NO },
+  ],
+  gel: [
+    { key: 'brand', label: 'Brand', field: 'gel_brand', options: [{ value: 'oxylife', label: 'oxylife' }, { value: 'eliven', label: 'eliven' }], mode: 'multiple' },
+    { key: 'packingMaterial', label: 'Packing Material', field: 'gel_packingMaterial', usePackingConfig: true, options: [], mode: 'multiple' },
+    { key: 'sticker', label: 'Sticker', field: 'gel_sticker', options: YES_NO },
+    { key: 'printing', label: 'Printing', field: 'gel_printing', options: YES_NO },
+  ],
+  vanity_item: [
+    { key: 'packingMaterial', label: 'Packing Material', field: 'vanity_item_packingMaterial', usePackingConfig: true, options: [], mode: 'multiple' },
+    { key: 'sticker', label: 'Sticker', field: 'vanity_item_sticker', options: YES_NO },
+    { key: 'printing', label: 'Printing', field: 'vanity_item_printing', options: YES_NO },
+  ],
+  med_kit: [
+    { key: 'packingMaterial', label: 'Packing Material', field: 'medkit_packingMaterial', usePackingConfig: true, options: [], mode: 'multiple' },
+    { key: 'sticker', label: 'Sticker', field: 'medkit_sticker', options: YES_NO },
+    { key: 'printing', label: 'Printing', field: 'medkit_printing', options: YES_NO },
+  ],
+  sewing: [
+    { key: 'packingMaterial', label: 'Packing Material', field: 'sewing_packingMaterial', usePackingConfig: true, options: [], mode: 'multiple' },
+    { key: 'sticker', label: 'Sticker', field: 'sewing_sticker', options: YES_NO },
+    { key: 'printing', label: 'Printing', field: 'sewing_printing', options: YES_NO },
+  ],
+};
+
+// Generic attribute fields shown when the item name doesn't match any known product type.
+const GENERIC_PRODUCT_FIELD_DEFS = [
+  { key: 'fragrance', label: 'Fragrance', field: 'generic_fragrance', options: [], mode: 'multiple' },
+  { key: 'material', label: 'Material', field: 'generic_material', options: [], mode: 'multiple' },
+  { key: 'brand', label: 'Brand', field: 'generic_brand', options: [], mode: 'multiple' },
+  { key: 'size', label: 'Size', field: 'generic_size', options: [] },
+  { key: 'color', label: 'Color', field: 'generic_color', options: [], mode: 'multiple' },
+  { key: 'packingMaterial', label: 'Packing Material', field: 'generic_packingMaterial', usePackingConfig: true, options: [], mode: 'multiple' },
+  { key: 'sticker', label: 'Sticker', field: 'generic_sticker', options: YES_NO, mode: 'multiple' },
+  { key: 'logo', label: 'Logo', field: 'generic_logo', options: YES_NO, mode: 'multiple' },
+  { key: 'printing', label: 'Printing', field: 'generic_printing', options: YES_NO, mode: 'multiple' },
+];
+
+const getProductTypeKey = (name) => {
+  const n = (name || '').toLowerCase().trim();
+  if (n.includes('soap')) return 'soap';
+  if (n.includes('shampoo')) return 'shampoo';
+  if (n.includes('moisturizer') || n.includes('moisturiser')) return 'moisturizer';
+  if (n.includes('shower gel') || n.includes('showergel') || n.includes('shower_gel')) return 'shower_gel';
+  if (n.includes('razor')) return 'razor';
+  if (n.includes('shower') && n.includes('gel')) return 'shower_gel';
+  if (n.includes('gel')) return 'gel';
+  if (n.includes('brush')) return 'brush';
+  if (n.includes('paste')) return 'paste';
+  if (n.includes('medkit') || n.includes('med kit')) return 'med_kit';
+  if (n.includes('sweing') || n.includes('sewing')) return 'sewing';
+  if (n.includes('vanitykit') || n.includes('vanity kit') || n.includes('vanity')) return 'vanity_item';
+  return null;
+};
+
+// Items saved before a field became multi-select store a plain scalar (e.g. sticker: "yes").
+// Wrap those into single-item arrays so the now-multiple Select can display them when editing.
+const normalizeAttrsForEdit = (attrs, itemName) => {
+  const typeKey = getProductTypeKey(itemName);
+  const defs = PRODUCT_FIELD_DEFS[typeKey]?.length ? PRODUCT_FIELD_DEFS[typeKey] : GENERIC_PRODUCT_FIELD_DEFS;
+  const out = { ...(attrs || {}) };
+  defs.forEach((fd) => {
+    if (fd.mode === 'multiple' && out[fd.key] != null && !Array.isArray(out[fd.key])) {
+      out[fd.key] = [out[fd.key]];
+    }
+  });
+  // Items saved before per-bottle-type sizes stored ONE bottleType + a single bottleStickerSize.
+  // When exactly one bottle type is set, carry that size into the new per-type map so it isn't
+  // lost the first time the item is re-saved. (No bottle type → the legacy size stays untouched
+  // and is preserved by a hidden field in the Add Item modal.)
+  if (out.bottleStickerSize && !out.bottleStickerSizes && Array.isArray(out.bottleType) && out.bottleType.length === 1) {
+    out.bottleStickerSizes = { [out.bottleType[0]]: out.bottleStickerSize };
+    delete out.bottleStickerSize;
+  }
+  return out;
+};
+
+// Convert a camelCase / snake_case product-attribute key into a readable label
+// (e.g. "stickerShape" → "Sticker Shape", "bottleType" → "Bottle Type").
+const prettyAttrKey = (k) =>
+  String(k || '')
+    .replace(/_/g, ' ')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/^./, (c) => c.toUpperCase());
+
+// Normalize a productAttributes object into [label, value] entries, skipping empties.
+const attrEntries = (attrs) =>
+  Object.entries(attrs || {}).filter(
+    ([, v]) => v != null && v !== '' && !(Array.isArray(v) && v.length === 0),
+  );
+
+
+// Export an array of plain rows to a CSV file. Headers are derived from the
+// scalar (non-object) keys of the rows so it adapts to whatever shape the data has.
+const exportRowsToCSV = (rows, filename) => {
+  if (!rows || rows.length === 0) return false;
+  const skip = new Set(['key', '_id', '__v']);
+  const headers = Object.keys(rows[0]).filter(
+    (k) => !skip.has(k) && rows.every((r) => r[k] == null || typeof r[k] !== 'object'),
+  );
+  const csv = [
+    headers.join(','),
+    ...rows.map((r) => headers.map((h) => `"${(r[h] ?? '').toString().replace(/"/g, '""')}"`).join(',')),
+  ].join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+  return true;
+};
+
+export default function Inventory() {
+  const makeUpload = useCloudinaryUpload();
+  const isDark = useSelector((s) => s.theme.isDark);
+  const authUser = useSelector((s) => s.auth.user);
+  const isSuperOrAdmin = authUser?.role === 'Super Admin' || authUser?.role === 'Admin';
+  const cardBg = isDark ? '#1E1E2E' : '#ffffff';
+  const textColor = isDark ? '#e0e0e0' : '#1a1a2e';
+  const borderColor = isDark ? '#2a2a3e' : '#f0f0f0';
+  const sectionBg = isDark ? '#16161e' : '#fafafa';
+
+  const [viewBillDetail, setViewBillDetail] = useState(null);
+
+  const { data: invData, isLoading: invLoading } = useGetItemsQuery({ limit: 1000 });
+  const { data: approvalsData } = useGetStockApprovalsQuery();
+  const { data: suppliersData } = useGetVendorsQuery({ type: 'raw_material', limit: 500 });
+  const { data: inventoryUsersData } = useGetUsersQuery({ limit: 1000 });
+  const [createItemMutation] = useCreateItemMutation();
+  const [updateItemMutation] = useUpdateItemMutation();
+  const [fillStockMutation] = useFillStockMutation();
+  const [deleteItemMutation] = useDeleteItemMutation();
+  const [addStockRequest] = useAddStockRequestMutation();
+  const [sellStockRequest] = useSellStockRequestMutation();
+  const [approveMovement] = useApproveMovementMutation();
+  const [rejectMovement] = useRejectMovementMutation();
+  const [submitStockCheck] = useSubmitStockCheckMutation();
+
+  const suppliers = useMemo(() => suppliersData?.data || [], [suppliersData]);
+  // Printing Suppliers: Users with department 'Vendors' (Sticker/Box/Ziplock/Butter Paper/
+  // Wooden Brush/Other) — same population shown on the Vendors & Suppliers > Printing Suppliers tab.
+  const printingSuppliers = useMemo(() => (inventoryUsersData?.data || [])
+    .filter(u => u.department === 'Vendors' && ['Sticker', 'Box', 'Ziplock', 'Butter Paper', 'Wooden Brush', 'Other'].includes(u.role))
+    .map(u => ({ name: u.fullName, role: u.role })), [inventoryUsersData]);
+  const { data: customersData } = useGetVendorsQuery({ type: 'customer', limit: 500 });
+  const [createVendorMutation] = useCreateVendorMutation();
+  const vendorsList = useMemo(() => (customersData?.data || []).map((v) => ({
+    id: v._id, name: v.name, phone: v.phone, email: v.email, address: v.address,
+  })), [customersData]);
+
+  const inventoryList = useMemo(() => (invData?.data || []).map((i) => ({
+    key: i._id,
+    code: i.itemCode,
+    name: i.itemName,
+    category: i.category,
+    unit: i.unit,
+    unitValue: i.unitValue,
+    value: i.purchasePrice,
+    marginAmount: i.marginAmount,
+    sellingPrice: i.sellingPrice,
+    defaultSize: i.defaultSize,
+    current: i.currentStock,
+    min: i.minStock,
+    max: i.minStock * 10,
+    price: `₹${formatRate(i.purchasePrice)}/${i.unit}`,
+    status: i.currentStock === 0 ? 'Out' : i.currentStock < i.minStock ? 'Low' : 'OK',
+    hsnCode: i.hsnCode,
+    gstPercent: i.gstPercent || 0,
+    discountPercent: i.discountPercent,
+    packingMaterial: i.packingMaterial,
+    materialCategory: i.materialCategory,
+    brand: i.brand,
+    itemType: i.itemType || 'standard',
+    bulkSourceItemId: i.bulkSourceItemId?._id || i.bulkSourceItemId || undefined,
+    fillWastagePercent: i.fillWastagePercent || 0,
+    productAttributes: i.productAttributes || {},
+    vendorId: i.vendorId?._id || i.vendorId || undefined,
+    vendorName: i.vendorId?.name || '',
+    purchaseBatches: i.purchaseBatches || [],
+    // Most recent purchaseDate across all vendor batches — shown on the item detail drawer.
+    lastPurchaseDate: (i.purchaseBatches || []).reduce((latest, b) => {
+      if (!b.purchaseDate) return latest;
+      const d = dayjs(b.purchaseDate);
+      return d.isValid() && (!latest || d.isAfter(latest)) ? d : latest;
+    }, null),
+    // One row per vendor this product has ever been bought from, with the qty still remaining
+    // from that vendor's batches — so buying the same product from a different vendor shows up
+    // here instead of overwriting the previous vendor's stock.
+    sellers: (() => {
+      const batches = (i.purchaseBatches || []).filter((b) => b.remainingQty > 0);
+      if (batches.length === 0) {
+        return i.vendorId?.name ? [{ name: i.vendorId.name, stock: i.currentStock }] : [];
+      }
+      const byVendor = {};
+      batches.forEach((b) => {
+        const key = b.vendorName || 'Unknown vendor';
+        byVendor[key] = (byVendor[key] || 0) + (b.remainingQty || 0);
+      });
+      return Object.entries(byVendor).map(([name, stock]) => ({ name, stock }));
+    })(),
+  })), [invData]);
+
+  // Bulk raw-material items (e.g. "Coconut Oil - Bulk", tracked in Litres/Kg) — the pool
+  // that "Filled/Packed" items (e.g. "Coconut Oil 10ml") are packed from via Fill Stock.
+  const bulkItems = useMemo(() => inventoryList.filter((i) => i.itemType === 'bulk'), [inventoryList]);
+
+  // Lookup product attributes by item name — used to surface attributes for kit
+  // products (kit rows store a snapshot without attributes, so we resolve them live).
+  const invAttrsByName = useMemo(() => {
+    const map = {};
+    inventoryList.forEach((i) => { if (i.name) map[i.name] = i.productAttributes || {}; });
+    return map;
+  }, [inventoryList]);
+
+  const dupeInventoryNames = useMemo(() => {
+    const nameCount = {};
+    inventoryList.forEach(i => { nameCount[i.name] = (nameCount[i.name] || 0) + 1; });
+    return new Set(Object.keys(nameCount).filter(n => nameCount[n] > 1));
+  }, [inventoryList]);
+
+  const pendingAdjustments = useMemo(() => (approvalsData?.data || []).map((m) => ({
+    key: m._id,
+    date: m.createdAt?.slice(0, 10),
+    type: m.movementType === 'IN' ? 'Addition' : m.movementType === 'OUT' ? 'Deduction'
+      : (m.qtyAfter >= m.qtyBefore ? 'Adjustment (Add)' : 'Adjustment (Deduct)'),
+    item: m.itemId?.itemName || '—',
+    qty: m.qty,
+    unit: m.itemId?.unit || '',
+    entity: m.referenceType || 'Manual',
+    person: m.createdBy?.fullName || 'Staff',
+    status: m.approvalStatus,
+    notes: [m.reason, m.notes].filter(Boolean).join(' — '),
+  })), [approvalsData]);
+
+  /* ── Manual adjustment modal ── */
+  const [adjustModal, setAdjustModal] = useState({ open: false, item: null, type: null });
+  const [adjustForm] = Form.useForm();
+
+  /* ── Fill Stock modal (Filled/Packed items → drawn from a linked Bulk item) ── */
+  const [fillStockModal, setFillStockModal] = useState({ open: false, item: null });
+  const [fillQtyValue, setFillQtyValue] = useState(null);
+
+  // Live preview of how much bulk stock a fill would consume — shared by the modal's footer
+  // (to gate the Fill Stock button) and body (to show the amount/warning), computed once here
+  // instead of twice so both stay in sync.
+  const fillPreview = useMemo(() => {
+    const item = fillStockModal.item;
+    if (!item) return { fillSize: 0, wastage: 0, needed: 0, bulkSrc: null, insufficient: false };
+    const bulkSrc = inventoryList.find((b) => b.key === item.bulkSourceItemId);
+    const fillSize = Number(item.unitValue) || 0;
+    const wastage = Number(item.fillWastagePercent) || 0;
+    // Same factor the backend applies: ml/gram are 1000-to-1 sub-units of Litres/Kg, while a
+    // fill unit of Litres/Kg itself draws 1:1 from a same-unit bulk item.
+    const fillUnitFactor = UNIT_TO_BULK_FACTOR[item.unit] || 1000;
+    const needed = fillQtyValue && fillSize
+      ? ((fillQtyValue * fillSize) / (1 - Math.min(wastage, 99) / 100)) / fillUnitFactor
+      : 0;
+    const insufficient = !!(bulkSrc && needed > (bulkSrc.current || 0));
+    return { fillSize, wastage, needed, bulkSrc, insufficient };
+  }, [fillStockModal.item, fillQtyValue, inventoryList]);
+
+  /* ── Add / Edit Item modal ── */
+  const [addItemModal, setAddItemModal] = useState(false);
+  const [editingItem, setEditingItem] = useState(null);
+  const [addItemForm] = Form.useForm();
+  // Which creation flow opened the modal — kept separate so Bulk/Filled items are never
+  // offered as an option from the plain "Add Item" button (Standard items only there);
+  // they get their own "Add Bulk / Filled Item" entry point on the Bulk tab instead.
+  const [addItemScope, setAddItemScope] = useState('standard'); // 'standard' | 'bulk_filled'
+
+  const openAddStandardItem = () => {
+    if (!requireAccess('add')) return;
+    setEditingItem(null);
+    addItemForm.resetFields();
+    setAddItemScope('standard');
+    addItemForm.setFieldsValue({ itemType: 'standard' });
+    setAddItemModal(true);
+  };
+
+  const openAddBulkItem = () => {
+    if (!requireAccess('add')) return;
+    setEditingItem(null);
+    addItemForm.resetFields();
+    setAddItemScope('bulk_filled');
+    addItemForm.setFieldsValue({ itemType: 'bulk' });
+    setAddItemModal(true);
+  };
+
+  /* ── Kits ── */
+  const { data: kitsData } = useGetKitsQuery();
+  const [createKitMutation] = useCreateKitMutation();
+  const [updateKitMutation] = useUpdateKitMutation();
+  const [deleteKitMutation] = useDeleteKitMutation();
+  const kitsList = useMemo(() => (kitsData?.data || []).map((k) => ({
+    key: k._id,
+    _id: k._id,
+    kitCode: k.kitCode,
+    kitName: k.kitName,
+    displayUnit: k.displayUnit,
+    size: k.size,
+    products: k.products || [],
+    kitAttributes: k.kitAttributes || {},
+  })), [kitsData]);
+  const [kitModal, setKitModal] = useState(false);
+  const [editingKit, setEditingKit] = useState(null);
+  const [kitForm] = Form.useForm();
+
+  const openAddKit = (kit = null) => {
+    if (!requireAccess(kit ? 'edit' : 'add')) return;
+    setEditingKit(kit);
+    setKitModal(true);
+  };
+
+  const initKitForm = (kit) => {
+    kitForm.resetFields();
+    if (kit) {
+      kitForm.setFieldsValue({
+        kitName: kit.kitName,
+        size: kit.size,
+        kitAttrs: kit.kitAttributes || {},
+        products: kit.products?.length
+          ? kit.products.map(p => ({
+              ...p,
+              productName: inventoryList.find(i => i.name === p.productName)?.key || p.productName,
+            }))
+          : [{ productName: '', qty: 1, gst: 'None' }],
+      });
+    } else {
+      kitForm.setFieldsValue({ products: [{ productName: '', qty: 1, gst: 'None' }] });
+    }
+  };
+
+  const handleSaveKit = async () => {
+    try {
+      const vals = await kitForm.validateFields();
+      const payload = {
+        kitName: vals.kitName,
+        size: vals.size || '',
+        kitAttributes: vals.kitAttrs || {},
+        products: (vals.products || []).filter((p) => p && p.productName).map((p) => {
+          const resolvedName = inventoryList.find(i => i.key === p.productName)?.name || p.productName;
+          return {
+            productName: resolvedName,
+            category: p.category || '',
+            qty: Number(p.qty) || 1,
+            unit: p.unit || '',
+            defaultSize: p.defaultSize || '',
+            purchasePrice: Number(String(p.purchasePrice ?? '').replace(/[^0-9.]/g, '')) || 0,
+            sellingPrice: Number(String(p.sellingPrice ?? '').replace(/[^0-9.]/g, '')) || 0,
+            gst: p.gst || '',
+            hsnCode: p.hsnCode || '',
+            discountPercent: Number(String(p.discountPercent ?? '').replace(/[^0-9.]/g, '')) || 0,
+            packingMaterial: p.packingMaterial || '',
+            materialCategory: p.materialCategory || '',
+            brand: p.brand || '',
+            rate: Number(String(p.purchasePrice ?? '').replace(/[^0-9.]/g, '')) || 0,
+          };
+        }),
+      };
+      if (editingKit) {
+        await updateKitMutation({ id: editingKit._id, ...payload }).unwrap();
+        enqueueSnackbar('Kit updated', { variant: 'success' });
+      } else {
+        await createKitMutation(payload).unwrap();
+        enqueueSnackbar('Kit added', { variant: 'success' });
+      }
+      setKitModal(false);
+      setEditingKit(null);
+    } catch (err) {
+      if (err?.errorFields) return;
+      enqueueSnackbar(err?.data?.message || err?.data || 'Failed to save kit', { variant: 'error' });
+    }
+  };
+
+  const handleDeleteKit = async (kit) => {
+    if (!requireAccess('delete')) return;
+    try {
+      await deleteKitMutation(kit._id).unwrap();
+      enqueueSnackbar('Kit deleted', { variant: 'success' });
+    } catch (err) {
+      enqueueSnackbar(err?.data?.message || err?.data || 'Failed to delete kit', { variant: 'error' });
+    }
+  };
+
+  /* ── Add Stock (Receive Goods) drawer ── */
+  const [receiveOpen, setReceiveOpen] = useState(false);
+  const [receiveForm] = Form.useForm();
+  const [activeItem, setActiveItem] = useState(null);
+  const [selectedSupplier, setSelectedSupplier] = useState(null);
+  const [supplierSearch, setSupplierSearch] = useState('');
+  const [showAddSupplier, setShowAddSupplier] = useState(false);
+  const [supplierForm] = Form.useForm();
+
+  /* ── Sell Stock (Issue Goods) drawer ── */
+  const [issueOpen, setIssueOpen] = useState(false);
+  const [issueForm] = Form.useForm();
+  const [activeIssueItem, setActiveIssueItem] = useState(null);
+  const [selectedVendor, setSelectedVendor] = useState(null);
+  const [vendorSearch, setVendorSearch] = useState('');
+  const [showAddVendor, setShowAddVendor] = useState(false);
+  const [vendorForm] = Form.useForm();
+
+  const [extraCategories, setExtraCategories] = useState([]);
+  const categories = useMemo(
+    () => [...new Set([...inventoryList.map((i) => i.category).filter(Boolean), ...extraCategories])],
+    [inventoryList, extraCategories]
+  );
+  const [newCategoryName, setNewCategoryName] = useState('');
+
+  /* ── Search & Filter ── */
+  const [invSearch, setInvSearch] = useState('');
+  const [invCategory, setInvCategory] = useState(null);
+  const [invStatus, setInvStatus] = useState(null);
+  const [approvalSearch, setApprovalSearch] = useState('');
+  const [approvalType, setApprovalType] = useState(null);
+  const [approvalStatus, setApprovalStatus] = useState(null);
+  const [approvalDateRange, setApprovalDateRange] = useState(null);
+  const [historyListSearch, setHistoryListSearch] = useState('');
+  /* ── Stock History ── */
+  // Hotels/Parties for the filter dropdown (used inside the per-item history screen) — the
+  // same "Customer" Party records Orders link to via clientPartyId, not the unrelated
+  // Vendor(type:'customer') list used by the Vendors tab.
+  const { data: hotelPartiesData } = useGetPartiesQuery({ type: 'Customer', limit: 500 });
+  const hotelPartyOptions = useMemo(
+    () => (hotelPartiesData?.data || []).map((p) => ({ value: p._id, label: p.name })),
+    [hotelPartiesData]
+  );
+
+  // Recent movements feed for the "Recent Stock History" preview on the Stock Inventory tab's
+  // item detail drawer — the main Stock History tab itself is now a one-row-per-item picker
+  // (below), not a movement log, so this fetch only needs to cover recent activity.
+  const { data: historyData } = useGetStockHistoryQuery({ limit: 50 });
+  const stockHistory = useMemo(() => (historyData?.data || []).map((m) => ({
+    key: m._id,
+    itemId: m.itemId?._id || m.itemId,
+    date: m.createdAt?.slice(0, 10),
+    item: m.itemId?.itemName || '—',
+    code: m.itemId?.itemCode || '—',
+    action: m.movementType === 'IN' ? 'Stock Added' : m.movementType === 'OUT' ? 'Stock Deducted'
+      : (m.qtyAfter >= m.qtyBefore ? 'Adjustment (Add)' : 'Adjustment (Deduct)'),
+    qty: m.qty,
+    unit: m.itemId?.unit || '',
+    vendor: m.vendorId?.name || m.vendorName || '—',
+    source: m.referenceType || '—',
+    hotel: m.partyId?.name || m.partyName || '—',
+    person: m.createdBy?.fullName || 'Admin',
+    notes: m.reason || '',
+  })), [historyData]);
+
+  /* ── Per-item Stock In/Out History screen (replaces the old modal — opens in place of the
+     Stock History table, like Parties' list↔detail toggle, not a popup) ── */
+  const [historyItem, setHistoryItem] = useState(null); // { id, name } | null
+  const [itemHistoryTab, setItemHistoryTab] = useState('all'); // 'all' | 'in' | 'out'
+  const [itemHistoryPartyFilter, setItemHistoryPartyFilter] = useState(null);
+  const [itemHistorySearch, setItemHistorySearch] = useState('');
+  const [itemHistoryPeriod, setItemHistoryPeriod] = useState('monthly'); // weekly | monthly | yearly
+
+  const itemHistoryQueryParams = useMemo(() => {
+    const params = { itemId: historyItem?.id, limit: 500 };
+    if (itemHistoryPartyFilter) params.partyId = itemHistoryPartyFilter;
+    return params;
+  }, [historyItem?.id, itemHistoryPartyFilter]);
+  const { data: itemHistoryData, isFetching: itemHistoryLoading } = useGetStockHistoryQuery(
+    itemHistoryQueryParams,
+    { skip: !historyItem?.id }
+  );
+  const itemHistoryRows = useMemo(() => (itemHistoryData?.data || []).map((m) => ({
+    key: m._id,
+    date: m.createdAt ? dayjs(m.createdAt).format('DD MMM YYYY, hh:mm A') : '—',
+    // Same action labels/coloring as the main Stock History table, for a consistent look.
+    action: m.movementType === 'IN' ? 'Stock Added' : m.movementType === 'OUT' ? 'Stock Deducted'
+      : (m.qtyAfter >= m.qtyBefore ? 'Adjustment (Add)' : 'Adjustment (Deduct)'),
+    isIn: m.movementType === 'IN' || (m.movementType !== 'OUT' && m.qtyAfter >= m.qtyBefore),
+    qty: m.qty,
+    unit: m.itemId?.unit || '',
+    qtyBefore: m.qtyBefore,
+    qtyAfter: m.qtyAfter,
+    vendor: m.vendorId?.name || m.vendorName || '—',
+    hotel: m.partyId?.name || m.partyName || '—',
+    orderId: m.referenceCode || '—',
+    source: m.referenceType || '—',
+    person: m.createdBy?.fullName || 'Admin',
+    notes: m.reason || '',
+  })), [itemHistoryData]);
+  const filteredItemHistoryRows = useMemo(() => itemHistoryRows.filter((r) => {
+    const matchTab = itemHistoryTab === 'all' || (itemHistoryTab === 'in' ? r.isIn : !r.isIn);
+    const q = itemHistorySearch.toLowerCase();
+    const matchSearch = !q || r.vendor.toLowerCase().includes(q) || r.hotel.toLowerCase().includes(q)
+      || r.source.toLowerCase().includes(q) || (r.notes || '').toLowerCase().includes(q);
+    return matchTab && matchSearch;
+  }), [itemHistoryRows, itemHistoryTab, itemHistorySearch]);
+  const itemHistoryInTotal = useMemo(() => itemHistoryRows.filter((r) => r.isIn).reduce((s, r) => s + (r.qty || 0), 0), [itemHistoryRows]);
+  const itemHistoryOutTotal = useMemo(() => itemHistoryRows.filter((r) => !r.isIn).reduce((s, r) => s + (r.qty || 0), 0), [itemHistoryRows]);
+  // Stock In Hand = the item's live currentStock (not In − Out of the loaded rows), so it stays
+  // correct when the Hotel/Party filter narrows the movements or history is capped at 500 rows.
+  const historyItemStock = useMemo(
+    () => inventoryList.find((i) => i.key === historyItem?.id) || null,
+    [inventoryList, historyItem?.id]
+  );
+
+  const { data: itemHistoryReportData } = useGetStockHistoryReportQuery(
+    { itemId: historyItem?.id, period: itemHistoryPeriod, partyId: itemHistoryPartyFilter || undefined },
+    { skip: !historyItem?.id }
+  );
+  const periodLabelFormat = itemHistoryPeriod === 'weekly' ? 'DD MMM' : itemHistoryPeriod === 'yearly' ? 'YYYY' : 'MMM YYYY';
+  const itemHistoryReportRows = useMemo(
+    () => (itemHistoryReportData?.data || []).map((r) => ({
+      period: dayjs(r.period).format(periodLabelFormat),
+      'Stock In': r.stockIn,
+      'Stock Out': r.stockOut,
+    })),
+    [itemHistoryReportData, periodLabelFormat]
+  );
+
+  /* ── Packing Material Config ── */
+  const { data: packingConfigData } = useGetPackingConfigQuery();
+  const [createPackingConfig] = useCreatePackingConfigMutation();
+  const [updatePackingConfig] = useUpdatePackingConfigMutation();
+  const [deletePackingConfig] = useDeletePackingConfigMutation();
+  const packingConfigList = useMemo(() => (packingConfigData?.data || []), [packingConfigData]);
+  const displayUnits = useMemo(() => packingConfigList.filter(c => c.type === 'displayUnit'), [packingConfigList]);
+  const packingMaterials = useMemo(() => packingConfigList.filter(c => c.type === 'packingMaterial'), [packingConfigList]);
+  const [packingConfigModal, setPackingConfigModal] = useState(false);
+  const [packingConfigType, setPackingConfigType] = useState('displayUnit');
+  const [editingPackingConfig, setEditingPackingConfig] = useState(null);
+  const [packingConfigForm] = Form.useForm();
+
+  const openPackingConfigModal = (type, item = null) => {
+    if (!requireAccess(item ? 'edit' : 'add')) return;
+    setPackingConfigType(type);
+    setEditingPackingConfig(item);
+    setPackingConfigModal(true);
+    packingConfigForm.resetFields();
+    if (item) packingConfigForm.setFieldsValue({ label: item.label, value: item.value, tabMapping: item.tabMapping, subtypes: item.subtypes || [] });
+  };
+
+  const handleSavePackingConfig = async () => {
+    try {
+      const values = await packingConfigForm.validateFields();
+      // Auto-generate value for each subtype from its label
+      if (values.subtypes) {
+        values.subtypes = values.subtypes.map(s => ({
+          ...s,
+          value: s.label.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, ''),
+        }));
+      }
+      if (editingPackingConfig) {
+        await updatePackingConfig({ id: editingPackingConfig._id, type: packingConfigType, ...values }).unwrap();
+        enqueueSnackbar('Updated successfully', { variant: 'success' });
+      } else {
+        await createPackingConfig({ type: packingConfigType, ...values }).unwrap();
+        enqueueSnackbar('Added successfully', { variant: 'success' });
+      }
+      setPackingConfigModal(false);
+      setEditingPackingConfig(null);
+    } catch (e) {
+      enqueueSnackbar(e?.data?.message || 'Failed to save', { variant: 'error' });
+    }
+  };
+
+  const handleDeletePackingConfig = async (id) => {
+    if (!requireAccess('delete')) return;
+    try {
+      await deletePackingConfig(id).unwrap();
+      enqueueSnackbar('Deleted', { variant: 'success' });
+    } catch {
+      enqueueSnackbar('Delete failed', { variant: 'error' });
+    }
+  };
+
+  /* ── Material Stocks ── */
+  const { data: materialStocksData, refetch: refetchMaterialStocks } = useGetMaterialStocksQuery();
+  const [createMaterialStock] = useCreateMaterialStockMutation();
+  const [updateMaterialStock] = useUpdateMaterialStockMutation();
+  const [deleteMaterialStock] = useDeleteMaterialStockMutation();
+  const [uploadMaterialStockInvoice] = useUploadMaterialStockInvoiceMutation();
+  const materialStocksList = useMemo(() => materialStocksData?.data || [], [materialStocksData]);
+  const [materialStockModal, setMaterialStockModal] = useState(false);
+  const [editingMaterialStock, setEditingMaterialStock] = useState(null);
+  const [materialStockForm] = Form.useForm();
+  const [materialStockSearch, setMaterialStockSearch] = useState('');
+  const [materialStockDateRange, setMaterialStockDateRange] = useState(null);
+  const [materialStockInvoiceUploading, setMaterialStockInvoiceUploading] = useState(false);
+  const [materialStockInvoiceFile, setMaterialStockInvoiceFile] = useState(null);
+  const makeUploadMs = useCloudinaryUpload();
+
+  const filteredMaterialStocks = useMemo(() => {
+    const q = materialStockSearch.toLowerCase();
+    return materialStocksList.filter(s => {
+      const matchSearch = !q || s.packingMaterial.toLowerCase().includes(q) || (s.size || '').toLowerCase().includes(q) || (s.vendor || '').toLowerCase().includes(q) || (s.hotelName || '').toLowerCase().includes(q);
+      if (!matchSearch) return false;
+      if (materialStockDateRange) {
+        const d = s.purchaseDate ? s.purchaseDate.slice(0, 10) : '';
+        if (d < materialStockDateRange[0] || d > materialStockDateRange[1]) return false;
+      }
+      return true;
+    });
+  }, [materialStocksList, materialStockSearch, materialStockDateRange]);
+
+  // Vendor dropdown for the "Add Purchase" (Material Stock) modal — combines raw-material
+  // Vendors (Vendors & Suppliers > Vendors) with Printing Suppliers (Vendors & Suppliers >
+  // Printing Suppliers) so any registered vendor/supplier can be picked. Keeps the
+  // currently-edited record's vendor selectable even if it doesn't match either list
+  // (legacy free-text entries).
+  const materialStockVendorOptions = useMemo(() => {
+    const opts = [
+      ...suppliers.map((v) => ({ label: v.name, value: v.name })),
+      ...printingSuppliers.map((v) => ({ label: `${v.name} (${v.role})`, value: v.name })),
+    ];
+    const seen = new Set();
+    const deduped = opts.filter((o) => (seen.has(o.value) ? false : (seen.add(o.value), true)));
+    const currentVendor = editingMaterialStock?.vendor;
+    if (currentVendor && !deduped.some((o) => o.value === currentVendor)) {
+      deduped.push({ label: currentVendor, value: currentVendor });
+    }
+    return deduped;
+  }, [suppliers, printingSuppliers, editingMaterialStock]);
+
+  // Category → hotel/hospital name picker for the Material Stock modal. Same source the Sales
+  // Lead form uses: category options from the shared DropdownOption store (+ Hotel/Hospital
+  // defaults), names from Lead.distinct('hotelName') scoped to the chosen category. Leaving
+  // the name blank = general (non-reserved) stock.
+  const watchedMsCategory = Form.useWatch('category', materialStockForm) || 'Hotel';
+  const { data: msCategoryOptionsRaw } = useGetOptionsQuery({ field: 'category' });
+  const { data: msHotelNamesRaw } = useGetHotelNamesQuery({ category: watchedMsCategory });
+  const materialStockCategoryOptions = useMemo(() => {
+    const map = new Map([['Hotel', 'Hotel'], ['Hospital', 'Hospital']]);
+    (msCategoryOptionsRaw?.data || []).forEach((o) => { if (o?.value) map.set(o.value, o.label || o.value); });
+    return Array.from(map, ([value, label]) => ({ value, label }));
+  }, [msCategoryOptionsRaw]);
+  const materialStockHotelOptions = useMemo(() => {
+    const opts = (msHotelNamesRaw?.data || []).map((n) => ({ value: n, label: n }));
+    const cur = editingMaterialStock?.hotelName;
+    if (cur && !opts.some((o) => o.value === cur)) opts.unshift({ value: cur, label: `${cur} (existing)` });
+    return opts;
+  }, [msHotelNamesRaw, editingMaterialStock]);
+
+  const openMaterialStockModal = (item = null) => {
+    if (!requireAccess(item ? 'edit' : 'add')) return;
+    setEditingMaterialStock(item);
+    setMaterialStockInvoiceFile(null);
+    materialStockForm.resetFields();
+    materialStockForm.setFieldsValue(item ? {
+      category: item.category || 'Hotel',
+      packingMaterial: item.packingMaterial,
+      size: item.size,
+      stockCount: item.stockCount,
+      minStock: item.minStock,
+      purchaseDate: item.purchaseDate ? dayjs(item.purchaseDate) : null,
+      vendor: item.vendor,
+      hotelName: item.hotelName,
+      notes: item.notes,
+    } : { category: 'Hotel' });
+    setMaterialStockModal(true);
+  };
+
+  const handleSaveMaterialStock = async () => {
+    try {
+      const values = await materialStockForm.validateFields();
+      const payload = {
+        ...values,
+        purchaseDate: values.purchaseDate ? values.purchaseDate.toISOString() : undefined,
+      };
+      let saved;
+      if (editingMaterialStock) {
+        saved = await updateMaterialStock({ id: editingMaterialStock._id, ...payload }).unwrap();
+        enqueueSnackbar('Material stock updated', { variant: 'success' });
+      } else {
+        saved = await createMaterialStock(payload).unwrap();
+        enqueueSnackbar('Material stock added', { variant: 'success' });
+      }
+      // Upload invoice if a file was selected
+      if (materialStockInvoiceFile) {
+        setMaterialStockInvoiceUploading(true);
+        try {
+          const fd = new FormData();
+          const f = materialStockInvoiceFile?.originFileObj || materialStockInvoiceFile;
+          if (f) {
+            fd.append('invoice', f);
+            await uploadMaterialStockInvoice({ id: saved?.data?._id || editingMaterialStock?._id, formData: fd }).unwrap();
+          }
+        } catch { /* file upload failure is non-critical */ }
+        setMaterialStockInvoiceUploading(false);
+      }
+      setMaterialStockModal(false);
+      setEditingMaterialStock(null);
+      setMaterialStockInvoiceFile(null);
+    } catch (e) {
+      if (e?.errorFields) return;
+      enqueueSnackbar(e?.data?.message || 'Failed to save material stock', { variant: 'error' });
+    }
+  };
+
+  const handleDeleteMaterialStock = async (id) => {
+    if (!requireAccess('delete')) return;
+    try {
+      await deleteMaterialStock(id).unwrap();
+      enqueueSnackbar('Material stock deleted', { variant: 'success' });
+    } catch {
+      enqueueSnackbar('Delete failed', { variant: 'error' });
+    }
+  };
+
+  /* ── Active tab ── */
+  const [activeInvTab, setActiveInvTab] = useState('stock');
+  const { filterTabs, activeKeyFor } = useTabAccess('Inventory');
+  const { requireAccess, canDelete } = usePageAccess('Inventory');
+
+  /* ── Dynamic product attribute fields (Add Item modal) ── */
+  const watchedItemName = Form.useWatch('name', addItemForm);
+  const productTypeKey = useMemo(() => getProductTypeKey(watchedItemName), [watchedItemName]);
+  const productFieldDefs = PRODUCT_FIELD_DEFS[productTypeKey] || [];
+  const watchedPackingMaterial = Form.useWatch(['productAttrs', 'packingMaterial'], addItemForm);
+  // Bottle-type products (shampoo/moisturizer/shower gel) have no packingMaterial field —
+  // their sticker toggle is 'stickerPrinting' — so the per-bottle-type Sticker Size fields below
+  // are gated on this instead of showStickerSizeFor(packingMaterial) like Box/Ziplock/Butter Paper are.
+  const watchedStickerPrinting = Form.useWatch(['productAttrs', 'stickerPrinting'], addItemForm);
+  // Bottle Type is multi-select — one "<Bottle Type> Sticker Size" field is rendered per selected value.
+  const watchedBottleType = Form.useWatch(['productAttrs', 'bottleType'], addItemForm);
+  // Pre-existing single bottleStickerSize (legacy items) — kept alive via a hidden field until migrated.
+  const watchedLegacyBottleSticker = Form.useWatch(['productAttrs', 'bottleStickerSize'], addItemForm);
+  const watchedItemType = Form.useWatch('itemType', addItemForm) || 'standard';
+  const watchedBulkSourceItemId = Form.useWatch('bulkSourceItemId', addItemForm);
+  const watchedMergeItemCode = Form.useWatch('mergeItemCode', addItemForm);
+  // Bulk Raw Material items are purchased in containers (e.g. 10 drums) each holding a fixed
+  // quantity (e.g. 5 Litres) — "Unit Value" here doubles as that per-container quantity, so the
+  // actual stock total (and the Min Stock alert threshold) is containers × Unit Value, not the
+  // container count alone. Left at 1 whenever Unit Value is blank/0 so existing bulk items that
+  // never used this field keep behaving exactly as before (Opening Bulk Stock == total stock).
+  const watchedBulkUnitValue = Form.useWatch('unitValue', addItemForm);
+  const watchedBulkOpening = Form.useWatch('current', addItemForm);
+  const watchedBulkAddStock = Form.useWatch('addStockQty', addItemForm);
+  const watchedBulkMinStock = Form.useWatch('min', addItemForm);
+  const watchedBulkUnit = Form.useWatch('unit', addItemForm);
+  const bulkStockMultiplier = watchedItemType === 'bulk' && Number(watchedBulkUnitValue) > 0 ? Number(watchedBulkUnitValue) : 1;
+  const bulkUnitLabel = watchedBulkUnit || 'units';
+
+  // Fill Unit options follow whichever bulk item is selected — its metric sub-unit for
+  // small per-piece fills (Litres→ml, Kg→gram) or the bulk unit itself for large per-piece
+  // fills (Litres, Kg). Falls back to both pairs before a bulk item is chosen.
+  const fillUnitOptions = useMemo(() => {
+    const src = bulkItems.find((b) => b.key === watchedBulkSourceItemId);
+    if (src?.unit === 'Litres') return [{ value: 'ml', label: 'ml (milliliter)' }, { value: 'Litres', label: 'Litres (L)' }];
+    if (src?.unit === 'Kg') return [{ value: 'gram', label: 'gram' }, { value: 'Kg', label: 'Kg' }];
+    return [{ value: 'ml', label: 'ml' }, { value: 'gram', label: 'gram' }, { value: 'Litres', label: 'Litres (L)' }, { value: 'Kg', label: 'Kg' }];
+  }, [bulkItems, watchedBulkSourceItemId]);
+
+  // Default the Fill Unit to the bulk item's smaller sub-unit as soon as a bulk source is
+  // picked — the dropdown stays fully editable so the user can switch it to the bulk unit
+  // itself (e.g. Litres) for large per-piece fills instead.
+  useEffect(() => {
+    if (watchedItemType !== 'filled' || !watchedBulkSourceItemId) return;
+    const src = bulkItems.find((b) => b.key === watchedBulkSourceItemId);
+    const expected = src?.unit === 'Litres' ? 'ml' : src?.unit === 'Kg' ? 'gram' : null;
+    if (expected) addItemForm.setFieldsValue({ unit: expected });
+  }, [watchedItemType, watchedBulkSourceItemId, bulkItems, addItemForm]);
+
+  // Nudge toward merging when the typed name looks like an item that already exists
+  // (e.g. typing "Boomi Coconut Oil" while "Coconut Oil" is already in stock) — the user
+  // may not remember the existing item's code, so surface it instead of requiring recall.
+  const nameMatches = useMemo(() => {
+    const n = String(watchedItemName || '').trim().toLowerCase();
+    if (editingItem || n.length < 3) return [];
+    return inventoryList.filter((i) => {
+      const iName = (i.name || '').toLowerCase();
+      return iName && (iName.includes(n) || n.includes(iName));
+    }).slice(0, 3);
+  }, [watchedItemName, inventoryList, editingItem]);
+
+  /* ── Category & Kit expand ── */
+  const [expandedCategory, setExpandedCategory] = useState(null);
+  const [expandedKit, setExpandedKit] = useState(null);
+
+  /* ── Item Detail Drawer (row click) ── */
+  const [detailItem, setDetailItem] = useState(null);
+
+  /* ── Live Staff Checking ── */
+  const [checkSession, setCheckSession] = useState([]);
+  const [checkSubmitOpen, setCheckSubmitOpen] = useState(false);
+  const [checkNotes, setCheckNotes] = useState('');
+  const [checkSubmitted, setCheckSubmitted] = useState(false);
+  // Physical Count Entry table paging — display only; counts, the summary footer and Submit
+  // always cover the whole checkSession, not just the visible page.
+  const [checkPage, setCheckPage] = useState(1);
+  const [checkPageSize, setCheckPageSize] = useState(10);
+
+  // Populate checkSession once inventory data loads from RTK Query (useState runs before data arrives).
+  // On subsequent loads (e.g. after an approval), refresh systemCount while preserving the user's
+  // already-entered physicalCount values so an in-progress session isn't wiped out.
+  useEffect(() => {
+    if (inventoryList.length === 0) return;
+    setCheckSession(prev => {
+      if (prev.length === 0) {
+        return inventoryList.map(i => ({
+          key: i.key, code: i.code, name: i.name, unit: i.unit,
+          systemCount: i.current, physicalCount: i.current,
+          missingType: null, missingReason: '',
+        }));
+      }
+      // Merge: keep user-entered counts, update system counts & add any new items
+      return inventoryList.map(i => {
+        const existing = prev.find(p => p.key === i.key);
+        if (existing) return { ...existing, code: i.code, name: i.name, unit: i.unit, systemCount: i.current };
+        return { key: i.key, code: i.code, name: i.name, unit: i.unit, systemCount: i.current, physicalCount: i.current, missingType: null, missingReason: '' };
+      });
+    });
+  }, [inventoryList]);
+
+  /* ── Derived ── */
+  // Stock Inventory tab shows Standard items only — Bulk Raw Material and Filled/Packed
+  // items live on their own "Bulk & Filled Items" tab instead.
+  const filteredInventory = inventoryList.filter((i) => {
+    // Bulk Raw Material lives only on the Bulk tab — Filled/Packed items are sellable
+    // stock like any Standard item, so they belong here in Stock Inventory too.
+    if (i.itemType === 'bulk') return false;
+    const q = invSearch.toLowerCase();
+    const matchSearch = !q || i.name.toLowerCase().includes(q) || (i.code || '').toLowerCase().includes(q) || (i.sellers || []).map(s => (s.name || s)).join(' ').toLowerCase().includes(q);
+    const matchCategory = !invCategory || i.category === invCategory;
+    const matchStatus = !invStatus || i.status === invStatus;
+    return matchSearch && matchCategory && matchStatus;
+  });
+
+  const filteredApprovals = pendingAdjustments.filter((a) => {
+    const q = approvalSearch.toLowerCase();
+    const matchSearch = !q || (a.item || '').toLowerCase().includes(q) || (a.person || '').toLowerCase().includes(q);
+    const matchType = !approvalType || a.type === approvalType;
+    const matchStatus = !approvalStatus || a.status === approvalStatus;
+    let matchDate = true;
+    if (approvalDateRange) {
+      const d = a.date || '';
+      matchDate = d >= approvalDateRange[0] && d <= approvalDateRange[1];
+    }
+    return matchSearch && matchType && matchStatus && matchDate;
+  });
+
+  // Stock History tab main view — one row per item, click a row to open its full Stock In/Out
+  // history. A Bulk raw-material item and its linked Filled (per-piece) item are two separate
+  // stock pools that can legitimately share the same Item Name (e.g. both named "Shampoo") —
+  // itemType is carried through so the table can tag them apart instead of looking like an
+  // unexplained duplicate.
+  const historyItemRows = useMemo(() => {
+    const q = historyListSearch.trim().toLowerCase();
+    return inventoryList
+      .map((i) => ({
+        key: i.key, itemId: i.key, item: i.name, code: i.code, category: i.category, current: i.current, unit: i.unit, itemType: i.itemType,
+      }))
+      .filter((r) => !q
+        || (r.item || '').toLowerCase().includes(q)
+        || (r.code || '').toLowerCase().includes(q)
+        || (r.category || '').toLowerCase().includes(q));
+  }, [inventoryList, historyListSearch]);
+
+  const lowStock = inventoryList.filter((i) => i.status === 'Low' || i.status === 'Out');
+
+  const filteredSuppliers = suppliers.filter((s) =>
+    (s.name || '').toLowerCase().includes(supplierSearch.toLowerCase()) ||
+    (s.phone || '').includes(supplierSearch)
+  );
+  const filteredVendors = vendorsList.filter((c) =>
+    (c.name || '').toLowerCase().includes(vendorSearch.toLowerCase()) ||
+    (c.phone || '').includes(vendorSearch)
+  );
+
+  const onCategoryChange = (event) => setNewCategoryName(event.target.value);
+
+  const addCategory = (e) => {
+    e.preventDefault();
+    if (newCategoryName.trim() && !categories.includes(newCategoryName.trim())) {
+      setExtraCategories((prev) => [...prev, newCategoryName.trim()]);
+      setNewCategoryName('');
+    }
+  };
+
+  const openReceive = (r) => {
+    if (!requireAccess('add')) return;
+    setActiveItem(r);
+    setSelectedSupplier(null);
+    setSupplierSearch('');
+    setShowAddSupplier(false);
+    receiveForm.resetFields();
+    supplierForm.resetFields();
+    setReceiveOpen(true);
+  };
+
+  const openIssue = (r) => {
+    if (!requireAccess('add')) return;
+    setActiveIssueItem(r);
+    setSelectedVendor(null);
+    setVendorSearch('');
+    setShowAddVendor(false);
+    issueForm.resetFields();
+    vendorForm.resetFields();
+    setIssueOpen(true);
+  };
+
+  const handleSaveSupplier = async () => {
+    try {
+      const vals = supplierForm.getFieldsValue();
+      const result = await createVendorMutation({
+        name: vals.sup_name, phone: vals.sup_phone, email: vals.sup_email,
+        address: vals.sup_address, vendorType: 'raw_material', taxId: vals.sup_tax, bankDetails: vals.bankDetails || {},
+      }).unwrap();
+      setSelectedSupplier({ id: result.data?._id || result._id, name: vals.sup_name, phone: vals.sup_phone, address: vals.sup_address });
+      supplierForm.resetFields();
+      setShowAddSupplier(false);
+      enqueueSnackbar('Supplier added', { variant: 'success' });
+    } catch {
+      enqueueSnackbar('Failed to add supplier', { variant: 'error' });
+    }
+  };
+
+  const handleSaveVendor = async () => {
+    try {
+      const vals = vendorForm.getFieldsValue();
+      const result = await createVendorMutation({
+        name: vals.cust_name, phone: vals.cust_phone, email: vals.cust_email,
+        address: vals.cust_address, type: 'customer', taxId: vals.cust_tax, bankDetails: vals.bankDetails || {},
+      }).unwrap();
+      setSelectedVendor({ id: result.data?._id || result._id, name: vals.cust_name, phone: vals.cust_phone, address: vals.cust_address });
+      vendorForm.resetFields();
+      setShowAddVendor(false);
+      enqueueSnackbar('Vendor added', { variant: 'success' });
+    } catch {
+      enqueueSnackbar('Failed to add vendor', { variant: 'error' });
+    }
+  };
+
+  const handleSaveItem = async () => {
+    try {
+      const vals = await addItemForm.validateFields();
+      // Strip undefined/null so stale keys from a previously-selected product type
+      // don't overwrite attributes the user never intended to clear.
+      const rawAttrs = vals.productAttrs || {};
+      const cleanAttrs = Object.fromEntries(
+        Object.entries(rawAttrs).filter(([, v]) => v !== undefined && v !== null && !(Array.isArray(v) && v.length === 0))
+      );
+      const itemType = vals.itemType || 'standard';
+      // Bulk Raw Material: Opening Bulk Stock / Add Stock (Qty) / Min Stock are entered as
+      // container counts (e.g. 10 drums) — multiply by Qty per Container ("Unit Value", e.g. 5
+      // Litres/drum) to store the actual total in the item's tracked unit (Litres/Kg), so 10
+      // drums x 5 Litres correctly becomes 50 Litres of stock instead of just "10". Multiplier
+      // stays 1 (no-op) whenever Unit Value is left blank/0, so bulk items that don't use this
+      // field — and the standard/filled item flows, which never hit this branch — are unaffected.
+      const bulkMultiplier = itemType === 'bulk' && Number(vals.unitValue) > 0 ? Number(vals.unitValue) : 1;
+      const payload = {
+        itemName: vals.name,
+        category: vals.category || '',
+        unit: vals.unit || 'Pcs',
+        unitValue: Number(vals.unitValue) || 0,
+        minStock: (Number(vals.min) || 0) * bulkMultiplier,
+        purchasePrice: Number(String(vals.purchase_price ?? '').replace(/[^0-9.]/g, '')) || 0,
+        marginAmount: Number(String(vals.margin_amount ?? '').replace(/[^0-9.]/g, '')) || 0,
+        sellingPrice: Number(String(vals.selling_price ?? '').replace(/[^0-9.]/g, '')) || 0,
+        gstPercent: Number(vals.gstPercent) || 0,
+        hsnCode: vals.hsn || '',
+        vendorId: vals.vendorId || null,
+        purchaseDate: vals.purchaseDate ? vals.purchaseDate.toISOString() : new Date().toISOString(),
+        productAttributes: itemType === 'bulk' ? {} : cleanAttrs,
+        itemType,
+        bulkSourceItemId: itemType === 'filled' ? vals.bulkSourceItemId : undefined,
+        fillWastagePercent: itemType === 'filled' ? (Number(vals.fillWastagePercent) || 0) : undefined,
+      };
+      if (editingItem) {
+        const addQty = (Number(vals.addStockQty) || 0) * bulkMultiplier;
+        await updateItemMutation({ id: editingItem.key, ...payload, addStockQty: addQty }).unwrap();
+        enqueueSnackbar(addQty > 0 ? `Item updated — ${formatQty(addQty)} ${vals.unit || ''} added to stock` : 'Item updated', { variant: 'success' });
+        addItemForm.resetFields();
+        setEditingItem(null);
+        setAddItemModal(false);
+        return;
+      }
+
+      // New item — confirm the merge-vs-new decision before it's committed, since it can't
+      // be easily undone once stock has been merged into another item or a duplicate created.
+      const opening = (Number(vals.current) || 0) * bulkMultiplier;
+      const mergeCode = String(vals.mergeItemCode || '').trim().toUpperCase() || undefined;
+      const matched = mergeCode ? inventoryList.find((i) => i.code === mergeCode) : null;
+
+      Modal.confirm({
+        title: mergeCode ? 'Merge into existing item?' : 'Add as new item?',
+        content: mergeCode
+          ? `Merge ${formatQty(opening)} ${vals.unit || ''} into existing item "${matched?.name || mergeCode}" (${mergeCode})${matched ? ` — current stock: ${matched.current} ${matched.unit}` : ''}?`
+          : `No item code entered — add "${vals.name}" as a NEW inventory item?`,
+        okText: mergeCode ? 'Merge' : 'Add as New',
+        onOk: async () => {
+          try {
+            await createItemMutation({ ...payload, openingStock: opening, currentStock: opening, mergeItemCode: mergeCode }).unwrap();
+            enqueueSnackbar(mergeCode ? 'Stock merged into existing item' : 'Item added', { variant: 'success' });
+            addItemForm.resetFields();
+            setEditingItem(null);
+            setAddItemModal(false);
+          } catch (err) {
+            enqueueSnackbar(err?.data?.message || err?.data || 'Failed to save item', { variant: 'error' });
+          }
+        },
+      });
+    } catch (err) {
+      if (err?.errorFields) return;
+      enqueueSnackbar(err?.data?.message || err?.data || 'Failed to save item', { variant: 'error' });
+    }
+  };
+
+  const handleApproveAdjustment = async (adj) => {
+    try {
+      await approveMovement(adj.key).unwrap();
+      enqueueSnackbar('Stock adjustment approved and applied', { variant: 'success' });
+    } catch {
+      enqueueSnackbar('Failed to approve adjustment', { variant: 'error' });
+    }
+  };
+
+  const handleRejectAdjustment = async (adj) => {
+    try {
+      await rejectMovement(adj.key).unwrap();
+      enqueueSnackbar('Adjustment request rejected', { variant: 'warning' });
+    } catch {
+      enqueueSnackbar('Failed to reject adjustment', { variant: 'error' });
+    }
+  };
+
+  /* ── Submit Live Stock Check ── */
+  const handleSubmitCheck = async () => {
+    const discrepancies = checkSession.filter(i => i.physicalCount !== i.systemCount);
+    const unknownItems = checkSession.filter(i => i.physicalCount < i.systemCount && i.missingType === 'unknown');
+    try {
+      await submitStockCheck({
+        items: discrepancies.map((item) => ({
+          itemId: item.key,
+          actualCount: item.physicalCount,
+          reasonType: item.missingType === 'unknown' ? 'Unknown' : item.missingType === 'known' ? 'Known' : undefined,
+          reason: item.missingReason,
+        })),
+        notes: checkNotes,
+      }).unwrap();
+      unknownItems.forEach((item) => {
+        enqueueSnackbar(
+          ['Unknown Stock Shortage Reported', `${Math.abs(item.physicalCount - item.systemCount)} ${item.unit} of "${item.name}" is unaccounted. Super Admin and Manager have been notified.`].filter(Boolean).join(' — '),
+          { variant: 'warning' }
+        );
+      });
+      setCheckSubmitOpen(false);
+      setCheckSubmitted(true);
+      setCheckNotes('');
+      enqueueSnackbar(`Stock check submitted. ${discrepancies.length} discrepancies sent for approval.`, { variant: 'success' });
+    } catch {
+      enqueueSnackbar('Failed to submit stock check', { variant: 'error' });
+    }
+  };
+
+  /* ── Style helpers ── */
+  const sectionCard = {
+    borderRadius: 14,
+    border: `1px solid ${borderColor}`,
+    background: cardBg,
+    marginBottom: 12,
+    overflow: 'hidden',
+  };
+
+  const sectionHeader = (gradient) => ({
+    padding: '12px 16px',
+    background: gradient || sectionBg,
+    borderBottom: `1px solid ${borderColor}`,
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+  });
+
+  const saveBtn = (gradient) => ({
+    background: gradient,
+    border: 'none',
+    height: 48,
+    borderRadius: 10,
+    fontSize: 15,
+    fontWeight: 700,
+    letterSpacing: 0.8,
+  });
+
+  /* ── Entity selector helper ── */
+  const renderEntitySelector = ({
+    label, icon, search, setSearch, filtered, selected, setSelected,
+    showAdd, setShowAdd, addForm, addFormFields, onSave, gradient,
+  }) => (
+    <div style={sectionCard}>
+      <div style={sectionHeader()}>
+        {icon}
+        <Text style={{ fontWeight: 700, color: textColor, fontSize: 14 }}>{label}</Text>
+      </div>
+      <div style={{ padding: '14px 16px' }}>
+        {selected ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px', borderRadius: 10, background: `${gradient.split(',')[1]?.trim().slice(0, 7) || '#B11E6A'}15`, border: `1.5px solid ${gradient.split(',')[1]?.trim().slice(0, 7) || '#B11E6A'}44` }}>
+            <Avatar style={{ background: gradient, flexShrink: 0 }}>{selected.name[0]}</Avatar>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <Text style={{ fontWeight: 700, color: textColor, display: 'block', fontSize: 14 }}>{selected.name}</Text>
+              <Text style={{ fontSize: 12, color: '#aaa' }}>{[selected.phone, selected.address].filter(Boolean).join(' · ')}</Text>
+            </div>
+            <Button type="text" size="small" icon={<CloseOutlined />} onClick={() => { setSelected(null); setSearch(''); setShowAdd(false); }} style={{ color: '#aaa' }} />
+          </div>
+        ) : (
+          <>
+            <Input
+              prefix={<SearchOutlined style={{ color: '#bbb' }} />}
+              placeholder={`Search ${label.toLowerCase()} by name or phone...`}
+              value={search}
+              onChange={(e) => { setSearch(e.target.value); setShowAdd(false); }}
+              style={{ borderRadius: 24, height: 42, background: isDark ? '#2a2a3a' : '#f5f5f5', border: 'none' }}
+              allowClear
+            />
+            {!showAdd && (
+              <div style={{ marginTop: 8, borderRadius: 10, border: `1px solid ${borderColor}`, background: cardBg, overflow: 'hidden', maxHeight: 220, overflowY: 'auto' }}>
+                {filtered.length === 0 && <div style={{ padding: '14px', textAlign: 'center', color: '#aaa', fontSize: 13 }}>No results found</div>}
+                {filtered.map((item) => {
+                  const isSel = selected?.id === item.id;
+                  return (
+                    <div
+                      key={item.id}
+                      onClick={() => { setSelected(item); setSearch(''); }}
+                      style={{ display: 'flex', alignItems: 'center', padding: '10px 14px', borderBottom: `1px solid ${borderColor}`, cursor: 'pointer', gap: 10, background: isSel ? '#B11E6A08' : 'transparent' }}
+                      onMouseEnter={e => e.currentTarget.style.background = '#B11E6A08'}
+                      onMouseLeave={e => e.currentTarget.style.background = isSel ? '#B11E6A08' : 'transparent'}
+                    >
+                      <Avatar size={34} style={{ background: gradient, flexShrink: 0, fontSize: 13 }}>{item.name[0]}</Avatar>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <Text style={{ fontWeight: 600, fontSize: 13, color: textColor, display: 'block' }}>{item.name}</Text>
+                        <Text style={{ fontSize: 11, color: '#aaa' }}>{[item.phone, item.address].filter(Boolean).join(' · ')}</Text>
+                      </div>
+                      {isSel && <CheckOutlined style={{ color: '#B11E6A' }} />}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {!showAdd && (
+              <Button icon={<PlusOutlined />} onClick={() => { setShowAdd(true); addForm.resetFields(); }} style={{ marginTop: 10, width: '100%', borderColor: '#B11E6A66', color: '#B11E6A', borderRadius: 8, height: 40, fontWeight: 600, borderStyle: 'dashed' }}>
+                Add New {label}
+              </Button>
+            )}
+          </>
+        )}
+        <AnimatePresence>
+          {showAdd && (
+            <motion.div
+              initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}
+              style={{ marginTop: 12, borderRadius: 10, border: `1.5px solid #B11E6A44`, background: isDark ? '#1a0f14' : '#fff8fb', overflow: 'hidden' }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px', background: '#B11E6A12', borderBottom: `1px solid #B11E6A22` }}>
+                <Text style={{ fontWeight: 700, color: '#B11E6A', fontSize: 13 }}>New {label}</Text>
+                <Button type="text" size="small" icon={<CloseOutlined />} onClick={() => setShowAdd(false)} style={{ color: '#aaa' }} />
+              </div>
+              <Form form={addForm} layout="vertical" style={{ padding: '12px 14px 0' }}>
+                {addFormFields}
+              </Form>
+              <div style={{ padding: '10px 14px 14px', display: 'flex', gap: 8 }}>
+                <Button onClick={() => setShowAdd(false)} style={{ flex: 1, height: 40, borderRadius: 8 }}>Cancel</Button>
+                <Button type="primary" onClick={onSave} style={{ flex: 2, height: 40, borderRadius: 8, background: gradient, border: 'none', fontWeight: 700 }}>Save {label}</Button>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+    </div>
+  );
+
+  // Render a productAttributes object as compact key:value tags.
+  // Map-valued attributes (packingSizes / bottleStickerSizes → { "<option>": "<size>" }) are shown
+  // as "<option>: <size>, …" instead of "[object Object]"; empty map entries are skipped.
+  const formatAttrValue = (v) => {
+    if (Array.isArray(v)) return v.join(', ');
+    if (v && typeof v === 'object') {
+      return Object.entries(v).filter(([, sv]) => sv != null && sv !== '').map(([sk, sv]) => `${sk}: ${sv}`).join(', ');
+    }
+    return String(v);
+  };
+  const renderAttrTags = (attrs, maxWidth = 240) => {
+    const entries = attrEntries(attrs).filter(([, v]) => formatAttrValue(v) !== '');
+    if (entries.length === 0) return <Text type="secondary">—</Text>;
+    return (
+      <Space size={4} wrap style={{ maxWidth }}>
+        {entries.map(([k, v]) => (
+          <Tag key={k} style={{ borderRadius: 10, fontSize: 10, background: '#B11E6A10', color: '#B11E6A', border: '1px solid #B11E6A30', margin: 0 }}>
+            <span style={{ opacity: 0.75 }}>{prettyAttrKey(k)}:</span> {formatAttrValue(v)}
+          </Tag>
+        ))}
+      </Space>
+    );
+  };
+
+  const columns = [
+    { title: 'Code', dataIndex: 'code', render: (v) => <Text strong style={{ color: '#B11E6A', fontSize: 12 }}>{v}</Text> },
+    {
+      title: 'Item Name', dataIndex: 'name',
+      render: (v, r) => (
+        <Space size={4}>
+          <Text strong>{v}</Text>
+          {r.itemType === 'bulk' && <Tag color="blue" style={{ borderRadius: 8, fontSize: 10, margin: 0 }}>Bulk</Tag>}
+          {r.itemType === 'filled' && <Tag color="purple" style={{ borderRadius: 8, fontSize: 10, margin: 0 }}>Filled</Tag>}
+        </Space>
+      ),
+    },
+    { title: 'Category', dataIndex: 'category', responsive: ['sm'], render: (v) => <Tag style={{ borderRadius: 20, fontSize: 11, background: '#B11E6A22', color: '#B11E6A', border: '1px solid #B11E6A44' }}>{v}</Tag> },
+    { title: 'Value', key: 'value', responsive: ['lg'], render: (_, r) => r.unitValue ? `${r.unitValue} ${r.unit}` : (r.unit || '—') },
+    { title: 'Product Spec', key: 'productSpec', responsive: ['lg'], render: (_, r) => renderAttrTags(r.productAttributes, 220) },
+    {
+      title: 'Stock Level', key: 'level',
+      render: (_, r) => (
+        <div style={{ minWidth: 80 }}>
+          <Text strong style={{ fontSize: 14, color: r.status === 'Out' ? '#8a1652' : r.status === 'Low' ? '#C94F8A' : '#B11E6A' }}>
+            {formatQty(r.current)}
+          </Text>
+          <Text style={{ fontSize: 11, color: '#999', marginLeft: 4 }}>units</Text>
+        </div>
+      ),
+    },
+    { title: 'Min Req', dataIndex: 'min', responsive: ['lg'], render: (v) => `${v} units` },
+    {
+      title: 'Low Stock Alert', key: 'alert',
+      render: (_, r) => r.current <= r.min
+        ? <Tag icon={<WarningOutlined />} color="error" style={{ borderRadius: 12 }}>Low Stock</Tag>
+        : <Tag color="success" style={{ borderRadius: 12 }}>Healthy</Tag>
+    },
+    { title: 'Price', dataIndex: 'price', responsive: ['md'] },
+    { title: 'GST', dataIndex: 'gstPercent', responsive: ['md'], render: (v) => v > 0 ? <Tag style={{ borderRadius: 12, background: '#B11E6A12', color: '#B11E6A', border: '1px solid #B11E6A33' }}>{v}%</Tag> : <Text type="secondary">—</Text> },
+    {
+      title: 'Vendors', dataIndex: 'sellers', key: 'sellers', responsive: ['lg'],
+      render: (v, r) => {
+        const list = Array.isArray(v) ? v : (v ? [{ name: v, stock: r.current }] : []);
+        if (list.length === 0) return <Text type="secondary">—</Text>;
+        return (
+          <Space size={4} wrap>
+            {list.map((s, i) => {
+              const name = s.name || s;
+              const stock = s.stock ?? 0;
+              return (
+                <Tag key={i} style={{ borderRadius: 20, fontSize: 10, background: '#B11E6A12', color: '#B11E6A', border: '1px solid #B11E6A33', margin: 0, display: 'inline-flex', alignItems: 'center', gap: 0, padding: '0 6px 0 8px' }}>
+                  <span>{name}</span>
+                  <span style={{ background: '#B11E6A', color: '#fff', borderRadius: 10, padding: '0 6px', fontSize: 9, fontWeight: 700, lineHeight: '16px', marginLeft: 6 }}>{formatQty(stock)} units</span>
+                </Tag>
+              );
+            })}
+          </Space>
+        );
+      }
+    },
+    { title: 'Purchased', dataIndex: 'purchasedDate', responsive: ['lg'] },
+    {
+      title: 'Status', dataIndex: 'status',
+      render: (v) => (
+        <Tag style={{ borderRadius: 20, fontWeight: 500, background: v === 'OK' ? '#B11E6A22' : v === 'Low' ? '#C94F8A22' : '#8a165222', color: v === 'OK' ? '#B11E6A' : v === 'Low' ? '#C94F8A' : '#8a1652', border: `1px solid ${v === 'OK' ? '#B11E6A44' : v === 'Low' ? '#C94F8A44' : '#8a165244'}` }}>
+          {v === 'Out' ? 'Out of Stock' : v}
+        </Tag>
+      ),
+    },
+    {
+      title: 'Actions', key: 'actions',
+      render: (_, r) => (
+        <Space size={4} wrap>
+          <div style={{ display: 'flex', alignItems: 'center', background: isDark ? '#2a2a3e' : '#f0f0f0', borderRadius: 6, padding: '2px', border: `1px solid ${borderColor}` }}>
+            <Button size="small" type="text" icon={<MinusOutlined style={{ fontSize: 10, color: '#B11E6A' }} />} onClick={(e) => { e.stopPropagation(); if (!requireAccess('edit')) return; adjustForm.resetFields(); setAdjustModal({ open: true, item: r, type: 'Deduction' }); }} style={{ width: 24, height: 24, display: 'flex', alignItems: 'center', justifyContent: 'center' }} />
+            <Text strong style={{ fontSize: 11, minWidth: 28, textAlign: 'center', color: textColor }}>{formatQty(r.current)}</Text>
+            <Button size="small" type="text" icon={<PlusOutlined style={{ fontSize: 10, color: '#B11E6A' }} />} onClick={(e) => { e.stopPropagation(); if (!requireAccess('edit')) return; adjustForm.resetFields(); setAdjustModal({ open: true, item: r, type: 'Addition' }); }} style={{ width: 24, height: 24, display: 'flex', alignItems: 'center', justifyContent: 'center' }} />
+          </div>
+          <Button size="small" icon={<EditOutlined />} style={{ borderColor: '#B11E6A', color: '#B11E6A', fontSize: 11 }} onClick={(e) => { e.stopPropagation(); if (!requireAccess('edit')) return; setEditingItem(r); setAddItemScope(r.itemType === 'bulk' || r.itemType === 'filled' ? 'bulk_filled' : 'standard'); addItemForm.setFieldsValue({ name: r.name, category: r.category, unit: r.unit, unitValue: r.unitValue, min: r.min, purchase_price: r.value, margin_amount: r.marginAmount, selling_price: r.sellingPrice, gstPercent: r.gstPercent, hsn: r.hsnCode, vendorId: r.vendorId, purchaseDate: dayjs(), addStockQty: undefined, productAttrs: normalizeAttrsForEdit(r.productAttributes, r.name), itemType: r.itemType || 'standard', bulkSourceItemId: r.bulkSourceItemId, fillWastagePercent: r.fillWastagePercent }); setAddItemModal(true); }}>Edit</Button>
+          {r.itemType === 'filled' && (
+            <Button size="small" icon={<ContainerOutlined />} style={{ borderColor: '#B11E6A', color: '#B11E6A', fontSize: 11 }} onClick={(e) => { e.stopPropagation(); if (!requireAccess('edit')) return; setFillQtyValue(computeMaxFillQty(r, inventoryList)); setFillStockModal({ open: true, item: r }); }}>Fill Stock</Button>
+          )}
+          {/* Add Stock / Sell Stock — hidden per request
+          <Button size="small" type="primary" icon={<DownloadOutlined />} style={{ background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none', fontSize: 11 }} onClick={(e) => { e.stopPropagation(); openReceive(r); }}>Add Stock</Button>
+          <Button size="small" icon={<ShoppingOutlined />} style={{ borderColor: '#B11E6A', color: '#B11E6A', fontSize: 11 }} onClick={(e) => { e.stopPropagation(); openIssue(r); }}>Sell Stock</Button>
+          */}
+        </Space>
+      ),
+    },
+  ];
+
+  // Per-item Stock In/Out History — full screen shown in place of the Stock History table
+  // when a row is clicked (list↔detail toggle, same pattern as Parties' detail view; no
+  // modal, no route change).
+  const renderItemHistoryScreen = () => (
+    <div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, flexWrap: 'wrap', gap: 8 }}>
+        <Button icon={<LeftOutlined />} onClick={() => { setHistoryItem(null); setItemHistoryTab('all'); setItemHistoryPartyFilter(null); setItemHistorySearch(''); }}>
+          Back to Stock History
+        </Button>
+        <Text strong style={{ fontSize: 18, color: '#B11E6A' }}>{historyItem?.name}</Text>
+      </div>
+
+      <Row gutter={[12, 12]} style={{ marginBottom: 14 }}>
+        <Col xs={12} sm={8}>
+          <Card size="small" style={{ borderRadius: 12, border: '1px solid #52c41a33', background: isDark ? '#12241a' : '#f6ffed' }}>
+            <Text type="secondary" style={{ fontSize: 12 }}>Total Stock In</Text>
+            <div style={{ fontSize: 22, fontWeight: 700, color: '#52c41a' }}>+{formatQty(itemHistoryInTotal)}</div>
+          </Card>
+        </Col>
+        <Col xs={12} sm={8}>
+          <Card size="small" style={{ borderRadius: 12, border: '1px solid #ff4d4f33', background: isDark ? '#2a1315' : '#fff1f0' }}>
+            <Text type="secondary" style={{ fontSize: 12 }}>Total Stock Out</Text>
+            <div style={{ fontSize: 22, fontWeight: 700, color: '#ff4d4f' }}>-{formatQty(itemHistoryOutTotal)}</div>
+          </Card>
+        </Col>
+        <Col xs={24} sm={8}>
+          <Card size="small" style={{ borderRadius: 12, border: '1px solid #B11E6A33', background: isDark ? '#2a1322' : '#fff0f6' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6 }}>
+              <Text type="secondary" style={{ fontSize: 12 }}>Stock In Hand</Text>
+              {historyItemStock?.status === 'Out' && <Tag color="error" style={{ borderRadius: 12, margin: 0, fontSize: 10 }}>Out of Stock</Tag>}
+              {historyItemStock?.status === 'Low' && <Tag icon={<WarningOutlined />} color="warning" style={{ borderRadius: 12, margin: 0, fontSize: 10 }}>Low Stock</Tag>}
+            </div>
+            <div style={{ fontSize: 22, fontWeight: 700, color: '#B11E6A' }}>
+              {historyItemStock ? formatQty(historyItemStock.current || 0) : '—'}
+              {historyItemStock?.unit && <span style={{ fontSize: 12, fontWeight: 500, color: isDark ? '#aaa' : '#999', marginLeft: 6 }}>{historyItemStock.unit}</span>}
+            </div>
+          </Card>
+        </Col>
+      </Row>
+
+      <Card style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)', marginBottom: 16 }} styles={{ body: { padding: 16 } }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 14, alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+          <Tabs
+            activeKey={itemHistoryTab}
+            onChange={setItemHistoryTab}
+            items={[
+              { key: 'all', label: 'All' },
+              { key: 'in', label: <Space><span>Stock In</span><Badge count={itemHistoryRows.filter(r => r.isIn).length} showZero color="#52c41a" /></Space> },
+              { key: 'out', label: <Space><span>Stock Out</span><Badge count={itemHistoryRows.filter(r => !r.isIn).length} showZero color="#ff4d4f" /></Space> },
+            ]}
+          />
+          <Space wrap>
+            <Input prefix={<SearchOutlined style={{ color: '#B11E6A' }} />} placeholder="Search vendor, hotel, source, notes..." allowClear value={itemHistorySearch} onChange={(e) => setItemHistorySearch(e.target.value)} style={{ width: 220, borderRadius: 8 }} />
+            <Select allowClear showSearch optionFilterProp="label" placeholder="Hotel / Party" value={itemHistoryPartyFilter} onChange={setItemHistoryPartyFilter} options={hotelPartyOptions} style={{ width: 200 }} />
+          </Space>
+        </div>
+        <Table
+          size="small"
+          loading={itemHistoryLoading}
+          dataSource={filteredItemHistoryRows}
+          pagination={{ pageSize: 10, size: 'small' }}
+          columns={[
+            { title: 'Date', dataIndex: 'date', key: 'date', render: v => <Text style={{ fontSize: 12 }}>{v}</Text> },
+            {
+              title: 'Action', dataIndex: 'action', key: 'action',
+              render: (v, r) => <Tag color={r.isIn ? 'success' : 'error'} style={{ borderRadius: 12 }}>{v}</Tag>
+            },
+            { title: 'Qty', key: 'qty', render: (_, r) => <Text strong style={{ color: r.isIn ? '#52c41a' : '#ff4d4f' }}>{r.isIn ? '+' : '-'}{formatQty(r.qty)} {r.unit}</Text> },
+            { title: 'Before → After', key: 'ba', render: (_, r) => <Text type="secondary" style={{ fontSize: 12 }}>{formatQty(r.qtyBefore)} → {formatQty(r.qtyAfter)}</Text> },
+            { title: 'Vendor', dataIndex: 'vendor', key: 'vendor', render: v => v && v !== '—' ? <Tag color="geekblue" style={{ borderRadius: 10 }}>{v}</Tag> : <Text type="secondary">—</Text> },
+            { title: 'Source / Entity', dataIndex: 'source', key: 'source', render: v => <Text style={{ color: '#B11E6A', fontWeight: 600 }}>{v}</Text> },
+            { title: 'Hotel / Party', dataIndex: 'hotel', key: 'hotel', render: v => v && v !== '—' ? <Tag color="purple" style={{ borderRadius: 10 }}>{v}</Tag> : <Text type="secondary">—</Text> },
+            { title: 'Order ID', dataIndex: 'orderId', key: 'orderId', render: v => v && v !== '—' ? <Text style={{ fontWeight: 600, fontSize: 12 }}>{v}</Text> : <Text type="secondary">—</Text> },
+            { title: 'Person', dataIndex: 'person', key: 'person' },
+            { title: 'Notes', dataIndex: 'notes', key: 'notes', render: v => v ? <Text type="secondary" style={{ fontSize: 12 }}>{v}</Text> : '—' },
+          ]}
+        />
+      </Card>
+
+      <Card style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }} styles={{ body: { padding: 16 } }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, flexWrap: 'wrap', gap: 8 }}>
+          <Text strong style={{ color: textColor }}>Stock In vs Stock Out Report{itemHistoryPartyFilter ? ` — ${hotelPartyOptions.find(o => o.value === itemHistoryPartyFilter)?.label || ''}` : ''}</Text>
+          <Select value={itemHistoryPeriod} onChange={setItemHistoryPeriod} style={{ width: 150 }}>
+            <Option value="weekly">Weekly</Option>
+            <Option value="monthly">Monthly</Option>
+            <Option value="yearly">Yearly</Option>
+          </Select>
+        </div>
+        {itemHistoryReportRows.length === 0 ? (
+          <Text type="secondary">No movement data for this period yet.</Text>
+        ) : (
+          <ResponsiveContainer width="100%" height={280}>
+            <BarChart data={itemHistoryReportRows}>
+              <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
+              <XAxis dataKey="period" tick={{ fontSize: 12 }} />
+              <YAxis tick={{ fontSize: 12 }} />
+              <ReTooltip />
+              <Bar dataKey="Stock In" fill="#52c41a" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="Stock Out" fill="#ff4d4f" radius={[4, 4, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        )}
+      </Card>
+    </div>
+  );
+
+  return (
+    <div className="page-container fade-in">
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 20, flexWrap: 'wrap', gap: 12 }}>
+        <PageBreadcrumb title="Inventory" items={[{ label: 'Inventory' }]} style={{ marginBottom: 0 }} />
+        {activeInvTab !== 'kit' && activeInvTab !== 'bulk' && (
+          <Button type="primary" icon={<PlusOutlined />} onClick={openAddStandardItem} style={{ background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none' }}>Add Item</Button>
+        )}
+      </div>
+
+      {lowStock.length > 0 && (
+        <Alert type="warning" icon={<WarningOutlined />} showIcon
+          message={`${lowStock.length} items below minimum: ${lowStock.map((i) => i.name).join(', ')}`}
+          style={{ marginBottom: 20, borderRadius: 10 }} />
+      )}
+
+      {/* Stat cards */}
+      <Row gutter={[12, 12]} style={{ marginBottom: 20 }}>
+        {[
+          { label: 'Total Items', val: inventoryList.length, color: '#B11E6A' },
+          { label: 'OK Stock', val: inventoryList.filter((i) => i.status === 'OK').length, color: '#8a1652' },
+          { label: 'Low Stock', val: inventoryList.filter((i) => i.status === 'Low').length, color: '#C94F8A' },
+          { label: 'Out of Stock', val: inventoryList.filter((i) => i.status === 'Out').length, color: '#D85C9E' },
+        ].map((s, i) => (
+          <Col xs={12} sm={6} key={s.label}>
+            <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.08 }}>
+              <Card style={{ borderRadius: 12, border: 'none', background: `linear-gradient(135deg, ${s.color}25 0%, ${s.color}10 100%)`, boxShadow: `0 4px 20px ${s.color}20`, textAlign: 'center' }} styles={{ body: { padding: '16px 8px' } }}>
+                <Title level={2} style={{ margin: 0, color: s.color }}>{s.val}</Title>
+                <Text style={{ fontSize: 12, color: isDark ? '#aaa' : '#666' }}>{s.label}</Text>
+              </Card>
+            </motion.div>
+          </Col>
+        ))}
+      </Row>
+
+      {/* Chart */}
+      <Row gutter={[16, 16]} style={{ marginBottom: 20 }}>
+        <Col xs={24}>
+          <Card title={<Text strong style={{ color: textColor }}>Stock Levels Overview</Text>}
+            style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }}
+            styles={{ body: { padding: '12px 16px 16px' } }}>
+            <ResponsiveContainer width="100%" height={200}>
+              <BarChart data={inventoryList.map((i) => ({ name: i.name.split(' ').slice(0, 2).join(' '), current: i.current, min: i.min }))} margin={{ top: 4, right: 0, left: -10, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke={isDark ? '#333' : '#f0f0f0'} />
+                <XAxis dataKey="name" tick={{ fontSize: 11, fill: isDark ? '#aaa' : '#666' }} />
+                <YAxis tick={{ fontSize: 11, fill: isDark ? '#aaa' : '#666' }} />
+                <ReTooltip />
+                <Bar dataKey="current" fill="#B11E6A" radius={[4, 4, 0, 0]} name="Current Stock" />
+                <Bar dataKey="min" fill="#D85C9E" radius={[4, 4, 0, 0]} name="Min Required" />
+              </BarChart>
+            </ResponsiveContainer>
+          </Card>
+        </Col>
+      </Row>
+
+      {/* ════════════════════════════════════════
+          INVENTORY TABS
+      ════════════════════════════════════════ */}
+      <Tabs onChange={setActiveInvTab} style={{ marginBottom: 20 }}
+        items={filterTabs([
+          /* ── Tab 1: Stock Inventory ── */
+          {
+            key: 'stock',
+            label: <Space><ShoppingOutlined />Stock Inventory</Space>,
+            children: (() => {
+              // Group filtered items by category
+              const grouped = categories.reduce((acc, cat) => {
+                const items = filteredInventory.filter(i => i.category === cat);
+                if (items.length > 0) acc[cat] = items;
+                return acc;
+              }, {});
+              // Also include items with no category or category not in list
+              const uncategorized = filteredInventory.filter(i => !i.category || !categories.includes(i.category));
+              if (uncategorized.length > 0) grouped['Uncategorized'] = uncategorized;
+
+              const allGroupKeys = Object.keys(grouped);
+
+              return (
+                <div>
+                  {/* Search & filter bar */}
+                  <div style={{ padding: '10px 0 14px', display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                    <Input prefix={<SearchOutlined style={{ color: '#B11E6A' }} />} placeholder="Search item, code..." allowClear value={invSearch} onChange={(e) => { setInvSearch(e.target.value); setExpandedCategory(null); }} style={{ width: 240, borderRadius: 8 }} />
+                    <Select allowClear placeholder="Stock Status" value={invStatus} onChange={setInvStatus} style={{ width: 150, borderRadius: 8 }}>
+                      <Option value="OK">OK</Option>
+                      <Option value="Low">Low Stock</Option>
+                      <Option value="Out">Out of Stock</Option>
+                    </Select>
+                    <Text type="secondary" style={{ fontSize: 12, marginLeft: 'auto' }}>Click a category to expand</Text>
+                  </div>
+
+                  {allGroupKeys.length === 0 && (
+                    <Card style={{ borderRadius: 14, border: 'none', background: cardBg, textAlign: 'center', padding: 32 }}>
+                      <Text type="secondary">No items found</Text>
+                    </Card>
+                  )}
+
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                    {allGroupKeys.map((cat) => {
+                      const items = grouped[cat];
+                      const okCount = items.filter(i => i.status === 'OK').length;
+                      const lowCount = items.filter(i => i.status === 'Low').length;
+                      const outCount = items.filter(i => i.status === 'Out').length;
+                      const isExpanded = expandedCategory === cat || (invSearch && items.length > 0);
+
+                      return (
+                        <div key={cat} style={{ borderRadius: 14, overflow: 'hidden', border: `1px solid ${isExpanded ? '#B11E6A44' : borderColor}`, background: cardBg, boxShadow: isExpanded ? '0 4px 20px rgba(177,30,106,0.10)' : '0 2px 8px rgba(0,0,0,0.04)', transition: 'all 0.2s' }}>
+                          {/* Category header — click to expand */}
+                          <div
+                            onClick={() => setExpandedCategory(expandedCategory === cat ? null : cat)}
+                            style={{ padding: '14px 20px', display: 'flex', alignItems: 'center', gap: 14, cursor: 'pointer', background: isExpanded ? (isDark ? 'rgba(177,30,106,0.12)' : 'rgba(177,30,106,0.05)') : 'transparent', borderBottom: isExpanded ? `1px solid ${borderColor}` : 'none', transition: 'background 0.2s' }}
+                          >
+                            {/* Category icon circle */}
+                            <div style={{ width: 44, height: 44, borderRadius: '50%', background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                              <ShoppingOutlined style={{ color: '#fff', fontSize: 18 }} />
+                            </div>
+
+                            <div style={{ flex: 1 }}>
+                              <Text strong style={{ fontSize: 15, color: textColor, display: 'block' }}>{cat}</Text>
+                              <Text type="secondary" style={{ fontSize: 12 }}>{items.length} item{items.length !== 1 ? 's' : ''}</Text>
+                            </div>
+
+                            {/* Status chips */}
+                            <Space wrap size={6}>
+                              {okCount > 0 && <Tag style={{ borderRadius: 20, fontSize: 11, background: '#B11E6A15', color: '#B11E6A', border: '1px solid #B11E6A33', margin: 0 }}>OK: {okCount}</Tag>}
+                              {lowCount > 0 && <Tag style={{ borderRadius: 20, fontSize: 11, background: '#fa8c1615', color: '#fa8c16', border: '1px solid #fa8c1633', margin: 0 }} icon={<WarningOutlined />}>Low: {lowCount}</Tag>}
+                              {outCount > 0 && <Tag style={{ borderRadius: 20, fontSize: 11, background: '#ff4d4f15', color: '#ff4d4f', border: '1px solid #ff4d4f33', margin: 0 }}>Out: {outCount}</Tag>}
+                            </Space>
+
+                            {/* Expand chevron */}
+                            <div style={{ fontSize: 16, color: '#B11E6A', transform: isExpanded ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.2s' }}>▾</div>
+                          </div>
+
+                          {/* Expanded items table */}
+                          {isExpanded && (
+                            <div className="table-responsive" style={{ padding: '4px' }}>
+                              <Table
+                                dataSource={items}
+                                columns={columns}
+                                pagination={{ showSizeChanger: true, pageSizeOptions: ['10', '20', '50', '100'], defaultPageSize: 10, size: 'small' }}
+                                size="small"
+                                onRow={(record) => ({
+                                  onClick: () => setDetailItem(record),
+                                  style: { cursor: 'pointer' },
+                                })}
+                              />
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })(),
+          },
+
+          /* ── Tab 2: Bulk Items — Bulk Raw Material only; Filled/Packed items are
+             sellable stock and live in Stock Inventory instead. Has its own Add button
+             so Bulk creation never mingles with the plain "Add Item" (Standard-only) flow. ── */
+          {
+            key: 'bulk',
+            label: <Space><ContainerOutlined />Bulk Items</Space>,
+            children: (
+              <div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, flexWrap: 'wrap', gap: 8 }}>
+                  <div>
+                    <Text strong style={{ color: textColor, fontSize: 15 }}>Bulk Raw Materials</Text>
+                    <div><Text type="secondary" style={{ fontSize: 12 }}>Liquid/powder stock tracked in Litres/Kg — the pool Filled/Packed items are packed from via Fill Stock.</Text></div>
+                  </div>
+                  <Button type="primary" icon={<PlusOutlined />}
+                    style={{ background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none' }}
+                    onClick={openAddBulkItem}>
+                    Add Bulk / Filled Item
+                  </Button>
+                </div>
+                <Card style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }} styles={{ body: { padding: 16 } }}>
+                  <div className="table-responsive">
+                    <Table
+                      dataSource={bulkItems}
+                      columns={columns}
+                      pagination={{ showSizeChanger: true, pageSizeOptions: ['10', '20', '50', '100'], defaultPageSize: 10, size: 'small' }}
+                      size="small"
+                      locale={{ emptyText: 'No Bulk Raw Material items yet. Click "Add Bulk / Filled Item" to create one.' }}
+                      onRow={(record) => ({ onClick: () => setDetailItem(record), style: { cursor: 'pointer' } })}
+                    />
+                  </div>
+                </Card>
+              </div>
+            ),
+          },
+
+          /* ── Tab 3: Approvals ── */
+          {
+            key: 'approvals',
+            label: <Space><SafetyCertificateOutlined /> Approvals <Tag color="orange" style={{ borderRadius: 10, marginLeft: 4 }}>{pendingAdjustments.filter(a => a.status === 'Pending').length}</Tag></Space>,
+            children: (
+              <Card style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }} styles={{ body: { padding: 16 } }}>
+                <div style={{ marginBottom: 16 }}>
+                  <Title level={5} style={{ margin: 0, color: textColor }}>Operation Head Approval Center</Title>
+                  <Text type="secondary">Review and approve manual stock adjustments (+ / -)</Text>
+                </div>
+                <div style={{ marginBottom: 12, display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                  <Input prefix={<SearchOutlined style={{ color: '#B11E6A' }} />} placeholder="Search item or person..." allowClear value={approvalSearch} onChange={(e) => setApprovalSearch(e.target.value)} style={{ width: 220, borderRadius: 8 }} />
+                  <Select allowClear placeholder="Type" value={approvalType} onChange={setApprovalType} style={{ width: 140, borderRadius: 8 }}>
+                    <Option value="Addition">Addition</Option>
+                    <Option value="Deduction">Deduction</Option>
+                  </Select>
+                  <Select allowClear placeholder="Status" value={approvalStatus} onChange={setApprovalStatus} style={{ width: 140, borderRadius: 8 }}>
+                    <Option value="Pending">Pending</Option>
+                    <Option value="Approved">Approved</Option>
+                    <Option value="Rejected">Rejected</Option>
+                  </Select>
+                  <DatePicker.RangePicker
+                    style={{ borderRadius: 8 }}
+                    onChange={(dates) => setApprovalDateRange(dates ? [dates[0].format('YYYY-MM-DD'), dates[1].format('YYYY-MM-DD')] : null)}
+                    allowClear
+                  />
+                </div>
+                <Table
+                  size="small"
+                  dataSource={filteredApprovals}
+                  columns={[
+                    { title: 'Date', dataIndex: 'date', key: 'date' },
+                    { title: 'Item', dataIndex: 'item', key: 'item', render: (v) => <Text strong>{v}</Text> },
+                    { title: 'Type', dataIndex: 'type', key: 'type', render: (t) => <Tag color={t === 'Addition' ? 'success' : 'error'} icon={t === 'Addition' ? <PlusOutlined /> : <MinusOutlined />} style={{ borderRadius: 12 }}>{t}</Tag> },
+                    { title: 'Qty', dataIndex: 'qty', key: 'qty', render: (q) => <Text strong>{q} units</Text> },
+                    { title: 'Notes', dataIndex: 'notes', key: 'notes', render: (v) => v ? <Text type="secondary" style={{ fontSize: 12 }}>{v}</Text> : <Text type="secondary" style={{ fontSize: 12, fontStyle: 'italic' }}>—</Text> },
+                    { title: 'Requested By', dataIndex: 'person', key: 'person' },
+                    {
+                      title: 'Status', dataIndex: 'status', key: 'status',
+                      render: (s) => <Tag color={s === 'Pending' ? 'orange' : s === 'Approved' ? 'success' : 'error'} icon={s === 'Pending' ? <ClockCircleOutlined /> : s === 'Approved' ? <CheckCircleOutlined /> : <CloseCircleOutlined />}>{s}</Tag>
+                    },
+                    {
+                      title: 'Action', key: 'action',
+                      render: (_, record) => record.status === 'Pending' ? (
+                        <Space>
+                          <Button size="small" type="primary" icon={<CheckOutlined />} onClick={() => handleApproveAdjustment(record)} style={{ background: '#52c41a', border: 'none', color: '#fff' }}>Approve</Button>
+                          <Button size="small" danger ghost icon={<CloseOutlined />} onClick={() => handleRejectAdjustment(record)}>Reject</Button>
+                        </Space>
+                      ) : null
+                    }
+                  ]}
+                  pagination={{ showSizeChanger: true, pageSizeOptions: ['10', '20', '50', '100'], defaultPageSize: 10, size: 'small' }}
+                />
+              </Card>
+            )
+          },
+
+          /* ── Tab 3: Stock History ── */
+          {
+            key: 'history',
+            label: <Space><HistoryOutlined />Stock History</Space>,
+            children: historyItem ? renderItemHistoryScreen() : (
+              <Card style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }} styles={{ body: { padding: 16 } }}>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+                  <Input
+                    prefix={<SearchOutlined style={{ color: '#B11E6A' }} />}
+                    placeholder="Search item, code, category..."
+                    allowClear
+                    value={historyListSearch}
+                    onChange={(e) => setHistoryListSearch(e.target.value)}
+                    style={{ width: 260, borderRadius: 8 }}
+                  />
+                  <Button
+                    icon={<DownloadOutlined />}
+                    type="primary"
+                    style={{ background: '#B11E6A', border: 'none' }}
+                    onClick={() => {
+                      if (exportRowsToCSV(historyItemRows, `stock-history-items-${dayjs().format('YYYY-MM-DD')}.csv`)) {
+                        enqueueSnackbar(`Exported ${historyItemRows.length} item(s) to CSV`, { variant: 'success' });
+                      } else {
+                        enqueueSnackbar('No items to export', { variant: 'warning' });
+                      }
+                    }}
+                  >
+                    Export History
+                  </Button>
+                </div>
+                <Table
+                  size="small"
+                  dataSource={historyItemRows}
+                  onRow={(r) => ({
+                    onClick: () => setHistoryItem({ id: r.itemId, name: r.item }),
+                    style: { cursor: 'pointer' },
+                  })}
+                  columns={[
+                    {
+                      title: 'Item Name', dataIndex: 'item', key: 'item', sorter: (a, b) => a.item.localeCompare(b.item),
+                      render: (v, r) => (
+                        <Space size={4}>
+                          <Text strong style={{ color: '#B11E6A', textDecoration: 'underline', cursor: 'pointer' }}>{v}</Text>
+                          {r.itemType === 'bulk' && <Tag color="blue" style={{ borderRadius: 8, fontSize: 10, margin: 0 }}>Bulk</Tag>}
+                          {r.itemType === 'filled' && <Tag color="purple" style={{ borderRadius: 8, fontSize: 10, margin: 0 }}>Filled</Tag>}
+                        </Space>
+                      ),
+                    },
+                    { title: 'Code', dataIndex: 'code', key: 'code', render: v => <Text style={{ color: '#B11E6A', fontWeight: 600, fontSize: 12 }}>{v}</Text> },
+                    { title: 'Category', dataIndex: 'category', key: 'category', render: v => v ? <Tag style={{ borderRadius: 20, fontSize: 11, background: '#B11E6A22', color: '#B11E6A', border: '1px solid #B11E6A44' }}>{v}</Tag> : <Text type="secondary">—</Text> },
+                    { title: 'Current Stock', key: 'current', render: (_, r) => <Text strong>{formatQty(r.current)} {r.unit}</Text> },
+                  ]}
+                  pagination={{ showSizeChanger: true, pageSizeOptions: ['10', '20', '50', '100'], defaultPageSize: 10, size: 'small' }}
+                />
+              </Card>
+            )
+          },
+
+          /* ── Tab 4: Live Staff Checking ── */
+          {
+            key: 'livecheck',
+            label: (
+              <Space>
+                <AuditOutlined />
+                Live Staff Checking
+                {checkSession.some(i => i.physicalCount !== i.systemCount) && (
+                  <Badge count={checkSession.filter(i => i.physicalCount !== i.systemCount).length} size="small" />
+                )}
+              </Space>
+            ),
+            children: (
+              <div>
+                {/* Info alert */}
+                <Alert
+                  type="info"
+                  showIcon
+                  icon={<InfoCircleOutlined />}
+                  message="Live Stock Checking Instructions"
+                  description="Compare physical inventory against system count. Use + / - buttons or enter the actual physical count. For any missing items, select whether the reason is Known or Unknown. Unknown shortages are auto-reported to Super Admin and Manager. Submit when all items are verified."
+                  style={{ marginBottom: 16, borderRadius: 10 }}
+                />
+
+                {checkSubmitted && (
+                  <Alert
+                    type="success"
+                    showIcon
+                    message="Stock Check Submitted Successfully"
+                    description="All discrepancies have been forwarded to the Approvals tab. Super Admin and Manager have been notified of any unknown shortages."
+                    style={{ marginBottom: 16, borderRadius: 10 }}
+                    closable
+                    onClose={() => setCheckSubmitted(false)}
+                  />
+                )}
+
+                <Card style={{ borderRadius: 14, border: 'none', background: cardBg, boxShadow: '0 4px 20px rgba(177,30,106,0.06)' }} styles={{ body: { padding: 0 } }}>
+                  <div style={{ padding: '12px 16px', borderBottom: `1px solid ${borderColor}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <Space>
+                      <Text strong style={{ color: textColor }}>Physical Count Entry</Text>
+                      <Tag color="blue" style={{ borderRadius: 20 }}>Session: {dayjs().format('DD MMM YYYY')}</Tag>
+                    </Space>
+                    <Button
+                      size="small"
+                      onClick={() => {
+                        setCheckSession(inventoryList.map(i => ({ key: i.key, code: i.code, name: i.name, unit: i.unit, systemCount: i.current, physicalCount: i.current, missingType: null, missingReason: '' })));
+                        setCheckPage(1);
+                      }}
+                      style={{ borderColor: '#B11E6A44', color: '#B11E6A' }}
+                    >
+                      Reset All
+                    </Button>
+                  </div>
+
+                  <Table
+                    dataSource={checkSession}
+                    size="small"
+                    pagination={{
+                      current: checkPage,
+                      pageSize: checkPageSize,
+                      showSizeChanger: true,
+                      pageSizeOptions: ['10', '20', '50', '100'],
+                      size: 'small',
+                      showTotal: (t, [from, to]) => `${from}–${to} of ${t}`,
+                      onChange: (p, size) => {
+                        if (size !== checkPageSize) {
+                          setCheckPageSize(size);
+                          setCheckPage(1);
+                        } else {
+                          setCheckPage(p);
+                        }
+                      },
+                    }}
+                    scroll={{ x: 'max-content' }}
+                    columns={[
+                      {
+                        title: 'Code', dataIndex: 'code', width: 90,
+                        render: v => <Text strong style={{ color: '#B11E6A', fontSize: 12 }}>{v}</Text>
+                      },
+                      {
+                        title: 'Item Name', dataIndex: 'name', width: 200,
+                        render: v => <Text strong style={{ fontSize: 13 }}>{v}</Text>
+                      },
+                      {
+                        title: 'System Count', dataIndex: 'systemCount', width: 120, align: 'center',
+                        render: (v) => <Text strong style={{ color: '#B11E6A' }}>{v} units</Text>
+                      },
+                      {
+                        title: 'Physical Count', width: 180, align: 'center',
+                        render: (_, r) => (
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
+                            <Button
+                              size="small" type="text"
+                              icon={<MinusOutlined style={{ fontSize: 11, color: '#ff4d4f' }} />}
+                              onClick={() => setCheckSession(prev => prev.map(i => i.key === r.key ? { ...i, physicalCount: Math.max(0, i.physicalCount - 1) } : i))}
+                              style={{ border: '1px solid #ff4d4f33', borderRadius: 6, width: 26, height: 26, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                            />
+                            <InputNumber
+                              value={r.physicalCount}
+                              min={0}
+                              onChange={v => setCheckSession(prev => prev.map(i => i.key === r.key ? { ...i, physicalCount: v ?? 0, missingType: (v ?? 0) < i.systemCount ? i.missingType : null, missingReason: (v ?? 0) < i.systemCount ? i.missingReason : '' } : i))}
+                              style={{ width: 72, textAlign: 'center' }}
+                              size="small"
+                              controls={false}
+                            />
+                            <Button
+                              size="small" type="text"
+                              icon={<PlusOutlined style={{ fontSize: 11, color: '#52c41a' }} />}
+                              onClick={() => setCheckSession(prev => prev.map(i => i.key === r.key ? { ...i, physicalCount: i.physicalCount + 1 } : i))}
+                              style={{ border: '1px solid #52c41a33', borderRadius: 6, width: 26, height: 26, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                            />
+                          </div>
+                        )
+                      },
+                      {
+                        title: 'Difference', width: 110, align: 'center',
+                        render: (_, r) => {
+                          const diff = r.physicalCount - r.systemCount;
+                          return (
+                            <Text strong style={{ color: diff < 0 ? '#ff4d4f' : diff > 0 ? '#fa8c16' : '#52c41a', fontSize: 13 }}>
+                              {diff > 0 ? '+' : ''}{diff} units
+                            </Text>
+                          );
+                        }
+                      },
+                      {
+                        title: 'Status', width: 100, align: 'center',
+                        render: (_, r) => {
+                          const diff = r.physicalCount - r.systemCount;
+                          if (diff === 0) return <Tag color="success" style={{ borderRadius: 12 }}>Match</Tag>;
+                          if (diff < 0) return <Tag color="error" style={{ borderRadius: 12 }}>Missing</Tag>;
+                          return <Tag color="warning" style={{ borderRadius: 12 }}>Extra</Tag>;
+                        }
+                      },
+                      {
+                        title: 'Missing Reason',
+                        render: (_, r) => {
+                          const diff = r.physicalCount - r.systemCount;
+                          if (diff >= 0) return <Text type="secondary" style={{ fontSize: 12 }}>—</Text>;
+                          return (
+                            <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                              <Select
+                                placeholder="Select reason type"
+                                value={r.missingType}
+                                onChange={v => setCheckSession(prev => prev.map(i => i.key === r.key ? { ...i, missingType: v, missingReason: '' } : i))}
+                                style={{ width: 180 }}
+                                size="small"
+                              >
+                                <Option value="known">Known Reason</Option>
+                                <Option value="unknown">Unknown</Option>
+                              </Select>
+
+                              {r.missingType === 'known' && (
+                                <Input.TextArea
+                                  placeholder={`Enter reason for ${Math.abs(diff)} units missing...`}
+                                  value={r.missingReason}
+                                  onChange={e => setCheckSession(prev => prev.map(i => i.key === r.key ? { ...i, missingReason: e.target.value } : i))}
+                                  rows={2}
+                                  size="small"
+                                  style={{ width: 240, borderRadius: 6 }}
+                                />
+                              )}
+
+                              {r.missingType === 'unknown' && (
+                                <Alert
+                                  type="warning"
+                                  showIcon
+                                  icon={<ExclamationCircleOutlined />}
+                                  message={<Text strong style={{ fontSize: 12 }}>Unknown Shortage — Will be Reported</Text>}
+                                  description={
+                                    <Text style={{ fontSize: 11 }}>
+                                      {Math.abs(diff)} units of <strong>{r.name}</strong> is unaccounted for.
+                                      This will be automatically reported to <strong>Super Admin</strong> and <strong>Manager</strong> upon submission.
+                                    </Text>
+                                  }
+                                  style={{ borderRadius: 6, fontSize: 11 }}
+                                />
+                              )}
+                            </Space>
+                          );
+                        }
+                      },
+                    ]}
+                  />
+
+                  {/* Summary footer */}
+                  <div style={{ padding: '14px 16px', borderTop: `1px solid ${borderColor}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
+                    <Space wrap>
+                      <Tag color="error" style={{ borderRadius: 20, fontSize: 12 }}>
+                        {checkSession.filter(i => i.physicalCount < i.systemCount).length} Missing
+                      </Tag>
+                      <Tag color="warning" style={{ borderRadius: 20, fontSize: 12 }}>
+                        {checkSession.filter(i => i.physicalCount > i.systemCount).length} Extra
+                      </Tag>
+                      <Tag color="success" style={{ borderRadius: 20, fontSize: 12 }}>
+                        {checkSession.filter(i => i.physicalCount === i.systemCount).length} Matched
+                      </Tag>
+                      {checkSession.some(i => i.physicalCount < i.systemCount && i.missingType === 'unknown') && (
+                        <Tag color="orange" icon={<BellOutlined />} style={{ borderRadius: 20, fontSize: 12 }}>
+                          {checkSession.filter(i => i.physicalCount < i.systemCount && i.missingType === 'unknown').length} Unknown — Will Notify Management
+                        </Tag>
+                      )}
+                    </Space>
+                    <Button
+                      type="primary"
+                      icon={<SafetyCertificateOutlined />}
+                      style={{ background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none', height: 40, paddingInline: 24, fontWeight: 700 }}
+                      onClick={() => setCheckSubmitOpen(true)}
+                      disabled={checkSession.every(i => i.physicalCount === i.systemCount)}
+                    >
+                      Submit for Approval
+                    </Button>
+                  </div>
+                </Card>
+
+                {/* Checked records log — Super Admin / Admin only */}
+                {isSuperOrAdmin && <StockCheckLog />}
+              </div>
+            )
+          },
+          /* ── Tab: Kit ── */
+          {
+            key: 'kit',
+            label: <Space><ContainerOutlined />Kit</Space>,
+            children: (
+              <div>
+                {/* Kit tab header */}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, flexWrap: 'wrap', gap: 8 }}>
+                  <Space>
+                    <Text strong style={{ color: textColor, fontSize: 15 }}>Kits</Text>
+                    <Tag color="magenta" style={{ borderRadius: 20 }}>{kitsList.length}</Tag>
+                  </Space>
+                  <Button type="primary" icon={<PlusOutlined />}
+                    style={{ background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none' }}
+                    onClick={() => openAddKit(null)}>
+                    Add Kit
+                  </Button>
+                </div>
+
+                {kitsList.length === 0 && (
+                  <Card style={{ borderRadius: 14, border: 'none', background: cardBg, textAlign: 'center', padding: 40 }}>
+                    <ContainerOutlined style={{ fontSize: 40, color: '#D85C9E', marginBottom: 12 }} />
+                    <div><Text type="secondary">No kits yet. Click "Add Kit" to create one.</Text></div>
+                  </Card>
+                )}
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {kitsList.map((kit) => {
+                    const isKitExpanded = expandedKit === kit._id;
+                    return (
+                      <div key={kit._id} style={{ borderRadius: 14, overflow: 'hidden', border: `1px solid ${isKitExpanded ? '#B11E6A44' : borderColor}`, background: cardBg, boxShadow: isKitExpanded ? '0 4px 20px rgba(177,30,106,0.10)' : '0 2px 8px rgba(0,0,0,0.04)', transition: 'all 0.2s' }}>
+                        {/* Kit card header — click to expand */}
+                        <div
+                          onClick={() => setExpandedKit(isKitExpanded ? null : kit._id)}
+                          style={{ padding: '14px 20px', display: 'flex', alignItems: 'center', gap: 14, cursor: 'pointer', background: isKitExpanded ? (isDark ? 'rgba(177,30,106,0.12)' : 'rgba(177,30,106,0.05)') : 'transparent', borderBottom: isKitExpanded ? `1px solid ${borderColor}` : 'none', transition: 'background 0.2s' }}
+                        >
+                          {/* Kit icon */}
+                          <div style={{ width: 44, height: 44, borderRadius: 12, background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                            <ContainerOutlined style={{ color: '#fff', fontSize: 18 }} />
+                          </div>
+
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <Space align="center" size={8}>
+                              <Text strong style={{ fontSize: 15, color: textColor }}>{kit.kitName}</Text>
+                              {kit.kitCode && <Tag style={{ borderRadius: 20, fontSize: 10, background: '#B11E6A15', color: '#B11E6A', border: '1px solid #B11E6A33' }}>{kit.kitCode}</Tag>}
+                            </Space>
+                            <div style={{ marginTop: 2 }}>
+                              <Text type="secondary" style={{ fontSize: 12 }}>
+                                {(kit.products || []).length} product{(kit.products || []).length !== 1 ? 's' : ''}
+                                {kit.displayUnit ? ` · ${kit.displayUnit.replace(/_/g, ' ')}` : ''}
+                                {kit.size ? ` · ${kit.size}` : ''}
+                              </Text>
+                            </div>
+                          </div>
+
+                          {/* Product count chip */}
+                          <Tag style={{ borderRadius: 20, fontSize: 12, background: '#B11E6A12', color: '#B11E6A', border: '1px solid #B11E6A33', padding: '2px 12px' }}>
+                            {(kit.products || []).length} items
+                          </Tag>
+
+                          {/* Actions */}
+                          <Space onClick={(e) => e.stopPropagation()}>
+                            <Button type="text" size="small" icon={<EyeOutlined />} style={{ color: '#B11E6A' }} onClick={() => openAddKit(kit)} />
+                            {canDelete && (
+                              <Button type="text" size="small" danger icon={<CloseOutlined />} onClick={() => handleDeleteKit(kit)} />
+                            )}
+                          </Space>
+
+                          {/* Chevron */}
+                          <div style={{ fontSize: 16, color: '#B11E6A', transform: isKitExpanded ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.2s' }}>▾</div>
+                        </div>
+
+                        {/* Expanded: kit products table */}
+                        {isKitExpanded && (
+                          <div style={{ padding: '12px 16px 16px' }}>
+                            {(kit.products || []).length === 0 ? (
+                              <Text type="secondary" style={{ fontSize: 13 }}>No products in this kit yet.</Text>
+                            ) : (
+                              <Table
+                                dataSource={(kit.products || []).map((p, i) => ({ key: i, ...p }))}
+                                size="small"
+                                pagination={false}
+                                columns={[
+                                  {
+                                    title: '#', key: 'idx', width: 40,
+                                    render: (_, __, i) => (
+                                      <div style={{ width: 24, height: 24, borderRadius: '50%', background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                                        <Text style={{ color: '#fff', fontSize: 11, fontWeight: 700 }}>{i + 1}</Text>
+                                      </div>
+                                    ),
+                                  },
+                                  { title: 'Product Name', dataIndex: 'productName', render: v => <Text strong style={{ color: textColor }}>{v}</Text> },
+                                  { title: 'Qty', dataIndex: 'qty', width: 80, render: v => <Text strong style={{ color: '#B11E6A' }}>{v}</Text> },
+                                  { title: 'Rate (₹)', key: 'rate', width: 100, render: (_, p) => { const v = p.purchasePrice ?? p.rate; return v != null && v !== 0 ? `₹${formatRate(Number(v)).toLocaleString()}` : '—'; } },
+                                  { title: 'Unit', dataIndex: 'unit', width: 80, render: v => v || '—' },
+                                  { title: 'Product Spec', key: 'spec', render: (_, p) => renderAttrTags(p.productAttributes && Object.keys(p.productAttributes).length ? p.productAttributes : invAttrsByName[p.productName], 220) },
+                                ]}
+                                style={{ borderRadius: 10, overflow: 'hidden' }}
+                              />
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )
+          },
+
+          /* ── Tab: Material Stocks ── */
+          {
+            key: 'material_stocks',
+            label: <Space><ContainerOutlined />Material Stocks</Space>,
+            children: (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                <Card
+                  style={{ borderRadius: 14, border: `1px solid ${borderColor}`, background: cardBg }}
+                  styles={{ body: { padding: '16px 20px' } }}
+                  title={
+                    <Space>
+                      <ContainerOutlined style={{ color: '#B11E6A' }} />
+                      <Text strong style={{ color: textColor }}>Packing Material Stocks</Text>
+                      <Tag color="geekblue" style={{ borderRadius: 20 }}>{filteredMaterialStocks.length}</Tag>
+                    </Space>
+                  }
+                  extra={
+                    <Space size={8}>
+                      <Input
+                        placeholder="Search material, size, vendor, hotel…"
+                        prefix={<SearchOutlined style={{ color: '#aaa' }} />}
+                        value={materialStockSearch}
+                        onChange={e => setMaterialStockSearch(e.target.value)}
+                        allowClear
+                        style={{ width: 220, borderRadius: 8, height: 34 }}
+                      />
+                      <DatePicker.RangePicker
+                        style={{ borderRadius: 8, height: 34 }}
+                        onChange={(dates) => setMaterialStockDateRange(dates ? [dates[0].format('YYYY-MM-DD'), dates[1].format('YYYY-MM-DD')] : null)}
+                        allowClear
+                      />
+                      <Button
+                        type="primary" icon={<PlusOutlined />}
+                        style={{ background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none', borderRadius: 8 }}
+                        onClick={() => openMaterialStockModal()}
+                      >
+                        Add Purchase
+                      </Button>
+                    </Space>
+                  }
+                >
+                  <Table
+                    size="small"
+                    dataSource={filteredMaterialStocks.map(s => ({ ...s, key: s._id }))}
+                    pagination={{ pageSize: 10, showSizeChanger: false }}
+                    style={{ borderRadius: 10, overflow: 'hidden' }}
+                    columns={[
+                      {
+                        title: 'Code',
+                        dataIndex: 'materialCode',
+                        render: v => v ? <Tag color="purple" style={{ borderRadius: 10 }}>{v}</Tag> : <Text type="secondary">—</Text>,
+                      },
+                      {
+                        title: 'Packing Material',
+                        dataIndex: 'packingMaterial',
+                        render: v => <Text strong style={{ color: textColor }}>{v}</Text>,
+                      },
+                      {
+                        title: 'Packing Size',
+                        dataIndex: 'size',
+                        render: v => v ? <Tag color="geekblue" style={{ borderRadius: 10 }}>{v}</Tag> : <Text type="secondary">—</Text>,
+                      },
+                      {
+                        title: 'Stock Count',
+                        dataIndex: 'stockCount',
+                        align: 'right',
+                        render: v => <Text strong style={{ color: v === 0 ? '#ff4d4f' : '#389e0d', fontSize: 14 }}>{v ?? 0}</Text>,
+                      },
+                      {
+                        title: 'Purchase Date',
+                        dataIndex: 'purchaseDate',
+                        render: v => v ? dayjs(v).format('DD MMM YYYY') : '—',
+                      },
+                      {
+                        title: 'Vendor',
+                        dataIndex: 'vendor',
+                        render: v => v || <Text type="secondary">—</Text>,
+                      },
+                      {
+                        title: 'Hotel / Hospital',
+                        dataIndex: 'hotelName',
+                        render: (v, row) => v
+                          ? <Space size={4}><Tag color={row.category === 'Hospital' ? 'purple' : 'blue'} style={{ margin: 0 }}>{row.category || 'Hotel'}</Tag><Text>{v}</Text></Space>
+                          : <Text type="secondary">— general —</Text>,
+                      },
+                      {
+                        title: 'Invoice',
+                        dataIndex: 'invoiceFile',
+                        render: (inv) => {
+                          if (!inv?.url) return <Text type="secondary" style={{ fontSize: 11 }}>—</Text>;
+                          return (
+                            <Button
+                              type="link"
+                              size="small"
+                              icon={<DownloadOutlined style={{ fontSize: 12 }} />}
+                              style={{ fontSize: 12, color: '#1890ff', padding: 0, height: 'auto' }}
+                              onClick={() => downloadFile(inv.url, inv.name || 'invoice')}
+                            >
+                              Save
+                            </Button>
+                          );
+                        },
+                      },
+                      {
+                        title: 'Action', key: 'action', width: 90,
+                        render: (_, row) => (
+                          <Space size={6}>
+                            <Button size="small" icon={<EditOutlined />} onClick={() => openMaterialStockModal(row)} />
+                            {canDelete && (
+                              <Button size="small" danger icon={<DeleteOutlined />} onClick={() => handleDeleteMaterialStock(row._id)} />
+                            )}
+                          </Space>
+                        ),
+                      },
+                    ]}
+                  />
+                  {filteredMaterialStocks.length === 0 && (
+                    <div style={{ textAlign: 'center', padding: '24px 0' }}>
+                      <Text type="secondary">No material stocks found. Click "Add Purchase" to record a new packing material purchase.</Text>
+                    </div>
+                  )}
+                </Card>
+              </div>
+            ),
+          },
+
+          /* ── Tab: Packing Material Configuration ── */
+          {
+            key: 'packing_config',
+            label: <Space><SettingOutlined />Packing Config</Space>,
+            children: (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+
+                {/* Display Units */}
+                <Card
+                  style={{ borderRadius: 14, border: `1px solid ${borderColor}`, background: cardBg }}
+                  styles={{ body: { padding: '16px 20px' } }}
+                  title={
+                    <Space>
+                      <TagOutlined style={{ color: '#B11E6A' }} />
+                      <Text strong style={{ color: textColor }}>Display Units</Text>
+                      <Tag color="geekblue" style={{ borderRadius: 20 }}>{displayUnits.length}</Tag>
+                    </Space>
+                  }
+                  extra={
+                    <Button
+                      type="primary" size="small" icon={<PlusOutlined />}
+                      style={{ background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none' }}
+                      onClick={() => openPackingConfigModal('displayUnit')}
+                    >
+                      Add Display Unit
+                    </Button>
+                  }
+                >
+                  <Table
+                    size="small"
+                    dataSource={displayUnits.map(d => ({ ...d, key: d._id }))}
+                    pagination={false}
+                    style={{ borderRadius: 10, overflow: 'hidden' }}
+                    expandable={{
+                      expandedRowRender: row => (
+                        <div style={{ padding: '8px 12px' }}>
+                          {(row.subtypes || []).length === 0 ? (
+                            <Text type="secondary" style={{ fontSize: 12 }}>No types configured for this display unit.</Text>
+                          ) : (
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                              {(row.subtypes || []).map((s, i) => (
+                                <div key={i} style={{ background: 'rgba(177,30,106,0.04)', border: '1px solid rgba(177,30,106,0.15)', borderRadius: 8, padding: '6px 12px', minWidth: 180 }}>
+                                  <Text strong style={{ fontSize: 12, color: '#B11E6A', display: 'block' }}>{s.label}{s.size ? <Text type="secondary" style={{ fontSize: 11, fontWeight: 400, marginLeft: 6 }}>({s.size})</Text> : null}</Text>
+                                  <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 4 }}>
+                                    {s.sticker && <Tag color={s.sticker === 'YES' ? 'green' : 'red'} style={{ fontSize: 10, borderRadius: 10, margin: 0 }}>Sticker: {s.sticker}</Tag>}
+                                    {s.logo && <Tag color={s.logo === 'YES' ? 'green' : 'red'} style={{ fontSize: 10, borderRadius: 10, margin: 0 }}>Logo: {s.logo}</Tag>}
+                                    {s.printing && <Tag color={s.printing === 'YES' ? 'green' : 'red'} style={{ fontSize: 10, borderRadius: 10, margin: 0 }}>Printing: {s.printing}</Tag>}
+                                    {s.lamination && <Tag color={s.lamination === 'YES' ? 'blue' : 'default'} style={{ fontSize: 10, borderRadius: 10, margin: 0 }}>Lamination: {s.lamination}</Tag>}
+                                  </div>
+                                  <div style={{ marginTop: 4, fontSize: 11, color: '#555' }}>
+                                    Purchase: <b>₹{formatRate(s.purchasePrice || 0)}</b> &nbsp;|&nbsp; Margin: <b>₹{formatRate(s.marginAmount || 0)}</b> &nbsp;|&nbsp; Selling: <b style={{ color: '#722ed1' }}>₹{formatRate(s.sellingPrice || 0)}</b>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      ),
+                      rowExpandable: () => true,
+                    }}
+                    columns={[
+                      { title: 'Label', dataIndex: 'label', render: v => <Text strong style={{ color: textColor }}>{v}</Text> },
+                      { title: 'Value', dataIndex: 'value', render: v => <Tag style={{ borderRadius: 12 }}>{v}</Tag> },
+                      {
+                        title: 'Operations Tab',
+                        dataIndex: 'tabMapping',
+                        render: v => v
+                          ? <Tag color={v === 'Box' ? 'blue' : v === 'Ziplock' ? 'cyan' : v === 'Butter Paper' ? 'gold' : v === 'Wooden Brush' ? 'volcano' : 'purple'} style={{ borderRadius: 12 }}>{v}</Tag>
+                          : <Text type="secondary">—</Text>,
+                      },
+                      {
+                        title: 'Types',
+                        dataIndex: 'subtypes',
+                        render: v => <Tag color="geekblue" style={{ borderRadius: 10 }}>{(v || []).length} type{(v || []).length !== 1 ? 's' : ''}</Tag>,
+                      },
+                      {
+                        title: 'Action', key: 'action', width: 100,
+                        render: (_, row) => (
+                          <Space size={6}>
+                            <Button size="small" icon={<EditOutlined />} onClick={() => openPackingConfigModal('displayUnit', row)} />
+                            {canDelete && (
+                              <Button
+                                size="small" danger icon={<DeleteOutlined />}
+                                onClick={() => handleDeletePackingConfig(row._id)}
+                              />
+                            )}
+                          </Space>
+                        ),
+                      },
+                    ]}
+                  />
+                  {displayUnits.length === 0 && (
+                    <div style={{ textAlign: 'center', padding: '24px 0' }}>
+                      <Text type="secondary">No display units configured. Click "Add Display Unit" to start.</Text>
+                    </div>
+                  )}
+                </Card>
+
+              </div>
+            ),
+          },
+          /* ─────────── DAMAGED REPORT ─────────── */
+          {
+            key: 'damaged_report',
+            label: 'Damaged Report',
+            children: <DamagedReport />,
+          },
+        ])}
+        activeKey={activeKeyFor(activeInvTab)}
+      />
+
+      {/* ═══════════════════════════════════════
+          MATERIAL STOCK ADD / EDIT MODAL
+      ═══════════════════════════════════════ */}
+      <Modal
+        open={materialStockModal}
+        title={
+          <Space>
+            <ContainerOutlined style={{ color: '#B11E6A' }} />
+            <span style={{ fontWeight: 700 }}>{editingMaterialStock ? 'Edit Material Stock' : 'Add Packing Material Purchase'}</span>
+          </Space>
+        }
+        onCancel={() => { setMaterialStockModal(false); setEditingMaterialStock(null); setMaterialStockInvoiceFile(null); }}
+        onOk={handleSaveMaterialStock}
+        okText={editingMaterialStock ? 'Update' : 'Add'}
+        okButtonProps={{ style: { background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none' }, loading: materialStockInvoiceUploading }}
+        width={520}
+        destroyOnClose
+      >
+        <Form form={materialStockForm} layout="vertical" style={{ marginTop: 12 }}>
+          <Row gutter={12}>
+            <Col span={14}>
+              <Form.Item label="Packing Material" name="packingMaterial" rules={[{ required: true, message: 'Enter material name' }]}>
+                <Input placeholder="e.g. Bottles, Boxes, Pouches, Caps…" style={{ borderRadius: 8 }} />
+              </Form.Item>
+            </Col>
+            <Col span={10}>
+              <Form.Item label="Packing Size" name="size" tooltip="The packing material's physical dimensions — matched against the order line's Packing Size (or Sticker Size when Sticker = Yes).">
+                <Input placeholder="e.g. 2.3 cm x 2.6 cm" style={{ borderRadius: 8 }} />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Row gutter={12}>
+            <Col span={12}>
+              <Form.Item label="Stock Count" name="stockCount" rules={[{ required: true, message: 'Enter stock count' }]}>
+                <InputNumber min={0} style={{ width: '100%', borderRadius: 8 }} placeholder="0" />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item label="Min Stock" name="minStock" tooltip="Trigger a Low Stock Alert to Inventory/Purchase once stock falls below this after an order deduction. Leave 0 to disable.">
+                <InputNumber min={0} style={{ width: '100%', borderRadius: 8 }} placeholder="0" />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item label="Purchase Date" name="purchaseDate">
+            <DatePicker style={{ width: '100%', borderRadius: 8 }} />
+          </Form.Item>
+          <Form.Item label="Vendor / Supplier" name="vendor">
+            <Select
+              showSearch
+              allowClear
+              optionFilterProp="label"
+              placeholder="Select vendor / supplier"
+              style={{ borderRadius: 8 }}
+              options={materialStockVendorOptions}
+              notFoundContent={<span style={{ fontSize: 12, color: '#aaa' }}>No vendors or suppliers yet — add one in Vendors & Suppliers</span>}
+            />
+          </Form.Item>
+          <Row gutter={12}>
+            <Col span={9}>
+              <Form.Item label="Category" name="category" tooltip="Filters the name list below. Pick the category first.">
+                <Select
+                  placeholder="Category"
+                  style={{ borderRadius: 8 }}
+                  options={materialStockCategoryOptions}
+                  onChange={() => materialStockForm.setFieldsValue({ hotelName: undefined })}
+                />
+              </Form.Item>
+            </Col>
+            <Col span={15}>
+              <Form.Item
+                label={`${watchedMsCategory === 'Hotel' ? 'Hotel' : watchedMsCategory} Name`}
+                name="hotelName"
+                tooltip="Leave blank for general stock. Choosing a name RESERVES this stock for that hotel/hospital — it is never auto-deducted, only drawn via Operations > “Use Existing”."
+              >
+                <Select
+                  showSearch
+                  allowClear
+                  optionFilterProp="label"
+                  placeholder={`Select a ${(watchedMsCategory || 'hotel').toLowerCase()} (or leave blank)`}
+                  style={{ borderRadius: 8 }}
+                  options={materialStockHotelOptions}
+                  notFoundContent={<span style={{ fontSize: 12, color: '#aaa' }}>No {String(watchedMsCategory || 'hotel').toLowerCase()} names found for this category yet</span>}
+                />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item label="Notes" name="notes">
+            <Input.TextArea rows={2} placeholder="Optional notes…" style={{ borderRadius: 8 }} />
+          </Form.Item>
+          <Form.Item label="Upload Invoice (optional)">
+            <Upload
+              maxCount={1}
+              accept=".jpg,.jpeg,.png,.pdf,.svg"
+              beforeUpload={(file) => { setMaterialStockInvoiceFile(file); return false; }}
+              onRemove={() => setMaterialStockInvoiceFile(null)}
+              fileList={materialStockInvoiceFile ? [materialStockInvoiceFile] : []}
+            >
+              <Button icon={<UploadOutlined />} style={{ borderRadius: 8 }}>Choose Invoice File</Button>
+            </Upload>
+            {editingMaterialStock?.invoiceFile?.url && !materialStockInvoiceFile && (
+              <div style={{ marginTop: 6 }}>
+                <Text type="secondary" style={{ fontSize: 12 }}>Current invoice: </Text>
+                <Button type="link" size="small" icon={<DownloadOutlined style={{ fontSize: 12 }} />}
+                  style={{ fontSize: 12, padding: 0, height: 'auto' }}
+                  onClick={() => downloadFile(editingMaterialStock.invoiceFile.url, editingMaterialStock.invoiceFile.name || 'invoice')}>
+                  Save
+                </Button>
+              </div>
+            )}
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      {/* ═══════════════════════════════════════
+          PACKING CONFIG ADD / EDIT MODAL
+      ═══════════════════════════════════════ */}
+      <Modal
+        open={packingConfigModal}
+        title={
+          <Space>
+            <SettingOutlined style={{ color: '#B11E6A' }} />
+            <span style={{ fontWeight: 700 }}>
+              {editingPackingConfig ? 'Edit' : 'Add'} Display Unit
+            </span>
+          </Space>
+        }
+        onCancel={() => { setPackingConfigModal(false); setEditingPackingConfig(null); }}
+        onOk={handleSavePackingConfig}
+        okText={editingPackingConfig ? 'Update' : 'Add'}
+        width={660}
+        okButtonProps={{ style: { background: '#B11E6A', border: 'none' } }}
+        styles={{ body: { maxHeight: '70vh', overflowY: 'auto', paddingRight: 4 } }}
+      >
+        <Form form={packingConfigForm} layout="vertical" style={{ marginTop: 16 }}>
+          <Row gutter={12}>
+            <Col xs={24} sm={12}>
+              <Form.Item label="Label" name="label" rules={[{ required: true, message: 'Label is required' }]}>
+                <Input placeholder="e.g. Box" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} sm={12}>
+              <Form.Item label="Value" name="value" rules={[{ required: true, message: 'Value is required' }]}>
+                <Input placeholder="e.g. BOX" />
+              </Form.Item>
+            </Col>
+          </Row>
+          {packingConfigType === 'displayUnit' && (
+            <Form.Item
+              label="Operations Tab Mapping"
+              name="tabMapping"
+              tooltip="Which Operations tab orders using this display unit appear in"
+            >
+              <Select allowClear placeholder="Select tab (optional)">
+                <Option value="Sticker">Sticker</Option>
+                <Option value="Box">Box</Option>
+                <Option value="Ziplock">Ziplock (Frosted)</Option>
+                <Option value="Butter Paper">Butter Paper</Option>
+                <Option value="Wooden Brush">Wooden Brush</Option>
+                <Option value="Other">Other</Option>
+              </Select>
+            </Form.Item>
+          )}
+
+          <Divider style={{ margin: '8px 0 12px' }}>
+            <Text style={{ fontSize: 12, color: '#B11E6A', fontWeight: 600 }}>Types &amp; Pricing</Text>
+          </Divider>
+          <Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 10 }}>
+            Add sub-types for this display unit (e.g. "Small Box", "Large Box") with their sticker/logo/printing options and pricing.
+          </Text>
+
+          <Form.List name="subtypes">
+            {(fields, { add, remove }) => (
+              <>
+                {fields.map(({ key, name }) => (
+                  <div key={key} style={{ background: 'rgba(177,30,106,0.03)', border: '1px solid rgba(177,30,106,0.15)', borderRadius: 10, padding: '10px 12px', marginBottom: 10 }}>
+                    <Row gutter={8} align="middle" style={{ marginBottom: 8 }}>
+                      <Col flex="1">
+                        <Form.Item name={[name, 'label']} rules={[{ required: true, message: 'Type label required' }]} style={{ marginBottom: 0 }}>
+                          <Input size="small" placeholder="Type label (e.g. Small Box)" style={{ fontWeight: 600 }} />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={10} sm={8}>
+                        <Form.Item name={[name, 'size']} style={{ marginBottom: 0 }}>
+                          <Input size="small" placeholder="Size (e.g. 2.5×2.5cm)" />
+                        </Form.Item>
+                      </Col>
+                      <Col>
+                        <Button type="text" danger size="small" icon={<MinusOutlined />} onClick={() => remove(name)} />
+                      </Col>
+                    </Row>
+                    <Form.Item noStyle shouldUpdate={(p, c) => p.label !== c.label || p.tabMapping !== c.tabMapping}>
+                      {({ getFieldValue }) => {
+                        const lbl = getFieldValue('label') || '';
+                        const tab = getFieldValue('tabMapping');
+                        const isBox = lbl.toLowerCase().includes('box') || tab === 'Box';
+                        const colSpan = isBox ? 6 : 8;
+                        return (
+                          <Row gutter={8}>
+                            <Col xs={colSpan}>
+                              <Form.Item name={[name, 'sticker']} label="Sticker" style={{ marginBottom: 6 }}>
+                                <Select size="small" allowClear placeholder="—" options={[{ value: 'YES', label: 'Yes' }, { value: 'NO', label: 'No' }]} />
+                              </Form.Item>
+                            </Col>
+                            <Col xs={colSpan}>
+                              <Form.Item name={[name, 'logo']} label="Logo" style={{ marginBottom: 6 }}>
+                                <Select size="small" allowClear placeholder="—" options={[{ value: 'YES', label: 'Yes' }, { value: 'NO', label: 'No' }]} />
+                              </Form.Item>
+                            </Col>
+                            <Col xs={colSpan}>
+                              <Form.Item name={[name, 'printing']} label="Printing" style={{ marginBottom: 6 }}>
+                                <Select size="small" allowClear placeholder="—" options={[{ value: 'YES', label: 'Yes' }, { value: 'NO', label: 'No' }]} />
+                              </Form.Item>
+                            </Col>
+                            {isBox && (
+                              <Col xs={6}>
+                                <Form.Item name={[name, 'lamination']} label="Lamination" style={{ marginBottom: 6 }}>
+                                  <Select size="small" allowClear placeholder="—" options={[{ value: 'YES', label: 'Yes' }, { value: 'NO', label: 'No' }]} />
+                                </Form.Item>
+                              </Col>
+                            )}
+                          </Row>
+                        );
+                      }}
+                    </Form.Item>
+                    <Row gutter={8}>
+                      <Col xs={8}>
+                        <Form.Item name={[name, 'purchasePrice']} label="Purchase Price (₹)" style={{ marginBottom: 0 }}>
+                          <InputNumber size="small" min={0} style={{ width: '100%' }} placeholder="0" />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={8}>
+                        <Form.Item name={[name, 'marginAmount']} label="Limitations" style={{ marginBottom: 0 }}>
+                          <InputNumber size="small" min={0} style={{ width: '100%' }} placeholder="0" />
+                        </Form.Item>
+                      </Col>
+                      <Col xs={8}>
+                        <Form.Item name={[name, 'sellingPrice']} label="Selling Price (₹)" style={{ marginBottom: 0 }}>
+                          <InputNumber size="small" min={0} style={{ width: '100%' }} placeholder="0" />
+                        </Form.Item>
+                      </Col>
+                    </Row>
+                  </div>
+                ))}
+                <Button
+                  type="dashed" size="small" icon={<PlusOutlined />}
+                  onClick={() => add({ label: '', sticker: '', logo: '', printing: '', lamination: '', purchasePrice: 0, marginAmount: 0, sellingPrice: 0 })}
+                  block
+                  style={{ borderColor: '#B11E6A55', color: '#B11E6A' }}
+                >
+                  Add Type
+                </Button>
+              </>
+            )}
+          </Form.List>
+        </Form>
+      </Modal>
+
+      {/* ═══════════════════════════════════════
+          KIT ADD / EDIT MODAL
+      ═══════════════════════════════════════ */}
+      <Modal
+        open={kitModal}
+        title={editingKit ? 'Edit Kit' : 'Add Kit'}
+        onCancel={() => { setKitModal(false); setEditingKit(null); }}
+        onOk={handleSaveKit}
+        okText={editingKit ? 'Update Kit' : 'Add Kit'}
+        width={Math.min(780, window.innerWidth - 24)}
+        okButtonProps={{ style: { background: '#B11E6A', border: 'none' } }}
+        styles={{ body: { padding: '16px 24px' } }}
+        afterOpenChange={(open) => { if (open) initKitForm(editingKit); }}
+      >
+        <Form form={kitForm} layout="vertical">
+          {/* Kit header fields */}
+          <Row gutter={12}>
+            <Col xs={24} sm={8}>
+              <Form.Item label="Kit Name" name="kitName" rules={[{ required: true, message: 'Kit name required' }]}>
+                <Input placeholder="e.g. Dental Kit A" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} sm={8}>
+              <Form.Item label="Size" name="size">
+                <Input placeholder="e.g. 2.5cm x 2.5cm" />
+              </Form.Item>
+            </Col>
+          </Row>
+
+          <Divider style={{ margin: '4px 0 12px' }}>Products in this Kit</Divider>
+
+          {/* Product cards — same fields as Add Item */}
+          <Form.List name="products">
+            {(fields, { add, remove }) => (
+              <>
+                {fields.map((field, idx) => (
+                  <div
+                    key={field.key}
+                    style={{ marginBottom: 14, border: '1px solid rgba(177,30,106,0.15)', borderRadius: 12, overflow: 'hidden', background: isDark ? '#1a1a2e' : '#fff' }}
+                  >
+                    {/* Product card header */}
+                    <div style={{ background: isDark ? 'rgba(177,30,106,0.10)' : 'rgba(177,30,106,0.04)', padding: '8px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid rgba(177,30,106,0.10)' }}>
+                      <Space>
+                        <div style={{ width: 22, height: 22, borderRadius: '50%', background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                          <Text style={{ color: '#fff', fontSize: 10, fontWeight: 700 }}>{idx + 1}</Text>
+                        </div>
+                        <Text strong style={{ fontSize: 13, color: isDark ? '#e0e0e0' : '#1a1a2e' }}>Product {idx + 1}</Text>
+                      </Space>
+                      <Button type="text" danger size="small" icon={<MinusOutlined />} onClick={() => remove(field.name)} />
+                    </div>
+
+                    {/* Visible: Product Name + Qty only. All detail fields hidden but preserved in form state for the save payload. */}
+                    <div style={{ padding: '12px 14px' }}>
+                      <Row gutter={[12, 0]} align="bottom">
+                        <Col xs={16} sm={18}>
+                          <Form.Item {...field} label="Product Name" name={[field.name, 'productName']} rules={[{ required: true, message: 'Required' }]}>
+                            <Select
+                              showSearch
+                              optionFilterProp="label"
+                              placeholder="Select from inventory"
+                              style={{ width: '100%' }}
+                              options={inventoryList.filter((i) => i.itemType !== 'bulk').map((i) => ({
+                                value: i.key,
+                                label: dupeInventoryNames.has(i.name) ? `${i.name} (${i.code || ''})` : i.name,
+                              }))}
+                              onChange={(selectedKey) => {
+                                const item = inventoryList.find((i) => i.key === selectedKey);
+                                if (!item) return;
+                                kitForm.setFields([
+                                  { name: ['products', field.name, 'category'], value: item.category || '' },
+                                  { name: ['products', field.name, 'unit'], value: item.unit || '' },
+                                  { name: ['products', field.name, 'defaultSize'], value: item.defaultSize || '' },
+                                  { name: ['products', field.name, 'purchasePrice'], value: item.value || '' },
+                                  { name: ['products', field.name, 'sellingPrice'], value: item.sellingPrice || '' },
+                                  { name: ['products', field.name, 'hsnCode'], value: item.hsnCode || '' },
+                                  { name: ['products', field.name, 'gst'], value: item.gstPercent > 0 ? `${item.gstPercent}%` : 'None' },
+                                  { name: ['products', field.name, 'discountPercent'], value: item.discountPercent || '' },
+                                  { name: ['products', field.name, 'packingMaterial'], value: item.packingMaterial || '' },
+                                  { name: ['products', field.name, 'materialCategory'], value: item.materialCategory || '' },
+                                  { name: ['products', field.name, 'brand'], value: item.brand || '' },
+                                ]);
+                              }}
+                            />
+                          </Form.Item>
+                        </Col>
+                        <Col xs={8} sm={6}>
+                          <Form.Item {...field} label="Qty" name={[field.name, 'qty']}>
+                            <InputNumber min={1} style={{ width: '100%' }} placeholder="1" />
+                          </Form.Item>
+                        </Col>
+                      </Row>
+
+                      {/* Hidden fields — auto-filled from inventory selection, sent in save payload */}
+                      <Form.Item {...field} name={[field.name, 'category']} hidden><Input /></Form.Item>
+                      <Form.Item {...field} name={[field.name, 'unit']} hidden><Input /></Form.Item>
+                      <Form.Item {...field} name={[field.name, 'defaultSize']} hidden><Input /></Form.Item>
+                      <Form.Item {...field} name={[field.name, 'purchasePrice']} hidden><Input /></Form.Item>
+                      <Form.Item {...field} name={[field.name, 'sellingPrice']} hidden><Input /></Form.Item>
+                      <Form.Item {...field} name={[field.name, 'hsnCode']} hidden><Input /></Form.Item>
+                      <Form.Item {...field} name={[field.name, 'gst']} hidden initialValue="None"><Input /></Form.Item>
+                      <Form.Item {...field} name={[field.name, 'discountPercent']} hidden><Input /></Form.Item>
+                      <Form.Item {...field} name={[field.name, 'packingMaterial']} hidden><Input /></Form.Item>
+                      <Form.Item {...field} name={[field.name, 'materialCategory']} hidden><Input /></Form.Item>
+                      <Form.Item {...field} name={[field.name, 'brand']} hidden><Input /></Form.Item>
+                    </div>
+                  </div>
+                ))}
+
+                <Button
+                  type="dashed"
+                  block
+                  icon={<PlusOutlined />}
+                  onClick={() => add({ productName: '', qty: 1, gst: 'None' })}
+                  style={{ borderRadius: 10, height: 44, borderColor: '#B11E6A66', color: '#B11E6A', marginTop: 4 }}
+                >
+                  Add Product to Kit
+                </Button>
+              </>
+            )}
+          </Form.List>
+        </Form>
+      </Modal>
+
+      {/* ═══════════════════════════════════════
+          ITEM DETAIL DRAWER (row click)
+      ═══════════════════════════════════════ */}
+      <Drawer
+        open={!!detailItem}
+        onClose={() => setDetailItem(null)}
+        width={Math.min(480, window.innerWidth)}
+        title={
+          detailItem ? (
+            <Space>
+              <ContainerOutlined style={{ color: '#B11E6A' }} />
+              <span style={{ fontWeight: 700, color: textColor }}>{detailItem.name}</span>
+              <Tag style={{ background: '#B11E6A15', color: '#B11E6A', border: '1px solid #B11E6A44', borderRadius: 20, fontWeight: 600 }}>{detailItem.code}</Tag>
+            </Space>
+          ) : null
+        }
+        styles={{ body: { background: isDark ? '#13131f' : '#f4f5f9', padding: 16 } }}
+      >
+        {detailItem && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+            {/* Stock summary */}
+            <Card style={sectionCard} styles={{ body: { padding: '14px 16px' } }}>
+              <Row gutter={16}>
+                <Col span={12} style={{ textAlign: 'center' }}>
+                  <Text style={{ fontSize: 12, color: '#aaa', display: 'block' }}>Current Stock</Text>
+                  <Text strong style={{ fontSize: 26, color: '#B11E6A' }}>{detailItem.current}</Text>
+                  <Text style={{ fontSize: 11, color: '#aaa', display: 'block' }}>{detailItem.unit}</Text>
+                </Col>
+                <Col span={12} style={{ textAlign: 'center' }}>
+                  <Text style={{ fontSize: 12, color: '#aaa', display: 'block' }}>Min Required</Text>
+                  <Text strong style={{ fontSize: 26, color: '#C94F8A' }}>{detailItem.min}</Text>
+                  <Text style={{ fontSize: 11, color: '#aaa', display: 'block' }}>{detailItem.unit}</Text>
+                </Col>
+              </Row>
+            </Card>
+
+            {/* Details */}
+            <Card style={sectionCard} styles={{ body: { padding: '14px 16px' } }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+                <Text strong style={{ color: textColor }}>Item Details</Text>
+                {detailItem.lastPurchaseDate && (
+                  <Tag style={{ background: '#B11E6A15', color: '#B11E6A', border: '1px solid #B11E6A44', borderRadius: 20, fontWeight: 500, margin: 0 }}>
+                    Last Purchased: {detailItem.lastPurchaseDate.format('DD MMM YYYY')}
+                  </Tag>
+                )}
+              </div>
+              <Descriptions column={2} size="small" labelStyle={{ color: '#aaa', fontSize: 12 }} contentStyle={{ fontWeight: 600, fontSize: 13 }}>
+                <Descriptions.Item label="Category">{detailItem.category || '—'}</Descriptions.Item>
+                <Descriptions.Item label="Unit">{detailItem.unit || '—'}</Descriptions.Item>
+                <Descriptions.Item label="Purchase Price">{detailItem.price || '—'}</Descriptions.Item>
+                <Descriptions.Item label="Selling Price">{detailItem.sellingPrice != null ? `₹${formatRate(Number(detailItem.sellingPrice)).toLocaleString()}` : '—'}</Descriptions.Item>
+                <Descriptions.Item label="Default Size">{detailItem.defaultSize || '—'}</Descriptions.Item>
+                <Descriptions.Item label="HSN Code">{detailItem.hsnCode || '—'}</Descriptions.Item>
+                <Descriptions.Item label="GST %">{detailItem.gstPercent > 0 ? `${detailItem.gstPercent}%` : '—'}</Descriptions.Item>
+                <Descriptions.Item label="Discount">{detailItem.discountPercent != null && detailItem.discountPercent > 0 ? `${detailItem.discountPercent}%` : '—'}</Descriptions.Item>
+                <Descriptions.Item label="Brand">{detailItem.brand || '—'}</Descriptions.Item>
+                <Descriptions.Item label="Packing Material">{detailItem.packingMaterial || '—'}</Descriptions.Item>
+                <Descriptions.Item label="Material Category">{detailItem.materialCategory || '—'}</Descriptions.Item>
+                <Descriptions.Item label="Status">
+                  <Tag style={{ borderRadius: 20, fontWeight: 500, background: detailItem.status === 'OK' ? '#B11E6A22' : detailItem.status === 'Low' ? '#C94F8A22' : '#8a165222', color: detailItem.status === 'OK' ? '#B11E6A' : detailItem.status === 'Low' ? '#C94F8A' : '#8a1652', border: 'none' }}>
+                    {detailItem.status === 'Out' ? 'Out of Stock' : detailItem.status}
+                  </Tag>
+                </Descriptions.Item>
+              </Descriptions>
+              {attrEntries(detailItem.productAttributes).length > 0 && (
+                <div style={{ marginTop: 14 }}>
+                  <Text strong style={{ color: textColor, display: 'block', marginBottom: 8, fontSize: 13 }}>Product Attributes</Text>
+                  {renderAttrTags(detailItem.productAttributes, '100%')}
+                </div>
+              )}
+            </Card>
+
+            {/* Suppliers */}
+            <Card style={sectionCard} styles={{ body: { padding: '14px 16px' } }}>
+              <Text strong style={{ color: textColor, display: 'block', marginBottom: 10 }}>Suppliers / Stock Sources</Text>
+              {(detailItem.sellers || []).length === 0 && <Text type="secondary" style={{ fontSize: 13 }}>No suppliers linked</Text>}
+              {(detailItem.sellers || []).map((s, i) => (
+                <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 12px', background: isDark ? '#2a2a3e' : '#f8f8fc', borderRadius: 8, marginBottom: 6 }}>
+                  <Text style={{ fontWeight: 600, fontSize: 13, color: textColor }}>{s.name || s}</Text>
+                  <Tag style={{ background: '#B11E6A22', color: '#B11E6A', border: '1px solid #B11E6A44', borderRadius: 20 }}>{s.stock ?? 0} {detailItem.unit}</Tag>
+                </div>
+              ))}
+            </Card>
+
+            {/* Recent history for this item */}
+            <Card style={sectionCard} styles={{ body: { padding: '14px 16px' } }}>
+              <Text strong style={{ color: textColor, display: 'block', marginBottom: 10 }}>Recent Stock History</Text>
+              {/* Match by itemId, not name — a Bulk item and its linked Filled item can share the
+                  exact same Item Name (e.g. both "Shampoo"), and matching by name here would mix
+                  the bulk source's movements into the filled item's card (and vice versa). */}
+              {stockHistory.filter(h => h.itemId === detailItem.key).slice(0, 4).length === 0 && (
+                <Text type="secondary" style={{ fontSize: 13 }}>No history yet</Text>
+              )}
+              {stockHistory.filter(h => h.itemId === detailItem.key).slice(0, 4).map(h => (
+                <div key={h.key} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderBottom: `1px solid ${borderColor}` }}>
+                  <Space>
+                    <Tag color={h.action === 'Stock Added' ? 'success' : 'error'} style={{ borderRadius: 12, fontSize: 11 }}>{h.action}</Tag>
+                    <Text style={{ fontSize: 12, color: '#aaa' }}>{h.date}</Text>
+                  </Space>
+                  <Text strong style={{ color: h.action === 'Stock Added' ? '#52c41a' : '#ff4d4f', fontSize: 13 }}>
+                    {h.action === 'Stock Added' ? '+' : '-'}{formatQty(h.qty)} units
+                  </Text>
+                </div>
+              ))}
+            </Card>
+
+            {/* Quick actions — Add Stock / Sell Stock hidden per request
+            <Row gutter={10}>
+              <Col span={12}>
+                <Button block icon={<DownloadOutlined />} type="primary" style={{ background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none', height: 42, borderRadius: 10, fontWeight: 700 }} onClick={() => { setDetailItem(null); openReceive(detailItem); }}>
+                  Add Stock
+                </Button>
+              </Col>
+              <Col span={12}>
+                <Button block icon={<ShoppingOutlined />} style={{ borderColor: '#B11E6A', color: '#B11E6A', height: 42, borderRadius: 10, fontWeight: 700 }} onClick={() => { setDetailItem(null); openIssue(detailItem); }}>
+                  Sell Stock
+                </Button>
+              </Col>
+            </Row>
+            */}
+          </div>
+        )}
+      </Drawer>
+
+      {/* ═══════════════════════════════════════
+          SUBMIT STOCK CHECK CONFIRMATION MODAL
+      ═══════════════════════════════════════ */}
+      <Modal
+        open={checkSubmitOpen}
+        onCancel={() => setCheckSubmitOpen(false)}
+        title={
+          <Space>
+            <AuditOutlined style={{ color: '#B11E6A' }} />
+            <span style={{ fontWeight: 700 }}>Confirm Stock Check Submission</span>
+          </Space>
+        }
+        footer={
+          <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+            <Button onClick={() => setCheckSubmitOpen(false)}>Cancel</Button>
+            <Button type="primary" style={{ background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none', fontWeight: 700 }} onClick={handleSubmitCheck}>
+              Confirm & Submit
+            </Button>
+          </div>
+        }
+        width={500}
+        centered
+      >
+        <div style={{ marginTop: 8 }}>
+          <div style={{ background: '#B11E6A10', border: '1px solid #B11E6A33', borderRadius: 10, padding: '12px 16px', marginBottom: 14 }}>
+            <Row gutter={16}>
+              <Col span={8} style={{ textAlign: 'center' }}>
+                <Text style={{ fontSize: 12, color: '#aaa', display: 'block' }}>Total Items</Text>
+                <Text strong style={{ fontSize: 22, color: textColor }}>{checkSession.length}</Text>
+              </Col>
+              <Col span={8} style={{ textAlign: 'center' }}>
+                <Text style={{ fontSize: 12, color: '#aaa', display: 'block' }}>Discrepancies</Text>
+                <Text strong style={{ fontSize: 22, color: '#ff4d4f' }}>{checkSession.filter(i => i.physicalCount !== i.systemCount).length}</Text>
+              </Col>
+              <Col span={8} style={{ textAlign: 'center' }}>
+                <Text style={{ fontSize: 12, color: '#aaa', display: 'block' }}>Unknown</Text>
+                <Text strong style={{ fontSize: 22, color: '#fa8c16' }}>{checkSession.filter(i => i.physicalCount < i.systemCount && i.missingType === 'unknown').length}</Text>
+              </Col>
+            </Row>
+          </div>
+
+          {checkSession.filter(i => i.physicalCount !== i.systemCount).length > 0 && (
+            <div style={{ marginBottom: 14 }}>
+              <Text strong style={{ color: textColor, display: 'block', marginBottom: 8 }}>Items with Discrepancies:</Text>
+              {checkSession.filter(i => i.physicalCount !== i.systemCount).map(item => {
+                const diff = item.physicalCount - item.systemCount;
+                return (
+                  <div key={item.key} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 10px', background: isDark ? '#2a2a3e' : '#f8f8fc', borderRadius: 8, marginBottom: 6 }}>
+                    <Space>
+                      <Text strong style={{ fontSize: 13 }}>{item.name}</Text>
+                      {item.missingType === 'unknown' && <Tag color="warning" style={{ borderRadius: 20, fontSize: 11 }}>Unknown</Tag>}
+                      {item.missingType === 'known' && <Tag color="blue" style={{ borderRadius: 20, fontSize: 11 }}>Known</Tag>}
+                    </Space>
+                    <Text strong style={{ color: diff < 0 ? '#ff4d4f' : '#fa8c16', fontSize: 13 }}>
+                      {diff > 0 ? '+' : ''}{diff} {item.unit}
+                    </Text>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {checkSession.some(i => i.physicalCount < i.systemCount && i.missingType === 'unknown') && (
+            <Alert
+              type="warning"
+              showIcon
+              icon={<BellOutlined />}
+              message="Management will be notified"
+              description="Unknown shortages will trigger automatic notifications to Super Admin and Manager."
+              style={{ borderRadius: 8 }}
+            />
+          )}
+
+          <div style={{ marginTop: 14 }}>
+            <Text style={{ fontSize: 13, color: '#aaa', display: 'block', marginBottom: 6 }}>Additional Notes (optional)</Text>
+            <Input.TextArea
+              value={checkNotes}
+              onChange={e => setCheckNotes(e.target.value)}
+              placeholder="Any additional notes about this stock check session..."
+              rows={3}
+              style={{ borderRadius: 8 }}
+            />
+          </div>
+        </div>
+      </Modal>
+
+      {/* ═══════════════════════════════════════
+          MANUAL ADJUSTMENT MODAL (+ / - buttons)
+      ═══════════════════════════════════════ */}
+      <Modal
+        title={
+          <Space>
+            {adjustModal.type === 'Addition'
+              ? <PlusOutlined style={{ color: '#52c41a', fontSize: 16 }} />
+              : <MinusOutlined style={{ color: '#ff4d4f', fontSize: 16 }} />}
+            <span style={{ fontSize: 15, fontWeight: 700 }}>
+              {adjustModal.type === 'Addition' ? 'Add Stock' : 'Reduce Stock'}
+              {adjustModal.item ? ` — ${adjustModal.item.name}` : ''}
+            </span>
+          </Space>
+        }
+        open={adjustModal.open}
+        onCancel={() => { setAdjustModal({ open: false, item: null, type: null }); adjustForm.resetFields(); }}
+        footer={
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+            <Button onClick={() => { setAdjustModal({ open: false, item: null, type: null }); adjustForm.resetFields(); }}>Cancel</Button>
+            <Button
+              type="primary"
+              style={{ background: adjustModal.type === 'Addition' ? 'linear-gradient(135deg,#B11E6A,#D85C9E)' : 'linear-gradient(135deg,#8a1652,#B11E6A)', border: 'none' }}
+              onClick={async () => {
+                try {
+                  const vals = await adjustForm.validateFields();
+                  if (adjustModal.type === 'Addition') {
+                    await addStockRequest({ id: adjustModal.item.key, qty: vals.count, reason: vals.notes || 'Manual adjustment' }).unwrap();
+                  } else {
+                    await sellStockRequest({ id: adjustModal.item.key, qty: vals.count, reason: vals.notes || 'Manual adjustment' }).unwrap();
+                  }
+                  enqueueSnackbar('Adjustment request submitted for approval', { variant: 'success' });
+                  setAdjustModal({ open: false, item: null, type: null });
+                  adjustForm.resetFields();
+                } catch {
+                  enqueueSnackbar('Failed to submit adjustment', { variant: 'error' });
+                }
+              }}
+            >
+              OK
+            </Button>
+          </div>
+        }
+        width={420} centered
+        styles={{ body: { paddingTop: 8 } }}
+      >
+        <Form form={adjustForm} layout="vertical" style={{ marginTop: 16 }}>
+          <Form.Item
+            label={<Text style={{ fontWeight: 600 }}>{adjustModal.type === 'Addition' ? 'Add Count' : 'Minus Count'}</Text>}
+            name="count"
+            rules={[{ required: true, message: 'Enter count' }, { type: 'number', min: 1, message: 'Must be at least 1' }]}
+            style={{ marginBottom: 16 }}
+          >
+            <InputNumber min={1} style={{ width: '100%', borderRadius: 8 }} placeholder={`Enter quantity to ${adjustModal.type === 'Addition' ? 'add' : 'reduce'}`} addonAfter="units" />
+          </Form.Item>
+          <Form.Item label={<Text style={{ fontWeight: 600 }}>Notes / Description</Text>} name="notes" style={{ marginBottom: 0 }}>
+            <Input.TextArea rows={3} placeholder="Reason for this adjustment..." style={{ borderRadius: 8 }} />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      {/* ═══════════════════════════════════════
+          ADD ITEM MODAL
+      ═══════════════════════════════════════ */}
+      <Modal
+        title={<span style={{ fontSize: 16, fontWeight: 700 }}>{editingItem ? 'Edit Inventory Item' : addItemScope === 'bulk_filled' ? 'Add Bulk / Filled Item' : 'Add Inventory Item'}</span>}
+        open={addItemModal}
+        onCancel={() => { setAddItemModal(false); setEditingItem(null); addItemForm.resetFields(); }}
+        footer={
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+            <Button onClick={() => { setAddItemModal(false); setEditingItem(null); addItemForm.resetFields(); }}>Cancel</Button>
+            <Button type="primary" onClick={handleSaveItem} style={{ background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none' }}>{editingItem ? 'Update Item' : 'Save Item'}</Button>
+          </div>
+        }
+        width={Math.min(560, window.innerWidth - 24)} centered
+        styles={{ body: { paddingTop: 8 } }}
+      >
+        <Form
+          form={addItemForm}
+          layout="vertical"
+          style={{ marginTop: 16 }}
+          onValuesChange={(changed) => {
+            // Selling Price is a manual entry — not auto-filled from Purchase Price + Limitations.
+            // Re-validate it when either changes so the floor check below stays accurate.
+            if ('purchase_price' in changed || 'margin_amount' in changed) {
+              addItemForm.validateFields(['selling_price']).catch(() => {});
+            }
+          }}
+        >
+          <Row gutter={16}>
+            <Col xs={24} sm={editingItem ? 12 : 8}>
+              <Form.Item label="Item Type" name="itemType" initialValue="standard" tooltip="Standard: a normal stocked item. Bulk Raw Material: liquid/powder tracked in Litres/Kg (e.g. 50L coconut oil). Filled/Packed Item: a sellable per-piece size (e.g. a 10ml bottle) packed from a Bulk item.">
+                <Select
+                  disabled={!!editingItem}
+                  onChange={(v) => {
+                    if (v !== 'filled') addItemForm.setFieldsValue({ bulkSourceItemId: undefined, fillWastagePercent: undefined });
+                    addItemForm.setFieldsValue({ unit: v === 'bulk' ? 'Litres' : v === 'filled' ? 'ml' : 'Pcs' });
+                  }}
+                >
+                  {/* Standard is only offered from the plain "Add Item" flow; Bulk/Filled are only
+                      offered from the Bulk tab's "Add Bulk / Filled Item" flow — kept separate so
+                      the two never mingle. Editing always shows all 3 (disabled, just for display). */}
+                  {(editingItem || addItemScope === 'standard') && <Option value="standard">Standard Item</Option>}
+                  {(editingItem || addItemScope === 'bulk_filled') && <Option value="bulk">Bulk Raw Material (Litres/Kg)</Option>}
+                  {(editingItem || addItemScope === 'bulk_filled') && <Option value="filled">Filled / Packed Item (from Bulk)</Option>}
+                </Select>
+              </Form.Item>
+            </Col>
+            {!editingItem && (
+              <Col xs={24} sm={16}>
+                <Form.Item label="Item Code (to merge stock into an existing item)" name="mergeItemCode" tooltip="Enter an existing item's code to add this as new stock into it instead of creating a duplicate. Leave blank to add as a brand-new item — either way you'll be asked to confirm.">
+                  <Input placeholder="e.g. ITEM-260003 — leave blank to add as new" allowClear />
+                </Form.Item>
+              </Col>
+            )}
+          </Row>
+          {!editingItem && nameMatches.length > 0 && !watchedMergeItemCode && (
+            <Alert
+              type="info" showIcon
+              style={{ marginBottom: 12, borderRadius: 8 }}
+              message="Similar item(s) already in stock"
+              description={
+                <Space direction="vertical" size={2}>
+                  {nameMatches.map((m) => (
+                    <Text key={m.key} style={{ fontSize: 12, display: 'block' }}>
+                      {m.name} ({m.code}) — {m.current} {m.unit} in stock.{' '}
+                      <a onClick={() => addItemForm.setFieldsValue({ mergeItemCode: m.code })}>Use this code to merge</a>
+                    </Text>
+                  ))}
+                </Space>
+              }
+            />
+          )}
+          <Row gutter={16}>
+            <Col xs={24} sm={12}>
+              <Form.Item label="Vendor" name="vendorId" tooltip="Which vendor this batch of stock was purchased from.">
+                <Select
+                  allowClear
+                  showSearch
+                  optionFilterProp="label"
+                  placeholder="Select vendor / supplier"
+                  options={suppliers.map((v) => ({ label: v.name, value: v._id }))}
+                  notFoundContent={<span style={{ fontSize: 12, color: '#aaa' }}>No vendors yet — add one in Vendors & Suppliers</span>}
+                />
+              </Form.Item>
+            </Col>
+            <Col xs={24} sm={12}>
+              <Form.Item label="Purchase Date" name="purchaseDate" initialValue={dayjs()} tooltip="Defaults to today — edit if this stock was actually bought on an earlier date. Used to decide which vendor's stock gets used up first.">
+                <DatePicker style={{ width: '100%' }} format="DD MMM YYYY" />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Row gutter={16}>
+            <Col xs={24} sm={12}>
+              <Form.Item
+                label="Item Name"
+                name="name"
+                rules={[
+                  { required: true },
+                  {
+                    validator: (_, val) => {
+                      if (watchedItemType !== 'filled' || !watchedBulkSourceItemId) return Promise.resolve();
+                      const src = bulkItems.find((b) => b.key === watchedBulkSourceItemId);
+                      if (src && String(val || '').trim().toLowerCase() === String(src.name || '').trim().toLowerCase()) {
+                        return Promise.reject(new Error(`Give this filled item a different name from its bulk source "${src.name}" (e.g. add the fill size) — Stock History lists both by name and an identical pair looks like a duplicate.`));
+                      }
+                      return Promise.resolve();
+                    },
+                  },
+                ]}
+              >
+                <Input />
+              </Form.Item>
+            </Col>
+            <Col xs={24} sm={12}>
+              <Form.Item label="Category" name="category">
+                <SelectWithAdd
+                  field="inventoryCategory"
+                  defaultOptions={categories.map((item) => ({ label: item, value: item }))}
+                  placeholder="Select / Add category"
+                />
+              </Form.Item>
+            </Col>
+            <Col xs={24} sm={12}>
+              <Form.Item
+                label={watchedItemType === 'filled' ? 'Fill Size' : watchedItemType === 'bulk' ? 'Qty per Container' : 'Unit Value'}
+                name="unitValue"
+                tooltip={
+                  watchedItemType === 'filled' ? "How much bulk material one piece uses — e.g. 10 for a 10ml bottle."
+                    : watchedItemType === 'bulk' ? "How much each container/drum holds, in the Bulk Unit selected — e.g. 5 for a 5 Litre drum. Multiplied by Opening Bulk Stock (container count) to get the total stock. Leave blank if Opening Bulk Stock is already the total."
+                    : "Quantity per unit — e.g. 500 for a 500 gram pack."
+                }
+              >
+                <InputNumber style={{ width: '100%' }} min={0} placeholder={watchedItemType === 'filled' ? 'e.g. 10' : watchedItemType === 'bulk' ? 'e.g. 5' : 'e.g. 500'} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} sm={12}>
+              <Form.Item label={watchedItemType === 'bulk' ? 'Bulk Unit' : watchedItemType === 'filled' ? 'Fill Unit' : 'Unit'} name="unit" initialValue="Pcs" tooltip="Unit this item is measured/stocked in.">
+                {watchedItemType === 'bulk' ? (
+                  <Select options={[{ value: 'Litres', label: 'Litres' }, { value: 'Kg', label: 'Kg' }]} placeholder="Select bulk unit" />
+                ) : watchedItemType === 'filled' ? (
+                  <Select disabled={!!editingItem} options={fillUnitOptions} placeholder="Select fill unit" />
+                ) : (
+                  <SelectWithAdd
+                    field="inventoryUnit"
+                    defaultOptions={UNIT_OPTIONS}
+                    placeholder="Select / Add unit"
+                  />
+                )}
+              </Form.Item>
+            </Col>
+            {watchedItemType === 'filled' && (
+              <>
+                <Col xs={24} sm={12}>
+                  <Form.Item label="Fill From Bulk Item" name="bulkSourceItemId" rules={[{ required: true, message: 'Select the bulk item this is filled from' }]}>
+                    <Select
+                      showSearch
+                      optionFilterProp="label"
+                      placeholder="Select bulk raw material"
+                      options={bulkItems.map((b) => ({ value: b.key, label: `${b.name} (${b.current} ${b.unit} available)` }))}
+                      notFoundContent={<span style={{ fontSize: 12, color: '#aaa' }}>No Bulk Raw Material items yet — add one first</span>}
+                    />
+                  </Form.Item>
+                </Col>
+                <Col xs={24} sm={12}>
+                  <Form.Item label="Fill Wastage %" name="fillWastagePercent" tooltip="Extra % of bulk material lost to spillage while filling — inflates how much bulk stock a fill run consumes.">
+                    <InputNumber style={{ width: '100%' }} min={0} max={99} placeholder="0" />
+                  </Form.Item>
+                </Col>
+              </>
+            )}
+            {!editingItem && watchedItemType !== 'filled' && (
+              <Col xs={24} sm={12}>
+                <Form.Item
+                  label={watchedItemType === 'bulk' ? 'Opening Bulk Stock' : 'Opening Stock'}
+                  name="current"
+                  tooltip={watchedItemType === 'bulk' ? 'Number of containers/drums purchased — multiplied by Qty per Container above to get the total stock.' : undefined}
+                  extra={watchedItemType === 'bulk' && bulkStockMultiplier > 1 && Number(watchedBulkOpening) > 0
+                    ? <Text style={{ fontSize: 12, color: '#B11E6A' }}>{`= ${formatQty((Number(watchedBulkOpening) || 0) * bulkStockMultiplier)} ${bulkUnitLabel} total`}</Text>
+                    : undefined}
+                >
+                  <InputNumber style={{ width: '100%' }} min={0} placeholder={watchedItemType === 'bulk' ? 'e.g. 10 (containers)' : undefined} />
+                </Form.Item>
+              </Col>
+            )}
+            {editingItem && watchedItemType !== 'filled' && (
+              <Col xs={24} sm={12}>
+                <Form.Item
+                  label="Add Stock (Qty)"
+                  name="addStockQty"
+                  tooltip={watchedItemType === 'bulk'
+                    ? "Bought more containers of this bulk material? Enter the container count here — it's multiplied by Qty per Container and added on top of the current stock as a new purchase batch under the Vendor + Purchase Date selected above."
+                    : "Bought more of this same product? Enter the quantity here — it's added on top of the current stock as a new purchase batch under the Vendor + Purchase Date selected above."}
+                  extra={watchedItemType === 'bulk' && bulkStockMultiplier > 1 && Number(watchedBulkAddStock) > 0
+                    ? <Text style={{ fontSize: 12, color: '#B11E6A' }}>{`= ${formatQty((Number(watchedBulkAddStock) || 0) * bulkStockMultiplier)} ${bulkUnitLabel} added`}</Text>
+                    : undefined}
+                >
+                  <InputNumber style={{ width: '100%' }} min={0} placeholder={watchedItemType === 'bulk' ? 'e.g. 10 (containers)' : '0'} />
+                </Form.Item>
+              </Col>
+            )}
+            {editingItem && watchedItemType === 'filled' && (
+              <Col xs={24} sm={12} style={{ display: 'flex', alignItems: 'center' }}>
+                <Text type="secondary" style={{ fontSize: 12 }}>Stock for filled items is added via "Fill Stock" on the item's row, not here.</Text>
+              </Col>
+            )}
+            <Col xs={24} sm={12}>
+              <Form.Item
+                label="Min Stock"
+                name="min"
+                tooltip={watchedItemType === 'bulk' ? 'Alert threshold in containers/drums — multiplied by Qty per Container to get the actual low-stock threshold.' : undefined}
+                extra={watchedItemType === 'bulk' && bulkStockMultiplier > 1 && Number(watchedBulkMinStock) > 0
+                  ? <Text style={{ fontSize: 12, color: '#B11E6A' }}>{`= ${formatQty((Number(watchedBulkMinStock) || 0) * bulkStockMultiplier)} ${bulkUnitLabel} threshold`}</Text>
+                  : undefined}
+              >
+                <InputNumber style={{ width: '100%' }} min={0} placeholder={watchedItemType === 'bulk' ? 'e.g. 2 (containers)' : undefined} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} sm={12}>
+              <Form.Item label="Purchase Price" name="purchase_price">
+                <Input prefix="₹" addonAfter={<Form.Item name="purchase_price_tax" noStyle initialValue="without_gst"><Select style={{ width: 120 }}><Option value="with_gst">With GST</Option><Option value="without_gst">Without GST</Option></Select></Form.Item>} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} sm={12}>
+              <Form.Item label="Limitations" name="margin_amount" tooltip="Minimum amount that must be added on top of Purchase Price when setting the Selling Price.">
+                <Input prefix="₹" placeholder="0" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} sm={12}>
+              <Form.Item
+                label="Selling Price"
+                name="selling_price"
+                tooltip="Enter manually. Cannot be below Purchase Price + Limitations."
+                extra={<Text style={{ fontSize: 11, color: '#999' }}>Min: Purchase Price + Limitations</Text>}
+                rules={[{
+                  validator: (_, val) => {
+                    const pp = Number(String(addItemForm.getFieldValue('purchase_price') ?? '').replace(/[^0-9.]/g, '')) || 0;
+                    const mm = Number(String(addItemForm.getFieldValue('margin_amount') ?? '').replace(/[^0-9.]/g, '')) || 0;
+                    const sp = Number(String(val ?? '').replace(/[^0-9.]/g, '')) || 0;
+                    // Purchase Price prefills with the stored GST-exclusive cost, which can carry a
+                    // long fraction — round the floor so the check and the message agree on 2 decimals.
+                    const floor = formatRate(pp + mm);
+                    if (sp < floor) return Promise.reject(new Error(`Cannot be below ₹${floor} (Purchase + Limitations)`));
+                    return Promise.resolve();
+                  },
+                }]}
+              >
+                <Input prefix="₹" addonAfter={<Form.Item name="selling_price_tax" noStyle initialValue="without_gst"><Select style={{ width: 120 }}><Option value="with_gst">With GST</Option><Option value="without_gst">Without GST</Option></Select></Form.Item>} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} sm={8}>
+              <Form.Item label="GST %" name="gstPercent" tooltip="GST percentage applied to this product. Orders/leads auto-fill this value when the product is selected.">
+                <Select allowClear placeholder="Select GST %">
+                  <Option value={0}>None (0%)</Option>
+                  <Option value={5}>5%</Option>
+                  <Option value={12}>12%</Option>
+                  <Option value={18}>18%</Option>
+                  <Option value={28}>28%</Option>
+                </Select>
+              </Form.Item>
+            </Col>
+            <Col xs={24} sm={8}><Form.Item label="HSN" name="hsn"><Input placeholder="Ex: 6704" /></Form.Item></Col>
+          </Row>
+
+          {/* ── Dynamic product-type attributes (not applicable to raw Bulk items) ── */}
+          {watchedItemType !== 'bulk' && (() => {
+            const activeDefs = productFieldDefs.length > 0 ? productFieldDefs : GENERIC_PRODUCT_FIELD_DEFS;
+            const hasPackingMaterial = activeDefs.some((fd) => fd.key === 'packingMaterial');
+            const selectedPackingMaterialValues = (Array.isArray(watchedPackingMaterial) ? watchedPackingMaterial : [watchedPackingMaterial])
+              .filter(Boolean)
+              .map((v) => String(v));
+            // Bottle types (shampoo/moisturizer/shower gel) — Bottle Type is multi-select, and with
+            // Sticker Printing = Yes each selected bottle type gets its own "<Bottle Type> Sticker Size"
+            // field (e.g. "Fliptop bottle Sticker Size", "Screw type Sticker Size").
+            // Gated on 'bottleType' (not just 'stickerPrinting') so soap — which also has a
+            // Sticker Printing toggle but no Bottle Type field — doesn't show this.
+            const hasBottleType = activeDefs.some((fd) => fd.key === 'bottleType');
+            const showBottleStickerSize = hasBottleType && String(watchedStickerPrinting || '').toLowerCase() === 'yes';
+            const selectedBottleTypeValues = (Array.isArray(watchedBottleType) ? watchedBottleType : [watchedBottleType])
+              .filter(Boolean)
+              .map((v) => String(v));
+            return (
+              <>
+                <Divider style={{ margin: '4px 0 12px' }}>
+                  <Text style={{ fontSize: 12, color: '#B11E6A', fontWeight: 600 }}>Product Attributes</Text>
+                </Divider>
+                <Row gutter={16}>
+                  {activeDefs.map((fd) => {
+                    // Persist user-added dropdown values per item name (not just per product type),
+                    // so values you add while editing a specific item are remembered for that item.
+                    // Falls back to the type-level field until an item name is entered.
+                    const nameKey = String(watchedItemName || '').trim().toLowerCase();
+                    const scopedField = nameKey ? `item__${nameKey}__${fd.key}` : fd.field;
+                    return (
+                    <Col xs={24} sm={12} key={fd.key}>
+                      <Form.Item label={fd.label} name={['productAttrs', fd.key]}>
+                        <SelectWithAdd
+                          field={scopedField}
+                          mode={fd.mode}
+                          defaultOptions={fd.usePackingConfig ? packingMaterials.map(c => ({ value: c.value, label: c.label })) : fd.options}
+                          placeholder={`Select / Add ${fd.label.toLowerCase()}`}
+                          allowClear
+                        />
+                      </Form.Item>
+                    </Col>
+                    );
+                  })}
+                  {/* Bottle-type products have no packing material — their sticker size is per
+                      selected bottle type, stored under productAttributes.bottleStickerSizes[<type>]
+                      (same shape as packingSizes below); the Sales product line reads the size for
+                      whichever Bottle Type the order picks. (Box/Ziplock/Butter Paper "Sticker Size"
+                      fields were removed: the single per-packing-material size below now drives both
+                      the Sales Sticker Size and Material Stock deduction.) */}
+                  {showBottleStickerSize && selectedBottleTypeValues.map((btv) => (
+                    <Col xs={24} sm={12} key={`bottlesticker-${btv}`}>
+                      <Form.Item
+                        label={`${btv} Sticker Size`}
+                        name={['productAttrs', 'bottleStickerSizes', btv]}
+                        tooltip={`Sticker/label size for "${btv}" — pre-fills the Sales product line when this bottle type is chosen.`}
+                      >
+                        <Input placeholder="e.g. 3in x 2in" allowClear />
+                      </Form.Item>
+                    </Col>
+                  ))}
+                  {showBottleStickerSize && selectedBottleTypeValues.length === 0 && (
+                    <Col xs={24} sm={12}>
+                      <Text type="secondary" style={{ fontSize: 12 }}>Select one or more Bottle Types to enter their Sticker Sizes.</Text>
+                    </Col>
+                  )}
+                  {/* Legacy items only: a single bottleStickerSize saved before per-type sizes existed and
+                      not yet carried into the map (no bottle type was selected) — keep it registered so
+                      re-saving the item never silently drops it. */}
+                  {hasBottleType && watchedLegacyBottleSticker ? (
+                    <Form.Item name={['productAttrs', 'bottleStickerSize']} hidden noStyle><Input /></Form.Item>
+                  ) : null}
+                  {/* Per-packing-material size — one field per selected packing material value
+                      (e.g. "White box Size", "Butter paper Size"). Stored under
+                      productAttributes.packingSizes[<value>]; the Sales product line auto-fills
+                      its Packing Size from here based on the material chosen, and Material Stock
+                      deduction matches on that size. */}
+                  {hasPackingMaterial && selectedPackingMaterialValues.map((pmv) => (
+                    <Col xs={24} sm={12} key={`packsize-${pmv}`}>
+                      <Form.Item
+                        label={`${pmv} Size`}
+                        name={['productAttrs', 'packingSizes', pmv]}
+                        tooltip={`Physical dimensions of "${pmv}" — pre-fills the Sales product line and is what Material Stock deduction matches on.`}
+                      >
+                        <Input placeholder="e.g. 2.3 cm x 2.6 cm" allowClear />
+                      </Form.Item>
+                    </Col>
+                  ))}
+                </Row>
+              </>
+            );
+          })()}
+        </Form>
+      </Modal>
+
+      {/* ═══════════════════════════════════════
+          FILL STOCK MODAL (Filled/Packed items, drawn from a linked Bulk item)
+      ═══════════════════════════════════════ */}
+      <Modal
+        title={<span style={{ fontSize: 16, fontWeight: 700 }}>Fill Stock — {fillStockModal.item?.name}</span>}
+        open={fillStockModal.open}
+        onCancel={() => { setFillStockModal({ open: false, item: null }); setFillQtyValue(null); }}
+        footer={
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+            <Button onClick={() => { setFillStockModal({ open: false, item: null }); setFillQtyValue(null); }}>Cancel</Button>
+            <Button
+              type="primary"
+              disabled={!fillQtyValue || fillQtyValue <= 0 || fillPreview.insufficient}
+              style={{ background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', border: 'none' }}
+              onClick={async () => {
+                try {
+                  const res = await fillStockMutation({ id: fillStockModal.item.key, fillQty: fillQtyValue }).unwrap();
+                  const filledQty = res?.data?.fillQty ?? fillQtyValue;
+                  enqueueSnackbar(`Filled ${filledQty} ${fillStockModal.item.unit} of ${fillStockModal.item.name}`, { variant: 'success' });
+                  setFillStockModal({ open: false, item: null });
+                  setFillQtyValue(null);
+                } catch (err) {
+                  enqueueSnackbar(err?.data?.message || err?.data || 'Fill failed', { variant: 'error' });
+                }
+              }}
+            >
+              Fill Stock
+            </Button>
+          </div>
+        }
+        width={440} centered
+      >
+        {(() => {
+          const item = fillStockModal.item;
+          if (!item) return null;
+          const { fillSize, wastage, needed, bulkSrc, insufficient } = fillPreview;
+          return (
+            <>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                Packs pieces of &quot;{item.name}&quot; ({fillSize} {item.unit} each{wastage ? `, ${wastage}% wastage` : ''}) from bulk item &quot;{bulkSrc?.name || '—'}&quot; ({bulkSrc ? formatQty(bulkSrc.current) : '—'} {bulkSrc?.unit || ''} available).
+              </Text>
+              <div style={{ marginTop: 16 }}>
+                <Text strong style={{ fontSize: 13 }}>Fill Quantity (pieces)</Text>
+                <div><Text type="secondary" style={{ fontSize: 11 }}>Auto-calculated from available bulk stock — edit to fill fewer pieces.</Text></div>
+                <InputNumber style={{ width: '100%', marginTop: 6 }} min={1} value={fillQtyValue} onChange={setFillQtyValue} placeholder="e.g. 100" />
+              </div>
+              {fillQtyValue > 0 && (
+                <Alert
+                  style={{ marginTop: 12, borderRadius: 8 }}
+                  type={insufficient ? 'error' : 'info'}
+                  showIcon
+                  message={insufficient
+                    ? `Not enough bulk stock — need ${formatQty(needed)} ${bulkSrc?.unit || ''}, only ${formatQty(bulkSrc?.current)} ${bulkSrc?.unit || ''} available. Fill is blocked until enough is available.`
+                    : `Will use ${formatQty(needed)} ${bulkSrc?.unit || ''} from "${bulkSrc?.name || 'bulk item'}"`}
+                />
+              )}
+            </>
+          );
+        })()}
+      </Modal>
+
+      {/* ═══════════════════════════════════════
+          ADD STOCK DRAWER (Receive Goods) — hidden per request
+      <Drawer
+        open={receiveOpen}
+        onClose={() => { setReceiveOpen(false); setSelectedSupplier(null); setShowAddSupplier(false); receiveForm.resetFields(); supplierForm.resetFields(); }}
+        width={Math.min(520, window.innerWidth)}
+        closable={false}
+        styles={{ body: { padding: 0, background: isDark ? '#13131f' : '#f4f5f9' }, header: { display: 'none' } }}
+        footer={
+          <Button type="primary" block style={saveBtn('linear-gradient(135deg,#B11E6A,#D85C9E)')}
+            onClick={async () => {
+              try {
+                const vals = receiveForm.getFieldsValue();
+                await addStockRequest({ id: activeItem.key, qty: Number(vals.qty) || 0, vendorName: selectedSupplier?.name || '', reason: vals.comment || '' }).unwrap();
+                enqueueSnackbar(`Stock addition request for ${activeItem.name} sent for approval`, { variant: 'success' });
+                setReceiveOpen(false);
+                setSelectedSupplier(null);
+                setShowAddSupplier(false);
+                receiveForm.resetFields();
+              } catch {
+                enqueueSnackbar('Failed to submit stock request', { variant: 'error' });
+              }
+            }}
+          >
+            REQUEST APPROVAL FOR ADD STOCK
+          </Button>
+        }
+        footerStyle={{ padding: '12px 16px', background: cardBg, borderTop: `1px solid ${borderColor}` }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '14px 16px', background: cardBg, borderBottom: `1px solid ${borderColor}`, position: 'sticky', top: 0, zIndex: 10 }}>
+          <Button type="text" icon={<LeftOutlined />} onClick={() => setReceiveOpen(false)} style={{ color: '#B11E6A', padding: 0, height: 'auto' }} />
+          <div style={{ flex: 1 }}>
+            <Text style={{ fontSize: 17, fontWeight: 700, color: textColor, display: 'block', lineHeight: 1.2 }}>Add Stock</Text>
+            {activeItem && <Text style={{ fontSize: 12, color: '#aaa' }}>Receive Goods</Text>}
+          </div>
+          {activeItem && <Tag style={{ background: '#B11E6A15', color: '#B11E6A', border: '1px solid #B11E6A44', borderRadius: 20, fontWeight: 600, fontSize: 11 }}>{activeItem.code}</Tag>}
+        </div>
+
+        <div style={{ padding: '14px 12px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {activeItem && (
+            <div style={sectionCard}>
+              <div style={{ padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 12 }}>
+                <div style={{ width: 44, height: 44, borderRadius: 12, background: 'linear-gradient(135deg,#B11E6A,#D85C9E)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                  <DownloadOutlined style={{ color: '#fff', fontSize: 18 }} />
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <Text style={{ fontWeight: 700, color: textColor, display: 'block', fontSize: 14 }}>{activeItem.name}</Text>
+                  <Space size={6} style={{ flexWrap: 'wrap' }}>
+                    <Tag style={{ borderRadius: 20, fontSize: 11, background: '#B11E6A22', color: '#B11E6A', border: '1px solid #B11E6A44', margin: 0 }}>{activeItem.category}</Tag>
+                    <Text style={{ fontSize: 12, color: '#aaa' }}>Current: <strong style={{ color: activeItem.status === 'OK' ? '#B11E6A' : '#C94F8A' }}>{activeItem.current} units</strong></Text>
+                    <Text style={{ fontSize: 12, color: '#aaa' }}>Min: {activeItem.min} units</Text>
+                  </Space>
+                </div>
+              </div>
+              <div style={{ padding: '0 16px 12px' }}>
+                <Progress percent={Math.min(100, Math.round((activeItem.current / activeItem.max) * 100))} size="small" strokeColor={activeItem.status === 'OK' ? '#B11E6A' : '#C94F8A'} showInfo={false} />
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <Text style={{ fontSize: 11, color: '#aaa' }}>0</Text>
+                  <Text style={{ fontSize: 11, color: '#aaa' }}>Max: {activeItem.max} units</Text>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div style={sectionCard}>
+            <div style={sectionHeader()}>
+              <InfoCircleOutlined style={{ color: '#B11E6A' }} />
+              <Text style={{ fontWeight: 700, color: textColor, fontSize: 14 }}>Transaction Details</Text>
+            </div>
+            <div style={{ padding: '14px 16px' }}>
+              <Form form={receiveForm} layout="vertical">
+                <Row gutter={12}>
+                  <Col span={8}>
+                    <Form.Item label={<Text style={{ fontSize: 13 }}>Quantity <span style={{ color: '#ff4d4f' }}>*</span></Text>} name="qty" rules={[{ required: true, message: 'Enter quantity' }]} style={{ marginBottom: 12 }}>
+                      <Input type="number" min={0} placeholder="0" suffix={<Space size={4}><Text style={{ color: '#aaa', fontSize: 12 }}>{activeItem?.unit}</Text><CalculatorOutlined style={{ color: '#B11E6A' }} /></Space>} style={{ borderRadius: 8, height: 42 }} />
+                    </Form.Item>
+                  </Col>
+                  <Col span={8}>
+                    <Form.Item label={<Text style={{ fontSize: 13 }}>Supply Price</Text>} name="supply_price" style={{ marginBottom: 12 }}>
+                      <InputNumber prefix="₹" style={{ width: '100%', borderRadius: 8, height: 42, paddingTop: 4 }} placeholder="0.00" />
+                    </Form.Item>
+                  </Col>
+                  <Col span={8}>
+                    <Form.Item label={<Text style={{ fontSize: 13 }}>Arrival Date</Text>} name="date" style={{ marginBottom: 12 }}>
+                      <DatePicker style={{ width: '100%', borderRadius: 8, height: 42 }} />
+                    </Form.Item>
+                  </Col>
+                </Row>
+                <Form.Item label={<Text style={{ fontSize: 13 }}>Comment</Text>} name="comment" style={{ marginBottom: 12 }}>
+                  <Input.TextArea rows={2} placeholder="Optional note..." style={{ borderRadius: 8 }} />
+                </Form.Item>
+                <Row gutter={12}>
+                  <Col span={14}>
+                    <Form.Item label={<Text style={{ fontSize: 13 }}>Upload Invoice</Text>} name="invoice" valuePropName="fileList" getValueFromEvent={(e) => Array.isArray(e) ? e : e?.fileList} style={{ marginBottom: 0 }}>
+                      <Upload maxCount={1} customRequest={makeUpload('inventory/invoices')}>
+                        <Button icon={<UploadOutlined />} style={{ width: '100%', borderRadius: 8 }}>Invoice File</Button>
+                      </Upload>
+                    </Form.Item>
+                  </Col>
+                  <Col span={10}>
+                    <Form.Item label={<Text style={{ fontSize: 13 }}>Payment Status</Text>} name="is_paid" valuePropName="checked" style={{ marginBottom: 0 }}>
+                      <Switch checkedChildren="Paid" unCheckedChildren="Unpaid" defaultChecked />
+                    </Form.Item>
+                  </Col>
+                </Row>
+              </Form>
+            </div>
+          </div>
+
+          {renderEntitySelector({
+            label: 'Supplier',
+            icon: <UserOutlined style={{ color: '#B11E6A' }} />,
+            search: supplierSearch,
+            setSearch: setSupplierSearch,
+            filtered: filteredSuppliers,
+            selected: selectedSupplier,
+            setSelected: setSelectedSupplier,
+            showAdd: showAddSupplier,
+            setShowAdd: setShowAddSupplier,
+            addForm: supplierForm,
+            gradient: 'linear-gradient(135deg,#B11E6A,#D85C9E)',
+            onSave: handleSaveSupplier,
+            addFormFields: (
+              <>
+                <Row gutter={10}>
+                  <Col span={14}><Form.Item label={<Text style={{ fontSize: 13 }}>Name <span style={{ color: '#ff4d4f' }}>*</span></Text>} name="sup_name" rules={[{ required: true }]} style={{ marginBottom: 10 }}><Input placeholder="Supplier name" style={{ borderRadius: 8, height: 40 }} /></Form.Item></Col>
+                  <Col span={10}><Form.Item label={<Text style={{ fontSize: 13 }}>Phone</Text>} name="sup_phone" style={{ marginBottom: 10 }} rules={[phoneValidator(false)]}><PhoneInput placeholder="Phone number" /></Form.Item></Col>
+                </Row>
+                <Row gutter={10}>
+                  <Col span={14}><Form.Item label={<Text style={{ fontSize: 13 }}>Email</Text>} name="sup_email" style={{ marginBottom: 10 }} rules={emailRules(false)}><Input placeholder="email@example.com" style={{ borderRadius: 8, height: 40 }} /></Form.Item></Col>
+                  <Col span={10}><Form.Item label={<Text style={{ fontSize: 13 }}>Tax ID (GST/PAN)</Text>} name="sup_tax" style={{ marginBottom: 10 }}><Input placeholder="GST / PAN" style={{ borderRadius: 8, height: 40 }} /></Form.Item></Col>
+                </Row>
+                <Form.Item label={<Text style={{ fontSize: 13 }}>Address</Text>} name="sup_address" style={{ marginBottom: 10 }}><Input placeholder="City, State" style={{ borderRadius: 8, height: 40 }} /></Form.Item>
+                <VendorBankFields form={supplierForm} namePrefix="bankDetails" labelSize={13} />
+                <Form.Item label={<Text style={{ fontSize: 13 }}>Notes</Text>} name="sup_notes" style={{ marginBottom: 10 }}><Input.TextArea rows={2} placeholder="Any additional info..." style={{ borderRadius: 8 }} /></Form.Item>
+              </>
+            ),
+          })}
+        </div>
+      </Drawer>
+      ═══════════════════════════════════════ */}
+
+      {/* ═══════════════════════════════════════
+          SELL STOCK DRAWER (Issue Goods) — hidden per request
+      <Drawer
+        open={issueOpen}
+        onClose={() => { setIssueOpen(false); setSelectedVendor(null); setShowAddVendor(false); issueForm.resetFields(); vendorForm.resetFields(); }}
+        width={Math.min(520, window.innerWidth)}
+        closable={false}
+        styles={{ body: { padding: 0, background: isDark ? '#13131f' : '#f4f5f9' }, header: { display: 'none' } }}
+        footer={
+          <Button type="primary" block style={saveBtn('linear-gradient(135deg,#8a1652,#B11E6A)')}
+            onClick={async () => {
+              try {
+                const vals = issueForm.getFieldsValue();
+                await sellStockRequest({ id: activeIssueItem.key, qty: Number(vals.qty) || 0, vendorName: selectedVendor?.name || '', reason: vals.comment || '' }).unwrap();
+                enqueueSnackbar(`Stock deduction request for ${activeIssueItem.name} sent for approval`, { variant: 'success' });
+                setIssueOpen(false);
+                setSelectedVendor(null);
+                setShowAddVendor(false);
+                issueForm.resetFields();
+              } catch {
+                enqueueSnackbar('Failed to submit stock request', { variant: 'error' });
+              }
+            }}
+          >
+            REQUEST APPROVAL FOR SELL STOCK
+          </Button>
+        }
+        footerStyle={{ padding: '12px 16px', background: cardBg, borderTop: `1px solid ${borderColor}` }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '14px 16px', background: cardBg, borderBottom: `1px solid ${borderColor}`, position: 'sticky', top: 0, zIndex: 10 }}>
+          <Button type="text" icon={<LeftOutlined />} onClick={() => setIssueOpen(false)} style={{ color: '#8a1652', padding: 0, height: 'auto' }} />
+          <div style={{ flex: 1 }}>
+            <Text style={{ fontSize: 17, fontWeight: 700, color: textColor, display: 'block', lineHeight: 1.2 }}>Sell Stock</Text>
+            {activeIssueItem && <Text style={{ fontSize: 12, color: '#aaa' }}>Issue Goods</Text>}
+          </div>
+          {activeIssueItem && <Tag style={{ background: '#8a165215', color: '#8a1652', border: '1px solid #8a165244', borderRadius: 20, fontWeight: 600, fontSize: 11 }}>{activeIssueItem.code}</Tag>}
+        </div>
+
+        <div style={{ padding: '14px 12px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {activeIssueItem && (
+            <div style={sectionCard}>
+              <div style={{ padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 12 }}>
+                <div style={{ width: 44, height: 44, borderRadius: 12, background: 'linear-gradient(135deg,#8a1652,#B11E6A)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                  <ShoppingOutlined style={{ color: '#fff', fontSize: 18 }} />
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <Text style={{ fontWeight: 700, color: textColor, display: 'block', fontSize: 14 }}>{activeIssueItem.name}</Text>
+                  <Space size={6} style={{ flexWrap: 'wrap' }}>
+                    <Tag style={{ borderRadius: 20, fontSize: 11, background: '#8a165222', color: '#8a1652', border: '1px solid #8a165244', margin: 0 }}>{activeIssueItem.category}</Tag>
+                    <Text style={{ fontSize: 12, color: '#aaa' }}>Available: <strong style={{ color: activeIssueItem.current === 0 ? '#ff4d4f' : '#8a1652' }}>{activeIssueItem.current} units</strong></Text>
+                    <Text style={{ fontSize: 12, color: '#aaa' }}>Price: {activeIssueItem.price}</Text>
+                  </Space>
+                </div>
+              </div>
+              <div style={{ padding: '0 16px 12px' }}>
+                <Progress percent={Math.min(100, Math.round((activeIssueItem.current / activeIssueItem.max) * 100))} size="small" strokeColor={activeIssueItem.status === 'OK' ? '#8a1652' : '#C94F8A'} showInfo={false} />
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <Text style={{ fontSize: 11, color: '#aaa' }}>0</Text>
+                  <Text style={{ fontSize: 11, color: '#aaa' }}>Max: {activeIssueItem.max} units</Text>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div style={sectionCard}>
+            <div style={sectionHeader()}>
+              <InfoCircleOutlined style={{ color: '#8a1652' }} />
+              <Text style={{ fontWeight: 700, color: textColor, fontSize: 14 }}>Transaction Details</Text>
+            </div>
+            <div style={{ padding: '14px 16px' }}>
+              <Form form={issueForm} layout="vertical">
+                <Row gutter={12}>
+                  <Col span={8}>
+                    <Form.Item label={<Text style={{ fontSize: 13 }}>Quantity <span style={{ color: '#ff4d4f' }}>*</span></Text>} name="qty" rules={[{ required: true, message: 'Enter quantity' }]} style={{ marginBottom: 12 }}>
+                      <Input type="number" min={0} placeholder="0" suffix={<Space size={4}><Text style={{ color: '#aaa', fontSize: 12 }}>{activeIssueItem?.unit}</Text><CalculatorOutlined style={{ color: '#8a1652' }} /></Space>} style={{ borderRadius: 8, height: 42 }} />
+                    </Form.Item>
+                  </Col>
+                  <Col span={8}>
+                    <Form.Item label={<Text style={{ fontSize: 13 }}>Sell Price</Text>} name="sell_price" style={{ marginBottom: 12 }}>
+                      <InputNumber prefix="₹" style={{ width: '100%', borderRadius: 8, height: 42, paddingTop: 4 }} placeholder="0.00" />
+                    </Form.Item>
+                  </Col>
+                  <Col span={8}>
+                    <Form.Item label={<Text style={{ fontSize: 13 }}>Departure Date</Text>} name="date" style={{ marginBottom: 12 }}>
+                      <DatePicker style={{ width: '100%', borderRadius: 8, height: 42 }} />
+                    </Form.Item>
+                  </Col>
+                </Row>
+                <Form.Item label={<Text style={{ fontSize: 13 }}>Comment</Text>} name="comment" style={{ marginBottom: 0 }}>
+                  <Input.TextArea rows={2} placeholder="Optional note..." style={{ borderRadius: 8 }} />
+                </Form.Item>
+              </Form>
+            </div>
+          </div>
+
+          {renderEntitySelector({
+            label: 'Vendor',
+            icon: <UserOutlined style={{ color: '#8a1652' }} />,
+            search: vendorSearch,
+            setSearch: setVendorSearch,
+            filtered: filteredVendors,
+            selected: selectedVendor,
+            setSelected: setSelectedVendor,
+            showAdd: showAddVendor,
+            setShowAdd: setShowAddVendor,
+            addForm: vendorForm,
+            gradient: 'linear-gradient(135deg,#8a1652,#B11E6A)',
+            onSave: handleSaveVendor,
+            addFormFields: (
+              <>
+                <Row gutter={10}>
+                  <Col span={14}><Form.Item label={<Text style={{ fontSize: 13 }}>Name <span style={{ color: '#ff4d4f' }}>*</span></Text>} name="cust_name" rules={[{ required: true }]} style={{ marginBottom: 10 }}><Input placeholder="Vendor name" style={{ borderRadius: 8, height: 40 }} /></Form.Item></Col>
+                  <Col span={10}><Form.Item label={<Text style={{ fontSize: 13 }}>Phone</Text>} name="cust_phone" style={{ marginBottom: 10 }} rules={[phoneValidator(false)]}><PhoneInput placeholder="Phone number" /></Form.Item></Col>
+                </Row>
+                <Row gutter={10}>
+                  <Col span={14}><Form.Item label={<Text style={{ fontSize: 13 }}>Email</Text>} name="cust_email" style={{ marginBottom: 10 }} rules={emailRules(false)}><Input placeholder="email@example.com" style={{ borderRadius: 8, height: 40 }} /></Form.Item></Col>
+                  <Col span={10}><Form.Item label={<Text style={{ fontSize: 13 }}>Tax ID (GST/PAN)</Text>} name="cust_tax" style={{ marginBottom: 10 }}><Input placeholder="GST / PAN" style={{ borderRadius: 8, height: 40 }} /></Form.Item></Col>
+                </Row>
+                <Form.Item label={<Text style={{ fontSize: 13 }}>Address</Text>} name="cust_address" style={{ marginBottom: 10 }}><Input placeholder="City, State" style={{ borderRadius: 8, height: 40 }} /></Form.Item>
+                <VendorBankFields form={vendorForm} namePrefix="bankDetails" labelSize={13} />
+                <Form.Item label={<Text style={{ fontSize: 13 }}>Notes</Text>} name="cust_notes" style={{ marginBottom: 10 }}><Input.TextArea rows={2} placeholder="Any additional info..." style={{ borderRadius: 8 }} /></Form.Item>
+              </>
+            ),
+          })}
+        </div>
+      </Drawer>
+      */}
+
+    </div>
+  );
+}
